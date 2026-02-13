@@ -1,0 +1,11 @@
+# Jakal MVP - Rainbow Six Siege Stats Analyzer
+# No external dependencies required - uses Python standard library only
+
+# Python 3.7+ required for:
+# - Type hints (typing module)
+# - f-strings
+# - Dictionary ordering guarantees
+
+# For development/testing (optional):
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
