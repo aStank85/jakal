@@ -1,17 +1,6 @@
 # src/comparator.py
 
-from typing import List, Dict, Any
-
-PER_HOUR_METRIC_KEYS = {
-    'wins_per_hour',
-    'kills_per_hour',
-    'deaths_per_hour',
-    'assists_per_hour',
-    'wcontrib_per_hour',
-    'clutch_attempts_per_hour',
-    'clutch_wins_per_hour',
-    'tk_per_hour',
-}
+from typing import List, Dict, Any, Optional
 
 class PlayerComparator:
     """Compare multiple players."""
@@ -30,14 +19,17 @@ class PlayerComparator:
         """
         # Stats to compare
         compare_stats = [
+            ('rounds_played', 'Rounds Played', 'contextual'),
             ('kd', 'K/D', 'higher'),
             ('match_win_pct', 'Win %', 'higher'),
             ('hs_pct', 'HS %', 'higher'),
             ('kills_per_round', 'Kills/Round', 'higher'),
             ('assists_per_round', 'Assists/Round', 'higher'),
-            ('first_bloods', 'First Bloods', 'higher'),
+            ('first_blood_rate', 'First Blood Rate', 'higher'),
             ('entry_efficiency', 'Entry Efficiency', 'higher'),
             ('clutch_1v1_success', '1v1 Clutch %', 'higher'),
+            ('overall_clutch_success', 'Overall Clutch %', 'higher'),
+            ('impact_rating', 'Impact Rating', 'higher'),
             ('teamplay_index', 'Teamplay Index', 'higher'),
             ('aggression_score', 'Aggression', 'contextual'),
         ]
@@ -64,30 +56,11 @@ class PlayerComparator:
             }
             
             for snapshot, metrics in zip(snapshots, metrics_list):
-                # Get value from snapshot or metrics
-                if stat_key in snapshot:
-                    value = snapshot[stat_key]
-                else:
-                    value = metrics.get(stat_key, 0)
-                
-                if stat_key in PER_HOUR_METRIC_KEYS and metrics.get('time_played_unreliable', False):
-                    value = None
-
+                value = self._get_compare_value(stat_key, snapshot, metrics)
                 stat_comparison['values'].append(value)
             
-            # Determine winner. Any suppressed value (None) makes this metric no-contest.
-            if any(value is None for value in stat_comparison['values']):
-                winner_idx = None
-            elif better_when == 'higher':
-                max_value = max(stat_comparison['values'])
-                winner_indices = [idx for idx, value in enumerate(stat_comparison['values']) if value == max_value]
-                winner_idx = winner_indices[0] if len(winner_indices) == 1 else None
-            elif better_when == 'lower':
-                min_value = min(stat_comparison['values'])
-                winner_indices = [idx for idx, value in enumerate(stat_comparison['values']) if value == min_value]
-                winner_idx = winner_indices[0] if len(winner_indices) == 1 else None
-            else:
-                winner_idx = None  # Contextual, no clear winner
+            # Determine winner
+            winner_idx = self._determine_winner(stat_comparison['values'], better_when)
             
             stat_comparison['winner_index'] = winner_idx
             comparison['stats'].append(stat_comparison)
@@ -101,5 +74,49 @@ class PlayerComparator:
         
         return comparison
 
+    def _get_compare_value(self, stat_key: str, snapshot: Dict[str, Any], metrics: Dict[str, Any]) -> Optional[float]:
+        """Resolve comparison value from snapshot/metrics with inline derived support."""
+        if stat_key == 'first_blood_rate':
+            rounds = self._to_float(snapshot.get('rounds_played'))
+            if rounds <= 0:
+                return 0.0
+            first_bloods = self._to_float(snapshot.get('first_bloods'))
+            return first_bloods / rounds
 
+        if stat_key in snapshot:
+            return snapshot.get(stat_key)
 
+        return metrics.get(stat_key)
+
+    def _determine_winner(self, values: List[Optional[float]], better_when: str) -> Optional[int]:
+        """None-safe and tie-safe winner selection."""
+        if better_when == 'contextual':
+            return None
+
+        numeric_values: List[tuple[int, float]] = []
+        for idx, value in enumerate(values):
+            if value is None:
+                continue
+            numeric_values.append((idx, self._to_float(value)))
+
+        if len(numeric_values) < 2:
+            return None
+
+        if better_when == 'lower':
+            best_value = min(v for _, v in numeric_values)
+        else:
+            best_value = max(v for _, v in numeric_values)
+
+        winners = [idx for idx, v in numeric_values if v == best_value]
+        if len(winners) != 1:
+            return None
+        return winners[0]
+
+    @staticmethod
+    def _to_float(value: Any) -> float:
+        try:
+            if value is None:
+                return 0.0
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0

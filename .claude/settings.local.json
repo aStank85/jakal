@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -m pytest tests/test_database.py::TestDatabase::test_add_stats_snapshot -v)",
-      "Bash(python -c:*)"
-    ]
-  }
-}

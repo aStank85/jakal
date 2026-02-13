@@ -6,6 +6,9 @@ from src.calculator import MetricsCalculator
 from src.comparator import PlayerComparator
 from src.analyzer import InsightAnalyzer
 from src.ui import TerminalUI
+from src.stack_manager import StackManager
+from src.team_analyzer import TeamAnalyzer
+from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 
 
@@ -18,6 +21,9 @@ def main():
     comparator = PlayerComparator()
     analyzer = InsightAnalyzer()
     ui = TerminalUI()
+    stack_manager = StackManager(db)
+    team_analyzer = TeamAnalyzer(db)
+    matchup_analyzer = MatchupAnalyzer(db)
 
     try:
         while True:
@@ -157,6 +163,128 @@ def main():
                     ui.show_error(str(e))
 
             elif choice == '5':
+                # Stack Management
+                try:
+                    while True:
+                        stack_choice = ui.show_stack_menu()
+
+                        if stack_choice == '1':
+                            name = ui.get_stack_name()
+                            if not name:
+                                ui.show_error("Stack name cannot be empty")
+                                continue
+                            description = ui.get_stack_description()
+                            stack_id = stack_manager.create_stack(name, description)
+                            ui.show_success(f"Created stack '{name}' (ID: {stack_id})")
+
+                        elif stack_choice == '2':
+                            stacks = stack_manager.get_all_stacks()
+                            ui.show_all_stacks(stacks)
+
+                        elif stack_choice == '3':
+                            stacks = stack_manager.get_all_stacks()
+                            stack_id = ui.select_stack(stacks)
+                            if stack_id == -1:
+                                continue
+
+                            all_players = db.get_all_players()
+                            if not all_players:
+                                ui.show_error("No players in database yet")
+                                continue
+
+                            username = ui.select_player(all_players)
+                            if not username:
+                                ui.show_error("Invalid player selection")
+                                continue
+
+                            role_override = input("Role override (optional): ").strip() or None
+                            stack_manager.add_player_to_stack(stack_id, username, role_override)
+                            ui.show_success(f"Added {username} to stack")
+
+                        elif stack_choice == '4':
+                            stacks = stack_manager.get_all_stacks()
+                            stack_id = ui.select_stack(stacks)
+                            if stack_id == -1:
+                                continue
+
+                            members = stack_manager.get_stack_members(stack_id)
+                            if not members:
+                                ui.show_error("Stack has no members")
+                                continue
+
+                            username = ui.select_player(members)
+                            if not username:
+                                ui.show_error("Invalid player selection")
+                                continue
+
+                            stack_manager.remove_player_from_stack(stack_id, username)
+                            ui.show_success(f"Removed {username} from stack")
+
+                        elif stack_choice == '5':
+                            tag = input("Enter tag (default teammate): ").strip() or 'teammate'
+                            stack_id = stack_manager.build_tagged_stack(tag)
+                            ui.show_success(f"Built tagged stack (ID: {stack_id})")
+
+                        elif stack_choice == '6':
+                            all_players = db.get_all_players()
+                            if len(all_players) < 2:
+                                ui.show_error("Need at least 2 players to create a quick stack")
+                                continue
+
+                            selected = ui.select_players_for_stack(all_players)
+                            if len(selected) < 2:
+                                ui.show_error("Select at least 2 players")
+                                continue
+
+                            stack_id = stack_manager.create_quick_stack(selected)
+                            ui.show_success(f"Created quick stack (ID: {stack_id})")
+
+                        elif stack_choice == '7':
+                            stacks = stack_manager.get_all_stacks()
+                            stack_id = ui.select_stack(stacks)
+                            if stack_id == -1:
+                                continue
+                            stack_manager.delete_stack(stack_id)
+                            ui.show_success("Stack deleted")
+
+                        elif stack_choice == '8':
+                            break
+
+                        else:
+                            ui.show_error("Invalid option")
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice == '6':
+                # Analyze Stack
+                try:
+                    stacks = stack_manager.get_all_stacks()
+                    stack_id = ui.select_stack(stacks)
+                    if stack_id == -1:
+                        continue
+
+                    analysis = team_analyzer.analyze_stack(stack_id)
+                    ui.show_team_analysis(analysis)
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice == '7':
+                # 5v5 Matchup Analysis
+                try:
+                    stacks = stack_manager.get_all_stacks()
+                    stack_a_id, stack_b_id = ui.select_two_stacks(stacks)
+                    if stack_a_id == -1 or stack_b_id == -1:
+                        continue
+
+                    matchup = matchup_analyzer.analyze_matchup(stack_a_id, stack_b_id)
+                    ui.show_matchup_analysis(matchup)
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice == '8':
                 # Exit
                 print("\nGoodbye!")
                 break

@@ -1,48 +1,45 @@
 # src/ui.py
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import sys
-import re
-from datetime import datetime
-
-from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 
 
 class TerminalUI:
     """Simple terminal-based UI."""
 
     @staticmethod
-    def _format_metric(value: Any, decimals: int = 2, suppressed: bool = False) -> str:
-        if suppressed or value is None:
-            return 'N/A'
-        if isinstance(value, float):
-            return f'{value:.{decimals}f}'
-        return str(value)
+    def _player_username(player: Any) -> str:
+        """Normalize player object to a display/selection username."""
+        if isinstance(player, dict):
+            return str(player.get('username', ''))
+        return str(player)
 
     def show_menu(self) -> str:
-        """Show main menu and get validated user choice."""
-        print("\n" + "="*50)
+        """Show main menu and get user choice."""
+        print("\n" + "=" * 50)
         print("JAKAL - R6 Stats Analyzer")
-        print("="*50)
+        print("=" * 50)
         print("1. Add new stats snapshot")
         print("2. View all players")
         print("3. Compare players")
         print("4. View player details")
-        print("5. Exit")
-        print("="*50)
+        print("-" * 30)
+        print("5. Stack Management")
+        print("6. Analyze Stack")
+        print("7. 5v5 Matchup Analysis")
+        print("-" * 30)
+        print("8. Exit")
+        print("=" * 50)
 
-        while True:
-            choice = input("Choose an option (1-5): ").strip()
-            if choice in ['1', '2', '3', '4', '5']:
-                return choice
-            print("Error: Please enter a number between 1 and 5")
+        choice = input("Choose an option (1-8): ").strip()
+        return choice
 
     def get_paste_input(self) -> str:
         """Get pasted stats from user."""
-        print("\n" + "-"*50)
+        print("\n" + "-" * 50)
         print("Paste your R6 Tracker stats below.")
         print("When done, type 'END' on a new line and press Enter.")
-        print("-"*50)
+        print("-" * 50)
 
         lines = []
         while True:
@@ -54,126 +51,65 @@ class TerminalUI:
         return '\n'.join(lines)
 
     def get_metadata(self) -> Dict[str, str]:
-        """Get player metadata with validation."""
-        print("\n" + "-"*50)
-        now = datetime.now()
-        date = now.strftime("%Y-%m-%d")
-        time = now.strftime("%H:%M:%S")
+        """Get player metadata."""
+        print("\n" + "-" * 50)
+        username = input("Enter player username: ").strip()
+        date = input("Enter date (YYYY-MM-DD) or press Enter for today: ").strip()
+        time = input("Enter time (HH:MM) or press Enter to skip: ").strip()
+        season = input("Enter season (e.g., Y10S4) or press Enter for default: ").strip()
+        device_tag = input("Enter device tag (pc/xbox/playstation) or press Enter for pc: ").strip().lower()
 
-        # Username validation
-        while True:
-            username = input("Enter player username: ").strip()
-            if username and len(username) >= 2:
-                break
-            print("Error: Username must be at least 2 characters long")
+        if not date:
+            from datetime import datetime
+            date = datetime.now().strftime("%Y-%m-%d")
 
-        # Device tag validation
-        device_aliases = {
-            'pc': 'pc',
-            'xbox': 'xbox',
-            'xb': 'xbox',
-            'playstation': 'playstation',
-            'ps': 'playstation',
-            'psn': 'playstation'
-        }
-        while True:
-            device_input = input(
-                "Enter device tag [pc/xbox/playstation] (default: pc): "
-            ).strip().lower()
-            if not device_input:
-                device_tag = 'pc'
-                break
-            if device_input in device_aliases:
-                device_tag = device_aliases[device_input]
-                break
-            print("Error: Device must be one of: pc, xbox, playstation")
+        if not season:
+            season = "Y10S4"
 
-        print(f"Snapshot timestamp auto-set: {date} {time}")
-
-        # Season validation
-        while True:
-            season = input("Enter season (e.g., Y10S4) or press Enter for default: ").strip()
-            if not season:
-                season = "Y10S4"
-                break
-
-            # Validate season format (e.g., Y10S4)
-            if re.match(r'^Y\d{1,2}S\d{1}$', season):
-                break
-            else:
-                print("Error: Invalid season format. Use format like Y10S4")
+        if device_tag not in ("pc", "xbox", "playstation"):
+            device_tag = "pc"
 
         return {
             'username': username,
-            'device_tag': device_tag,
             'date': date,
-            'time': time,
-            'season': season
+            'time': time if time else None,
+            'season': season,
+            'device_tag': device_tag
         }
 
-    def show_players(self, players: List[Dict]):
+    def show_players(self, players: List[Any]):
         """Display list of players."""
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("Players in Database:")
-        print("="*50)
+        print("=" * 50)
         for i, player in enumerate(players, 1):
-            username = player['username']
-            tag = player.get('tag', 'untagged')
-            device_tag = player.get('device_tag', 'pc')
-            print(f"{i}. {username} [{device_tag}] [{tag}]")
-        print("="*50)
+            print(f"{i}. {self._player_username(player)}")
+        print("=" * 50)
 
-    def select_players_for_comparison(self, all_players: List[Dict]) -> List[str]:
-        """Let user select players to compare with validation."""
-        print("\n" + "-"*50)
+    def select_players_for_comparison(self, all_players: List[Any]) -> List[str]:
+        """Let user select players to compare."""
+        print("\n" + "-" * 50)
         print("Select players to compare (enter numbers separated by commas)")
         print("Example: 1,3,5")
-        print("-"*50)
+        print("-" * 50)
 
         self.show_players(all_players)
 
-        while True:
-            selection = input("\nYour selection: ").strip()
+        selection = input("\nYour selection: ").strip()
+        indices = [int(x.strip()) - 1 for x in selection.split(',')]
 
-            # Validate format (numbers and commas)
-            if not re.match(r'^[\d,\s]+$', selection):
-                print("Error: Please enter numbers separated by commas (e.g., 1,3,5)")
-                continue
-
-            try:
-                # Parse indices
-                indices = [int(x.strip()) - 1 for x in selection.split(',') if x.strip()]
-
-                # Validate all indices are in range
-                invalid_indices = [i+1 for i in indices if i < 0 or i >= len(all_players)]
-                if invalid_indices:
-                    print(f"Error: Invalid player number(s): {', '.join(map(str, invalid_indices))}")
-                    print(f"Please select numbers between 1 and {len(all_players)}")
-                    continue
-
-                # Check for duplicates
-                if len(indices) != len(set(indices)):
-                    print("Error: You selected the same player multiple times")
-                    continue
-
-                # Check minimum selection
-                if len(indices) < 2:
-                    print("Error: Please select at least 2 players to compare")
-                    continue
-
-                # All validations passed - return usernames
-                selected = [all_players[i]['username'] for i in indices]
-                return selected
-
-            except ValueError:
-                print("Error: Invalid input. Please enter numbers separated by commas (e.g., 1,3,5)")
-                continue
+        selected = [
+            self._player_username(all_players[i])
+            for i in indices
+            if 0 <= i < len(all_players)
+        ]
+        return selected
 
     def show_comparison(self, comparison: Dict[str, Any]):
         """Display comparison results."""
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("PLAYER COMPARISON")
-        print("="*50)
+        print("=" * 50)
 
         # Player header
         print("\nPlayers:")
@@ -181,20 +117,22 @@ class TerminalUI:
             role = player['primary_role']
             print(f"  {i+1}. {player['username']} ({role}) - {player['snapshot_date']}")
 
-        print("\n" + "-"*50)
+        print("\n" + "-" * 50)
         print(f"{'Stat':<25} ", end='')
         for i in range(len(comparison['players'])):
             print(f"{'P'+str(i+1):<12}", end='')
         print("Winner")
-        print("-"*50)
+        print("-" * 50)
 
         # Stats comparison
         for stat in comparison['stats']:
             print(f"{stat['name']:<25} ", end='')
 
             for value in stat['values']:
-                formatted = self._format_metric(value)
-                print(f"{formatted:<12}", end='')
+                if isinstance(value, float):
+                    print(f"{value:<12.2f}", end='')
+                else:
+                    print(f"{value:<12}", end='')
 
             if stat['winner_index'] is not None:
                 winner_num = stat['winner_index'] + 1
@@ -202,165 +140,339 @@ class TerminalUI:
             else:
                 print("-")
 
-        print("-"*50)
+        print("-" * 50)
         print("\nOverall Advantages:")
         for i, count in comparison['winners'].items():
             username = comparison['players'][i]['username']
             print(f"  {username}: {count} stats")
 
-        print("="*50)
+        print("=" * 50)
+
+    # --- Stack Management UI ---
+
+    def show_stack_menu(self) -> str:
+        """Show stack management submenu."""
+        print("\n" + "=" * 50)
+        print("STACK MANAGEMENT")
+        print("=" * 50)
+        print("1. Create named stack")
+        print("2. View all stacks")
+        print("3. Add player to stack")
+        print("4. Remove player from stack")
+        print("5. Build stack from tags (auto)")
+        print("6. Quick stack (temporary)")
+        print("7. Delete stack")
+        print("8. Back")
+        print("=" * 50)
+
+        choice = input("Choose an option (1-8): ").strip()
+        return choice
+
+    def get_stack_name(self) -> str:
+        """Prompt user for a stack name."""
+        return input("Enter stack name: ").strip()
+
+    def get_stack_description(self) -> str:
+        """Prompt user for a stack description."""
+        desc = input("Enter description (or press Enter to skip): ").strip()
+        return desc if desc else None
+
+    def select_stack(self, stacks: List[Dict]) -> int:
+        """Let user select a stack from a list. Returns stack_id."""
+        if not stacks:
+            print("\nNo stacks found.")
+            return -1
+
+        print("\n" + "-" * 50)
+        print("Available Stacks:")
+        print("-" * 50)
+        for i, stack in enumerate(stacks, 1):
+            stype = f"[{stack['stack_type']}]" if stack['stack_type'] != 'named' else ''
+            print(f"  {i}. {stack['stack_name']} {stype}")
+        print("-" * 50)
+
+        selection = input("Select stack (number): ").strip()
+        try:
+            idx = int(selection) - 1
+            if 0 <= idx < len(stacks):
+                return stacks[idx]['stack_id']
+        except ValueError:
+            pass
+
+        print("Invalid selection.")
+        return -1
+
+    def select_players_for_stack(self, all_players: List[Any]) -> List[str]:
+        """Let user select multiple players for a quick stack."""
+        print("\n" + "-" * 50)
+        print("Select players (enter numbers separated by commas)")
+        print("Example: 1,2,3,4,5")
+        print("-" * 50)
+
+        self.show_players(all_players)
+
+        selection = input("\nYour selection: ").strip()
+        indices = [int(x.strip()) - 1 for x in selection.split(',')]
+        return [
+            self._player_username(all_players[i])
+            for i in indices
+            if 0 <= i < len(all_players)
+        ]
+
+    def select_player(self, all_players: List[Any]) -> str:
+        """Let user select a single player. Returns username."""
+        self.show_players(all_players)
+        selection = input("\nSelect player (number): ").strip()
+        try:
+            idx = int(selection) - 1
+            if 0 <= idx < len(all_players):
+                return self._player_username(all_players[idx])
+        except ValueError:
+            pass
+        return ""
+
+    def show_stack_details(self, stack: Dict, members: List[Dict]) -> None:
+        """Display stack info and its members."""
+        print("\n" + "=" * 50)
+        print(f"STACK: {stack['stack_name']}")
+        if stack.get('description'):
+            print(f"  {stack['description']}")
+        print(f"  Type: {stack['stack_type']}  |  Members: {len(members)}")
+        print("=" * 50)
+
+        if members:
+            print(f"  {'#':<4}{'Player':<20}{'Role Override':<15}")
+            print("  " + "-" * 40)
+            for i, m in enumerate(members, 1):
+                role = m.get('role_override') or '-'
+                print(f"  {i:<4}{m['username']:<20}{role:<15}")
+        else:
+            print("  (No members)")
+        print("=" * 50)
+
+    def show_all_stacks(self, stacks: List[Dict]) -> None:
+        """Display all stacks."""
+        print("\n" + "=" * 50)
+        print("ALL STACKS")
+        print("=" * 50)
+
+        if not stacks:
+            print("  No stacks created yet.")
+        else:
+            print(f"  {'#':<4}{'Name':<25}{'Type':<10}{'Created':<15}")
+            print("  " + "-" * 55)
+            for i, s in enumerate(stacks, 1):
+                created = s.get('created_at', '')[:10]
+                print(f"  {i:<4}{s['stack_name']:<25}{s['stack_type']:<10}{created:<15}")
+
+        print("=" * 50)
+
+    def show_team_analysis(self, analysis: Dict) -> None:
+        """Display full team analysis."""
+        stack = analysis['stack']
+        members = analysis['members']
+
+        print("\n" + "=" * 50)
+        print(f"STACK ANALYSIS: {stack['stack_name']}")
+        print("=" * 50)
+
+        # Roster table
+        print("\nROSTER")
+        print("-" * 50)
+        print(f"{'Player':<14}{'Role':<14}{'K/D':<7}{'Win%':<7}")
+        print("-" * 50)
+        for m in members:
+            kd = m['snapshot'].get('kd', 0) or 0
+            win = m['snapshot'].get('match_win_pct', 0) or 0
+            print(f"{m['username']:<14}{m['role']:<14}{kd:<7.2f}{win:<7.1f}%")
+        print("-" * 50)
+        print(f"{'TEAM AVG':<28}{analysis['team_avg_kd']:<7.2f}{analysis['team_avg_win_pct']:<7.1f}%")
+
+        # Composition
+        print(f"\nCOMPOSITION SCORE: {analysis['composition_score']:.0f}/100")
+        print("\nROLE COVERAGE")
+        all_roles = ['Fragger', 'Entry', 'Support', 'Anchor', 'Clutch', 'Carry']
+        for role in all_roles:
+            if role in analysis['roles_covered']:
+                print(f"  [x] {role}")
+            else:
+                print(f"  [ ] {role}")
+
+        # Strengths
+        if analysis['team_strengths']:
+            print("\nTEAM STRENGTHS")
+            for s in analysis['team_strengths']:
+                print(f"  + {s}")
+
+        # Weaknesses
+        if analysis['team_weaknesses']:
+            print("\nTEAM WEAKNESSES")
+            for w in analysis['team_weaknesses']:
+                print(f"  ! {w}")
+
+        # Data quality warnings
+        if analysis.get('data_quality_warnings'):
+            print("\nDATA QUALITY WARNINGS")
+            for warning in analysis['data_quality_warnings']:
+                print(f"  ! {warning['message']}")
+
+        # Insights
+        if analysis['team_insights']:
+            print("\nINSIGHTS")
+            print("-" * 50)
+            for insight in analysis['team_insights']:
+                sev = '+' if insight['severity'] == 'positive' else '!'
+                cat = insight['category'].upper()
+                print(f"  {sev} [{cat}] {insight['message']}")
+                print(f"       -> {insight['action']}")
+                print()
+
+        print("=" * 50)
+
+    def show_matchup_analysis(self, matchup: Dict) -> None:
+        """Display full 5v5 matchup analysis."""
+        print("\n" + "=" * 50)
+        print("5v5 MATCHUP ANALYSIS")
+        print("=" * 50)
+
+        name_a = matchup['stack_a']['stack_name']
+        name_b = matchup['stack_b']['stack_name']
+        print(f"\n{'YOUR STACK':<20}  VS  {'OPPONENT STACK'}")
+        print(f"{name_a:<20}       {name_b}")
+
+        # Category breakdown
+        print("\nCATEGORY BREAKDOWN")
+        print("-" * 50)
+        print(f"{'Category':<17}{'You':<9}{'Them':<9}{'Edge'}")
+        print("-" * 50)
+
+        a_wins = 0
+        b_wins = 0
+        for cat_key, comp in matchup['category_comparisons'].items():
+            label = comp['category']
+            val_a = comp['value_a']
+            val_b = comp['value_b']
+            winner = comp['winner']
+
+            if winner == 'A':
+                edge = "YOURS  +"
+                a_wins += 1
+            elif winner == 'B':
+                edge = "THEIRS !"
+                b_wins += 1
+            else:
+                edge = "EVEN"
+
+            # Format values based on category
+            if cat_key in ('hs_pct', 'win_rate'):
+                va_str = f"{val_a*100:.1f}%"
+                vb_str = f"{val_b*100:.1f}%"
+            else:
+                va_str = f"{val_a:.2f}"
+                vb_str = f"{val_b:.2f}"
+
+            print(f"{label:<17}{va_str:<9}{vb_str:<9}{edge}")
+
+        print("-" * 50)
+        print(f"{'ADVANTAGES':<17}{a_wins:<9}{b_wins:<9}", end='')
+        if a_wins > b_wins:
+            print("YOURS")
+        elif b_wins > a_wins:
+            print("THEIRS")
+        else:
+            print("EVEN")
+
+        # Role matchups
+        self.show_role_matchups(matchup['role_matchups'])
+
+        # Prediction
+        pred = matchup['predicted_winner']
+        conf = matchup['confidence']
+        if pred == 'A':
+            print(f"\nPREDICTION: YOUR STACK ({conf:.0f}% confidence)")
+        elif pred == 'B':
+            print(f"\nPREDICTION: OPPONENT STACK ({conf:.0f}% confidence)")
+        else:
+            print(f"\nPREDICTION: TOO CLOSE TO CALL ({conf:.0f}%)")
+
+        # Key battlegrounds
+        if matchup['key_battlegrounds']:
+            print("\nKEY BATTLEGROUNDS")
+            for bg in matchup['key_battlegrounds']:
+                print(f"  > {bg}")
+
+        # Recommendations
+        if matchup['recommendations']:
+            print("\nSTRATEGIC RECOMMENDATIONS")
+            for rec in matchup['recommendations']:
+                print(f"  -> {rec}")
+
+        print("\n" + "=" * 50)
+
+    def show_role_matchups(self, matchups: List[Dict]) -> None:
+        """Display role-by-role matchup table."""
+        if not matchups:
+            return
+
+        print("\nROLE MATCHUPS")
+        print("-" * 50)
+        print(f"{'Role':<12}{'You':<13}{'Them':<13}{'Edge'}")
+        print("-" * 50)
+        for rm in matchups:
+            adv = rm['advantage'].upper()
+            if adv == 'YOURS':
+                edge = "YOURS  +"
+            elif adv == 'THEIRS':
+                edge = "THEIRS !"
+            else:
+                edge = "EVEN"
+            print(f"{rm['role']:<12}{rm['your_player']:<13}{rm['their_player']:<13}{edge}")
+        print("-" * 50)
+
+    def show_team_insights(self, insights: List[Dict]) -> None:
+        """Display team insights standalone."""
+        if not insights:
+            print("\nNo insights generated.")
+            return
+
+        print("\n" + "=" * 50)
+        print("TEAM INSIGHTS")
+        print("=" * 50)
+        for insight in insights:
+            sev = '+' if insight['severity'] == 'positive' else '!'
+            cat = insight['category'].upper()
+            print(f"  {sev} [{cat}] {insight['message']}")
+            print(f"       -> {insight['action']}")
+            print()
+        print("=" * 50)
+
+    def select_two_stacks(self, stacks: List[Dict]) -> Tuple[int, int]:
+        """Let user select two stacks for matchup analysis."""
+        if len(stacks) < 2:
+            print("\nNeed at least 2 stacks for matchup analysis.")
+            return (-1, -1)
+
+        print("\n" + "-" * 50)
+        print("Select YOUR stack:")
+        stack_a_id = self.select_stack(stacks)
+        if stack_a_id == -1:
+            return (-1, -1)
+
+        print("\nSelect OPPONENT stack:")
+        stack_b_id = self.select_stack(stacks)
+        if stack_b_id == -1:
+            return (-1, -1)
+
+        if stack_a_id == stack_b_id:
+            print("Cannot compare a stack with itself.")
+            return (-1, -1)
+
+        return (stack_a_id, stack_b_id)
 
     def show_error(self, message: str):
         """Display error message."""
-        print(f"\nERROR: {message}\n")
+        print(f"\n! ERROR: {message}\n")
 
     def show_success(self, message: str):
         """Display success message."""
-        print(f"\n{message}\n")
-
-    def show_player_details(
-        self,
-        snapshot: Dict[str, Any],
-        metrics: Dict[str, Any],
-        insights: List[Dict[str, str]] = None
-    ):
-        """Display detailed player stats and metrics."""
-        print("\n" + "="*50)
-        print(f"PLAYER DETAILS: {snapshot['username']}")
-        print("="*50)
-
-        print(f"\nSnapshot Date: {snapshot['snapshot_date']}")
-        if snapshot.get('snapshot_time'):
-            print(f"Snapshot Time: {snapshot['snapshot_time']}")
-        print(f"Device: {snapshot.get('device_tag', 'pc')}")
-        print(f"Season: {snapshot.get('season', 'N/A')}")
-
-        # Game Stats
-        print("\n" + "-"*50)
-        print("GAME STATS")
-        print("-"*50)
-        print(f"Matches:          {snapshot.get('matches', 0)}")
-        print(f"Wins:             {snapshot.get('wins', 0)}")
-        print(f"Losses:           {snapshot.get('losses', 0)}")
-        print(f"Win %:            {snapshot.get('match_win_pct', 0):.1f}%")
-        print(f"Time Played:      {snapshot.get('time_played_hours', 0):.1f}h")
-
-        # Round Stats
-        print("\n" + "-"*50)
-        print("ROUND STATS")
-        print("-"*50)
-        print(f"Rounds Played:    {snapshot.get('rounds_played', 0)}")
-        print(f"Round Wins:       {snapshot.get('rounds_wins', 0)}")
-        print(f"Round Losses:     {snapshot.get('rounds_losses', 0)}")
-        print(f"Round Win %:      {snapshot.get('rounds_win_pct', 0):.1f}%")
-
-        # Combat Stats
-        print("\n" + "-"*50)
-        print("COMBAT STATS")
-        print("-"*50)
-        print(f"K/D:              {snapshot.get('kd', 0):.2f}")
-        print(f"Kills:            {snapshot.get('kills', 0)}")
-        print(f"Deaths:           {snapshot.get('deaths', 0)}")
-        print(f"Assists:          {snapshot.get('assists', 0)}")
-        print(f"Kills/Round:      {snapshot.get('kills_per_round', 0):.2f}")
-        print(f"Deaths/Round:     {snapshot.get('deaths_per_round', 0):.2f}")
-        print(f"Assists/Round:    {snapshot.get('assists_per_round', 0):.2f}")
-        print(f"HS %:             {snapshot.get('hs_pct', 0):.1f}%")
-        print(f"First Bloods:     {snapshot.get('first_bloods', 0)}")
-        print(f"First Deaths:     {snapshot.get('first_deaths', 0)}")
-
-        # Derived Metrics
-        print("\n" + "-"*50)
-        print("DERIVED METRICS")
-        print("-"*50)
-        print(f"Entry Efficiency:         {metrics.get('entry_efficiency', 0):.2f}")
-        print(f"Aggression Score:         {metrics.get('aggression_score', 0):.2f}")
-        print(f"Clutch Attempt Rate:      {metrics.get('clutch_attempt_rate', 0):.2f}")
-        print(f"1v1 Clutch Success:       {metrics.get('clutch_1v1_success', 0):.2f}")
-        print(f"1v2 Clutch Success:       {metrics.get('clutch_1v2_success', 0):.2f}")
-        print(f"1v3 Clutch Success:       {metrics.get('clutch_1v3_success', 0):.2f}")
-        print(f"1v4 Clutch Success:       {metrics.get('clutch_1v4_success', 0):.2f}")
-        print(f"1v5 Clutch Success:       {metrics.get('clutch_1v5_success', 0):.2f}")
-        print(f"Overall Clutch Success:   {metrics.get('overall_clutch_success', 0):.2f}")
-        print(f"Clutch Dropoff Rate:      {metrics.get('clutch_dropoff_rate', 0):.2f}")
-        print(f"High Pressure Attempts:   {metrics.get('high_pressure_attempts', 0)}")
-        print(f"High Pressure Wins:       {metrics.get('high_pressure_wins', 0)}")
-        print(f"Disadv Attempt Share:     {metrics.get('disadv_attempt_share', 0):.2f}")
-        print(f"Extreme Attempts (1v4+):  {metrics.get('extreme_attempts', 0)}")
-        print(f"Teamplay Index:           {metrics.get('teamplay_index', 0):.2f}")
-        print(f"Impact Rating:            {metrics.get('impact_rating', 0):.2f}")
-        print(f"Rounds Per Hour:          {self._format_metric(metrics.get('rounds_per_hour', 0.0), suppressed=metrics.get('time_played_unreliable', False))}")
-        print(f"Wins Per Hour:            {self._format_metric(metrics.get('wins_per_hour'), suppressed=metrics.get('time_played_unreliable', False))}")
-        print(f"K/D Win Gap:              {metrics.get('kd_win_gap', 0):.2f}")
-
-        print("\n" + "-"*50)
-        print("DATA QUALITY")
-        print("-"*50)
-        time_scope = "UNRELIABLE" if metrics.get('time_played_unreliable', False) else "OK"
-        rounds_per_hour = self._format_metric(metrics.get('rounds_per_hour', 0.0))
-        print(f"Time Scope:       {time_scope} (Rounds/Hour = {rounds_per_hour})")
-
-        clutch_mismatch_parts = []
-        if metrics.get('clutch_totals_mismatch', False):
-            clutch_mismatch_parts.append("total")
-        if metrics.get('clutch_lost_totals_mismatch', False):
-            clutch_mismatch_parts.append("lost_total")
-
-        if clutch_mismatch_parts:
-            print(f"Clutch Totals:    MISMATCH ({', '.join(clutch_mismatch_parts)})")
-        else:
-            print("Clutch Totals:    OK")
-        if metrics.get('time_played_unreliable', False):
-            print(
-                f"WARNING: Time-played metrics unreliable (Rounds/Hour < {MIN_RELIABLE_ROUNDS_PER_HOUR:.1f}); per-hour rates suppressed."
-            )
-
-        # Role Classification
-        print("\n" + "-"*50)
-        print("ROLE CLASSIFICATION")
-        print("-"*50)
-        primary = metrics.get('primary_role', 'Unknown')
-        primary_conf = metrics.get('primary_confidence', 0)
-        print(f"Primary Role:     {primary} ({primary_conf:.1f})")
-
-        secondary = metrics.get('secondary_role')
-        if secondary:
-            secondary_conf = metrics.get('secondary_confidence', 0)
-            print(f"Secondary Role:   {secondary} ({secondary_conf:.1f})")
-        else:
-            print("Secondary Role:   None")
-
-        # Role Scores
-        print("\n" + "-"*50)
-        print("ROLE SCORES")
-        print("-"*50)
-        print(f"Fragger:          {metrics.get('fragger_score', 0):.1f}")
-        print(f"Entry:            {metrics.get('entry_score', 0):.1f}")
-        print(f"Support:          {metrics.get('support_score', 0):.1f}")
-        print(f"Anchor:           {metrics.get('anchor_score', 0):.1f}")
-        print(f"Clutch Specialist:{metrics.get('clutch_specialist_score', 0):.1f}")
-        print(f"Carry:            {metrics.get('carry_score', 0):.1f}")
-
-        # Insight Generation
-        print("\n" + "-"*50)
-        print("INSIGHTS")
-        print("-"*50)
-        if insights:
-            for idx, insight in enumerate(insights, 1):
-                print(f"{idx}. [{insight.get('severity', 'info').upper()}] {insight.get('message', '')}")
-                print(f"   Evidence: {insight.get('evidence', '')}")
-                print(f"   Action:   {insight.get('action', '')}")
-        else:
-            print("1. [INFO] No major risk flags from current snapshot.")
-            print(f"   Evidence: Primary Role: {metrics.get('primary_role', 'Unknown')}")
-            print("   Action:   Keep collecting snapshots for trend-based insights.")
-
-        print("="*50)
-
-
-
-
-
-
-
-
+        print(f"\n+ {message}\n")

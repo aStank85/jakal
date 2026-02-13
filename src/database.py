@@ -150,6 +150,86 @@ class Database:
                 )
             """)
 
+            # Stacks table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stacks (
+                    stack_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stack_name      TEXT NOT NULL,
+                    stack_type      TEXT DEFAULT 'named',
+                    description     TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Stack members table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stack_members (
+                    member_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stack_id        INTEGER NOT NULL,
+                    player_id       INTEGER NOT NULL,
+                    role_override   TEXT,
+                    joined_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (stack_id) REFERENCES stacks(stack_id),
+                    FOREIGN KEY (player_id) REFERENCES players(player_id),
+                    UNIQUE(stack_id, player_id)
+                )
+            """)
+
+            # Stack analyses table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stack_analyses (
+                    analysis_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stack_id            INTEGER NOT NULL,
+                    analysis_date       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    role_distribution   TEXT,
+                    roles_covered       TEXT,
+                    roles_missing       TEXT,
+                    composition_score   REAL,
+                    team_avg_kd         REAL,
+                    team_avg_win_pct    REAL,
+                    team_avg_hs_pct     REAL,
+                    team_avg_kpr        REAL,
+                    team_avg_apr        REAL,
+                    team_entry_efficiency   REAL,
+                    team_first_blood_rate   REAL,
+                    dedicated_entry_count   INTEGER,
+                    team_clutch_success     REAL,
+                    team_1v1_success        REAL,
+                    primary_clutch_player   TEXT,
+                    clutch_gap              REAL,
+                    carry_player            TEXT,
+                    carry_dependency        REAL,
+                    team_strengths          TEXT,
+                    team_weaknesses         TEXT,
+                    team_insights           TEXT,
+                    FOREIGN KEY (stack_id) REFERENCES stacks(stack_id)
+                )
+            """)
+
+            # Matchup analyses table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS matchup_analyses (
+                    matchup_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stack_a_id          INTEGER NOT NULL,
+                    stack_b_id          INTEGER NOT NULL,
+                    analysis_date       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    kd_advantage            TEXT,
+                    entry_advantage         TEXT,
+                    clutch_advantage        TEXT,
+                    support_advantage       TEXT,
+                    hs_advantage            TEXT,
+                    win_rate_advantage      TEXT,
+                    predicted_winner        TEXT,
+                    confidence              REAL,
+                    recommendations         TEXT,
+                    key_battlegrounds       TEXT,
+                    role_matchups           TEXT,
+                    FOREIGN KEY (stack_a_id) REFERENCES stacks(stack_id),
+                    FOREIGN KEY (stack_b_id) REFERENCES stacks(stack_id)
+                )
+            """)
+
             self.conn.commit()
             self._migrate_schema()
         except sqlite3.Error as e:
@@ -448,6 +528,11 @@ class Database:
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to get player '{username}': {e}")
 
+    def get_player_id(self, username: str) -> Optional[int]:
+        """Get player_id for username, or None if not found."""
+        player = self.get_player(username)
+        return player["player_id"] if player else None
+
     def update_player_tag(self, username: str, tag: str) -> None:
         """Update a player's tag."""
         try:
@@ -584,6 +669,168 @@ class Database:
             return [row['season'] for row in cursor.fetchall()]
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to get seasons list: {e}")
+
+    # --- Stack CRUD ---
+
+    def create_stack(self, name: str, stack_type: str = 'named', description: str = None) -> int:
+        """Create a new stack."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO stacks (stack_name, stack_type, description) VALUES (?, ?, ?)",
+            (name, stack_type, description)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_stack(self, stack_id: int) -> Optional[Dict]:
+        """Get a stack by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM stacks WHERE stack_id = ?", (stack_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_stack_by_name(self, name: str) -> Optional[Dict]:
+        """Get a stack by name."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM stacks WHERE stack_name = ?", (name,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_all_stacks(self) -> List[Dict]:
+        """Get all stacks."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM stacks ORDER BY created_at DESC")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def update_stack(self, stack_id: int, name: str = None, description: str = None) -> None:
+        """Update stack name and/or description."""
+        cursor = self.conn.cursor()
+        if name is not None:
+            cursor.execute("UPDATE stacks SET stack_name = ?, updated_at = CURRENT_TIMESTAMP WHERE stack_id = ?", (name, stack_id))
+        if description is not None:
+            cursor.execute("UPDATE stacks SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE stack_id = ?", (description, stack_id))
+        self.conn.commit()
+
+    def delete_stack(self, stack_id: int) -> None:
+        """Delete a stack and its members."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM stack_members WHERE stack_id = ?", (stack_id,))
+        cursor.execute("DELETE FROM stack_analyses WHERE stack_id = ?", (stack_id,))
+        cursor.execute("DELETE FROM stacks WHERE stack_id = ?", (stack_id,))
+        self.conn.commit()
+
+    def add_member_to_stack(self, stack_id: int, player_id: int, role_override: str = None) -> int:
+        """Add a player to a stack."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO stack_members (stack_id, player_id, role_override) VALUES (?, ?, ?)",
+            (stack_id, player_id, role_override)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def remove_member_from_stack(self, stack_id: int, player_id: int) -> None:
+        """Remove a player from a stack."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM stack_members WHERE stack_id = ? AND player_id = ?",
+            (stack_id, player_id)
+        )
+        self.conn.commit()
+
+    def get_stack_members(self, stack_id: int) -> List[Dict]:
+        """Get all members of a stack with player info."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT sm.*, p.username
+            FROM stack_members sm
+            JOIN players p ON sm.player_id = p.player_id
+            WHERE sm.stack_id = ?
+            ORDER BY sm.joined_at
+        """, (stack_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_stack_size(self, stack_id: int) -> int:
+        """Get number of players in a stack."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) as cnt FROM stack_members WHERE stack_id = ?", (stack_id,))
+        return cursor.fetchone()['cnt']
+
+    def delete_stacks_by_type(self, stack_type: str) -> None:
+        """Delete all stacks of a given type (e.g. 'quick')."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT stack_id FROM stacks WHERE stack_type = ?", (stack_type,))
+        for row in cursor.fetchall():
+            self.delete_stack(row['stack_id'])
+
+    def save_stack_analysis(self, stack_id: int, analysis: Dict[str, Any]) -> int:
+        """Save a team analysis result."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO stack_analyses (
+                stack_id, role_distribution, roles_covered, roles_missing,
+                composition_score, team_avg_kd, team_avg_win_pct,
+                team_avg_hs_pct, team_avg_kpr, team_avg_apr,
+                team_entry_efficiency, team_first_blood_rate, dedicated_entry_count,
+                team_clutch_success, team_1v1_success, primary_clutch_player,
+                clutch_gap, carry_player, carry_dependency,
+                team_strengths, team_weaknesses, team_insights
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            stack_id,
+            json.dumps(analysis.get('role_distribution')),
+            json.dumps(analysis.get('roles_covered')),
+            json.dumps(analysis.get('roles_missing')),
+            analysis.get('composition_score'),
+            analysis.get('team_avg_kd'),
+            analysis.get('team_avg_win_pct'),
+            analysis.get('team_avg_hs_pct'),
+            analysis.get('team_avg_kpr'),
+            analysis.get('team_avg_apr'),
+            analysis.get('team_entry_efficiency'),
+            analysis.get('team_first_blood_rate'),
+            analysis.get('dedicated_entry_count'),
+            analysis.get('team_clutch_success'),
+            analysis.get('team_1v1_success'),
+            analysis.get('primary_clutch_player'),
+            analysis.get('clutch_gap'),
+            analysis.get('carry_player'),
+            analysis.get('carry_dependency'),
+            json.dumps(analysis.get('team_strengths')),
+            json.dumps(analysis.get('team_weaknesses')),
+            json.dumps(analysis.get('team_insights'))
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def save_matchup_analysis(self, matchup: Dict[str, Any]) -> int:
+        """Save a matchup analysis result."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO matchup_analyses (
+                stack_a_id, stack_b_id,
+                kd_advantage, entry_advantage, clutch_advantage,
+                support_advantage, hs_advantage, win_rate_advantage,
+                predicted_winner, confidence,
+                recommendations, key_battlegrounds, role_matchups
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            matchup['stack_a_id'],
+            matchup['stack_b_id'],
+            json.dumps(matchup.get('kd_advantage')),
+            json.dumps(matchup.get('entry_advantage')),
+            json.dumps(matchup.get('clutch_advantage')),
+            json.dumps(matchup.get('support_advantage')),
+            json.dumps(matchup.get('hs_advantage')),
+            json.dumps(matchup.get('win_rate_advantage')),
+            matchup.get('predicted_winner'),
+            matchup.get('confidence'),
+            json.dumps(matchup.get('recommendations')),
+            json.dumps(matchup.get('key_battlegrounds')),
+            json.dumps(matchup.get('role_matchups'))
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
 
     def close(self):
         """Close database connection."""
