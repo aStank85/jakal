@@ -331,3 +331,78 @@ class TestCalculatorEdgeCases:
         # Should not crash and should return valid structure
         assert 'primary_role' in metrics
         assert 'primary_confidence' in metrics
+
+    def test_calculate_all_with_partial_clutch_data(self):
+        """Test calculate_all handles missing clutch keys gracefully."""
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 100,
+            'kills': 50,
+            'deaths': 40,
+            'assists': 20,
+            'kd': 1.25,
+            'kills_per_round': 0.5,
+            'deaths_per_round': 0.4,
+            'assists_per_round': 0.2,
+            'first_bloods': 10,
+            'first_deaths': 8,
+            'match_win_pct': 52.0,
+            'wins': 20,
+            'time_played_hours': 40.0,
+            'clutches_data': json.dumps({'1v1': 3, 'lost_1v1': 2})
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+        assert metrics['clutch_attempt_rate'] == 0.0
+        assert metrics['clutch_1v1_success'] == pytest.approx(0.6, rel=0.01)
+
+    def test_expansion_pack_metrics(self):
+        """Test new v1 expansion metrics and confidence weighting."""
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 200,
+            'kills': 220,
+            'deaths': 180,
+            'assists': 80,
+            'kd': 1.22,
+            'kills_per_round': 1.10,
+            'deaths_per_round': 0.90,
+            'assists_per_round': 0.40,
+            'first_bloods': 40,
+            'first_deaths': 25,
+            'match_win_pct': 54.0,
+            'wins': 80,
+            'time_played_hours': 100.0,
+            'teamkills': 4,
+            'clutches_data': json.dumps({
+                'total': 20,
+                '1v1': 10,
+                '1v2': 6,
+                '1v3': 3,
+                '1v4': 1,
+                '1v5': 0,
+                'lost_total': 40,
+                'lost_1v1': 5,
+                'lost_1v2': 10,
+                'lost_1v3': 12,
+                'lost_1v4': 8,
+                'lost_1v5': 5
+            })
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+
+        assert metrics['engagement_rate'] == pytest.approx(2.0, rel=0.01)
+        assert metrics['wcontrib_per_round'] == pytest.approx(1.30, rel=0.01)
+        assert metrics['opening_net_per_round'] == pytest.approx(0.075, rel=0.01)
+        assert metrics['clutch_attempts'] == 60
+        assert metrics['clutch_attempts_per_100'] == pytest.approx(30.0, rel=0.01)
+        assert metrics['high_pressure_attempts'] == 29
+        assert metrics['survival_rate'] == pytest.approx(0.10, rel=0.01)
+        assert metrics['rounds_per_hour'] == pytest.approx(2.0, rel=0.01)
+        assert metrics['tk_per_kill'] == pytest.approx(4 / 220, rel=0.01)
+        assert metrics['clean_play_index'] == pytest.approx(0.0, rel=0.01)
+        assert metrics['rounds_conf'] == pytest.approx(200 / 300, rel=0.01)
+        assert metrics['time_conf'] == pytest.approx(1.0, rel=0.01)
+        assert metrics['clutch_conf'] == pytest.approx(1.0, rel=0.01)
+        assert metrics['overall_conf'] == pytest.approx(0.80, rel=0.01)

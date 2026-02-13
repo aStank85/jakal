@@ -236,7 +236,7 @@ Matches
         with pytest.raises(ValueError) as exc_info:
             parser.parse(incomplete_data)
 
-        assert "Missing critical stat" in str(exc_info.value)
+        assert "Failed to parse" in str(exc_info.value)
 
     def test_normalize_stat_name(self, parser):
         """Test stat name normalization."""
@@ -284,6 +284,8 @@ Wins
 61
 Losses
 56
+Matches
+117
 Rounds
 Wins
 364

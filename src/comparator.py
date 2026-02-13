@@ -63,9 +63,13 @@ class PlayerComparator:
             
             # Determine winner
             if better_when == 'higher':
-                winner_idx = stat_comparison['values'].index(max(stat_comparison['values']))
+                max_value = max(stat_comparison['values'])
+                winner_indices = [idx for idx, value in enumerate(stat_comparison['values']) if value == max_value]
+                winner_idx = winner_indices[0] if len(winner_indices) == 1 else None
             elif better_when == 'lower':
-                winner_idx = stat_comparison['values'].index(min(stat_comparison['values']))
+                min_value = min(stat_comparison['values'])
+                winner_indices = [idx for idx, value in enumerate(stat_comparison['values']) if value == min_value]
+                winner_idx = winner_indices[0] if len(winner_indices) == 1 else None
             else:
                 winner_idx = None  # Contextual, no clear winner
             

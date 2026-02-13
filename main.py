@@ -4,6 +4,7 @@ from src.parser import R6TrackerParser
 from src.database import Database
 from src.calculator import MetricsCalculator
 from src.comparator import PlayerComparator
+from src.analyzer import InsightAnalyzer
 from src.ui import TerminalUI
 
 def main():
@@ -12,6 +13,7 @@ def main():
     db = Database()
     calculator = MetricsCalculator()
     comparator = PlayerComparator()
+    analyzer = InsightAnalyzer()
     ui = TerminalUI()
 
     try:
@@ -33,15 +35,18 @@ def main():
                         stats=stats,
                         snapshot_date=metadata['date'],
                         snapshot_time=metadata['time'],
-                        season=metadata['season']
+                        season=metadata['season'],
+                        device_tag=metadata['device_tag']
                     )
 
                     # Get player_id for metrics
                     player = db.get_player(metadata['username'])
                     player_id = player['player_id']
 
-                    # Calculate and save metrics
-                    snapshot = db.get_latest_snapshot(metadata['username'])
+                    # Calculate and save metrics for the inserted snapshot.
+                    snapshot = db.get_snapshot_by_id(snapshot_id)
+                    if not snapshot:
+                        raise RuntimeError(f"Failed to load snapshot {snapshot_id} after insert")
                     metrics = calculator.calculate_all(snapshot)
 
                     # Store metrics
@@ -53,6 +58,11 @@ def main():
                     print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.1f})")
                     if metrics['secondary_role']:
                         print(f"Secondary: {metrics['secondary_role']} ({metrics['secondary_confidence']:.1f})")
+
+                    insights = analyzer.generate_insights(snapshot, metrics)
+                    if insights:
+                        top_insight = insights[0]
+                        print(f"Top Insight [{top_insight['severity']}]: {top_insight['message']}")
 
                 except Exception as e:
                     ui.show_error(str(e))
@@ -130,12 +140,11 @@ def main():
                         ui.show_error(f"No snapshots found for '{username_input}'")
                         continue
 
-                    # Get or calculate metrics
-                    metrics = db.get_latest_metrics(username_input)
-                    if not metrics:
-                        metrics = calculator.calculate_all(snapshot)
+                    # Recalculate from snapshot so newer formulas are always available.
+                    metrics = calculator.calculate_all(snapshot)
 
-                    ui.show_player_details(snapshot, metrics)
+                    insights = analyzer.generate_insights(snapshot, metrics)
+                    ui.show_player_details(snapshot, metrics, insights)
 
                 except Exception as e:
                     ui.show_error(str(e))

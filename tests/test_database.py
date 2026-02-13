@@ -4,6 +4,7 @@ import pytest
 import os
 import tempfile
 import json
+import sqlite3
 from src.database import Database
 
 
@@ -122,6 +123,7 @@ class TestDatabase:
         player = db.get_player("TestPlayer")
         assert player is not None
         assert player['username'] == "TestPlayer"
+        assert player['device_tag'] == 'pc'
         assert player['tag'] == 'untagged'
 
     def test_add_duplicate_player(self, db):
@@ -138,8 +140,24 @@ class TestDatabase:
 
         assert player is not None
         assert player['username'] == "TestPlayer"
+        assert player['device_tag'] == 'pc'
         assert 'player_id' in player
         assert 'created_at' in player
+
+    def test_add_player_with_device_tag(self, db):
+        """Test adding a player with explicit device classification."""
+        db.add_player("TestPlayer", device_tag="xbox")
+        player = db.get_player("TestPlayer")
+        assert player is not None
+        assert player["device_tag"] == "xbox"
+
+    def test_add_player_updates_existing_device_tag(self, db):
+        """Test that adding an existing player updates device tag if changed."""
+        db.add_player("TestPlayer", device_tag="pc")
+        db.add_player("TestPlayer", device_tag="playstation")
+        player = db.get_player("TestPlayer")
+        assert player is not None
+        assert player["device_tag"] == "playstation"
 
     def test_get_nonexistent_player(self, db):
         """Test retrieving nonexistent player returns None."""
@@ -162,6 +180,21 @@ class TestDatabase:
         snapshot = db.get_snapshot_by_id(snapshot_id)
         assert snapshot is not None
         assert snapshot['username'] == "TestPlayer"
+        assert snapshot['device_tag'] == "pc"
+
+    def test_add_stats_snapshot_with_device_tag(self, db, sample_stats):
+        """Test snapshot insertion with explicit device tag classification."""
+        snapshot_id = db.add_stats_snapshot(
+            username="TestPlayer",
+            stats=sample_stats,
+            snapshot_date="2024-02-12",
+            snapshot_time="14:30",
+            season="Y10S4",
+            device_tag="xbox"
+        )
+        snapshot = db.get_snapshot_by_id(snapshot_id)
+        assert snapshot is not None
+        assert snapshot["device_tag"] == "xbox"
 
     def test_field_mapping(self, db, sample_stats):
         """Test that all fields are stored correctly."""
@@ -411,3 +444,123 @@ class TestDatabase:
         db.close()
         # Should not raise error
         assert True
+
+    def test_auto_migrates_legacy_schema(self):
+        """Test that old schemas are upgraded automatically on Database init."""
+        fd, db_path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+
+        # Legacy players schema (missing tag/notes).
+        cur.execute("""
+            CREATE TABLE players (
+                player_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Legacy stats_snapshots schema (missing newer v0.2 columns).
+        cur.execute("""
+            CREATE TABLE stats_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                snapshot_date DATE NOT NULL,
+                snapshot_time TIME,
+                season TEXT,
+                abandons INTEGER,
+                matches INTEGER,
+                wins INTEGER,
+                losses INTEGER,
+                match_win_pct REAL,
+                time_played_hours REAL,
+                rounds_played INTEGER,
+                rounds_wins INTEGER,
+                rounds_losses INTEGER,
+                rounds_win_pct REAL,
+                disconnected INTEGER,
+                kills INTEGER,
+                deaths INTEGER,
+                assists INTEGER,
+                kd REAL,
+                kills_per_round REAL,
+                deaths_per_round REAL,
+                assists_per_round REAL,
+                headshots INTEGER,
+                hs_pct REAL,
+                first_bloods INTEGER,
+                first_deaths INTEGER,
+                teamkills INTEGER,
+                esr REAL,
+                clutches_data TEXT,
+                aces INTEGER,
+                kills_3k INTEGER,
+                kills_4k INTEGER,
+                kills_2k INTEGER,
+                kills_1k INTEGER,
+                current_rank INTEGER,
+                max_rank INTEGER,
+                rank_points INTEGER,
+                max_rank_points INTEGER,
+                trn_elo INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (player_id) REFERENCES players(player_id)
+            )
+        """)
+
+        # Legacy computed_metrics schema (missing several newer columns).
+        cur.execute("""
+            CREATE TABLE computed_metrics (
+                metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id INTEGER NOT NULL,
+                entry_efficiency REAL,
+                clutch_attempt_rate REAL,
+                clutch_1v1_success REAL,
+                clutch_disadvantaged_success REAL,
+                teamplay_index REAL,
+                aggression_score REAL,
+                fragger_score REAL,
+                entry_score REAL,
+                support_score REAL,
+                anchor_score REAL,
+                clutch_specialist_score REAL,
+                carry_score REAL,
+                primary_role TEXT,
+                primary_confidence REAL,
+                secondary_role TEXT,
+                secondary_confidence REAL,
+                FOREIGN KEY (snapshot_id) REFERENCES stats_snapshots(snapshot_id)
+            )
+        """)
+
+        conn.commit()
+        conn.close()
+
+        try:
+            migrated_db = Database(db_path)
+
+            player_columns = migrated_db._get_table_columns("players")
+            assert "device_tag" in player_columns
+            assert "tag" in player_columns
+            assert "notes" in player_columns
+
+            snapshot_columns = migrated_db._get_table_columns("stats_snapshots")
+            assert "score" in snapshot_columns
+            assert "kills_per_game" in snapshot_columns
+            assert "headshots_per_round" in snapshot_columns
+            assert "top_rank_position" in snapshot_columns
+
+            metric_columns = migrated_db._get_table_columns("computed_metrics")
+            assert "player_id" in metric_columns
+            assert "overall_clutch_success" in metric_columns
+            assert "clutch_dropoff_rate" in metric_columns
+            assert "clutch_efficiency_score" in metric_columns
+            assert "impact_rating" in metric_columns
+            assert "wins_per_hour" in metric_columns
+            assert "kd_win_gap" in metric_columns
+            assert "created_at" in metric_columns
+        finally:
+            migrated_db.close()
+            if os.path.exists(db_path):
+                os.remove(db_path)

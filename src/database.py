@@ -18,6 +18,7 @@ class Database:
         try:
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row  # Access columns by name
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
             cursor = self.conn.cursor()
 
@@ -26,6 +27,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS players (
                     player_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE NOT NULL,
+                    device_tag TEXT DEFAULT 'pc',
                     tag TEXT DEFAULT 'untagged',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     notes TEXT
@@ -149,23 +151,95 @@ class Database:
             """)
 
             self.conn.commit()
+            self._migrate_schema()
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to initialize database: {e}")
+
+    def _migrate_schema(self) -> None:
+        """
+        Apply additive, idempotent schema migrations for older local databases.
+        """
+        try:
+            self._migrate_players_table()
+            self._migrate_stats_snapshots_table()
+            self._migrate_computed_metrics_table()
+            self.conn.commit()
+        except sqlite3.Error as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to migrate database schema: {e}")
+
+    def _get_table_columns(self, table_name: str) -> set:
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return {row["name"] for row in cursor.fetchall()}
+
+    def _add_column_if_missing(self, table_name: str, column_sql: str, column_name: str) -> None:
+        columns = self._get_table_columns(table_name)
+        if column_name not in columns:
+            cursor = self.conn.cursor()
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
+
+    def _migrate_players_table(self) -> None:
+        self._add_column_if_missing("players", "device_tag TEXT DEFAULT 'pc'", "device_tag")
+        self._add_column_if_missing("players", "tag TEXT DEFAULT 'untagged'", "tag")
+        self._add_column_if_missing("players", "notes TEXT", "notes")
+
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE players SET device_tag = 'pc' WHERE device_tag IS NULL")
+
+    def _migrate_stats_snapshots_table(self) -> None:
+        self._add_column_if_missing("stats_snapshots", "score INTEGER", "score")
+        self._add_column_if_missing("stats_snapshots", "kills_per_game REAL", "kills_per_game")
+        self._add_column_if_missing("stats_snapshots", "headshots_per_round REAL", "headshots_per_round")
+        self._add_column_if_missing("stats_snapshots", "top_rank_position INTEGER", "top_rank_position")
+
+    def _migrate_computed_metrics_table(self) -> None:
+        self._add_column_if_missing("computed_metrics", "player_id INTEGER", "player_id")
+        self._add_column_if_missing("computed_metrics", "overall_clutch_success REAL", "overall_clutch_success")
+        self._add_column_if_missing("computed_metrics", "clutch_dropoff_rate REAL", "clutch_dropoff_rate")
+        self._add_column_if_missing("computed_metrics", "clutch_efficiency_score REAL", "clutch_efficiency_score")
+        self._add_column_if_missing("computed_metrics", "impact_rating REAL", "impact_rating")
+        self._add_column_if_missing("computed_metrics", "wins_per_hour REAL", "wins_per_hour")
+        self._add_column_if_missing("computed_metrics", "kd_win_gap REAL", "kd_win_gap")
+        self._add_column_if_missing(
+            "computed_metrics", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "created_at"
+        )
+
+        # Backfill player_id for legacy rows now that the column exists.
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE computed_metrics
+            SET player_id = (
+                SELECT s.player_id
+                FROM stats_snapshots s
+                WHERE s.snapshot_id = computed_metrics.snapshot_id
+            )
+            WHERE player_id IS NULL
+        """)
     
-    def add_player(self, username: str) -> int:
+    def add_player(self, username: str, device_tag: str = "pc") -> int:
         """Add a player or return existing player_id."""
         try:
             cursor = self.conn.cursor()
 
             # Check if player exists
-            cursor.execute("SELECT player_id FROM players WHERE username = ?", (username,))
+            cursor.execute("SELECT player_id, device_tag FROM players WHERE username = ?", (username,))
             row = cursor.fetchone()
 
             if row:
+                if device_tag and row["device_tag"] != device_tag:
+                    cursor.execute(
+                        "UPDATE players SET device_tag = ? WHERE player_id = ?",
+                        (device_tag, row["player_id"]),
+                    )
+                    self.conn.commit()
                 return row['player_id']
 
             # Insert new player
-            cursor.execute("INSERT INTO players (username) VALUES (?)", (username,))
+            cursor.execute(
+                "INSERT INTO players (username, device_tag) VALUES (?, ?)",
+                (username, device_tag),
+            )
             self.conn.commit()
             return cursor.lastrowid
         except sqlite3.Error as e:
@@ -178,7 +252,8 @@ class Database:
         stats: Dict[str, Any],
         snapshot_date: str,
         snapshot_time: Optional[str] = None,
-        season: str = "Y10S4"
+        season: str = "Y10S4",
+        device_tag: str = "pc"
     ) -> int:
         """
         Add a stats snapshot for a player.
@@ -194,7 +269,7 @@ class Database:
             snapshot_id
         """
         try:
-            player_id = self.add_player(username)
+            player_id = self.add_player(username, device_tag=device_tag)
 
             cursor = self.conn.cursor()
 
@@ -269,7 +344,7 @@ class Database:
             cursor = self.conn.cursor()
 
             cursor.execute("""
-                SELECT s.*, p.username
+                SELECT s.*, p.username, p.device_tag
                 FROM stats_snapshots s
                 JOIN players p ON s.player_id = p.player_id
                 WHERE p.username = ?
@@ -291,7 +366,9 @@ class Database:
         """Get list of all players with their details."""
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT player_id, username, tag, created_at, notes FROM players ORDER BY username")
+            cursor.execute(
+                "SELECT player_id, username, device_tag, tag, created_at, notes FROM players ORDER BY username"
+            )
             return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to get players list: {e}")
@@ -362,7 +439,7 @@ class Database:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT player_id, username, tag, created_at, notes
+                SELECT player_id, username, device_tag, tag, created_at, notes
                 FROM players
                 WHERE username = ?
             """, (username,))
@@ -421,7 +498,7 @@ class Database:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT s.*, p.username
+                SELECT s.*, p.username, p.device_tag
                 FROM stats_snapshots s
                 JOIN players p ON s.player_id = p.player_id
                 WHERE s.snapshot_id = ?

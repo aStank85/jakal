@@ -12,6 +12,11 @@ class MetricsCalculator:
         value = snapshot.get(key, default)
         return value if value is not None else default
 
+    @staticmethod
+    def _safe_div(numerator: float, denominator: float) -> float:
+        """Safely divide and return 0.0 on zero denominator."""
+        return numerator / denominator if denominator > 0 else 0.0
+
     def calculate_all(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
         """
         Calculate all derived metrics.
@@ -27,24 +32,43 @@ class MetricsCalculator:
         clutches = json.loads(clutches_data) if clutches_data else {}
 
         metrics = {}
+        rounds_played = self._safe_get(snapshot, 'rounds_played')
+        kills = self._safe_get(snapshot, 'kills')
+        deaths = self._safe_get(snapshot, 'deaths')
+        assists = self._safe_get(snapshot, 'assists')
+        first_bloods = self._safe_get(snapshot, 'first_bloods')
+        first_deaths = self._safe_get(snapshot, 'first_deaths')
+        match_win_pct = self._safe_get(snapshot, 'match_win_pct', 0.0)
+        time_played_hours = self._safe_get(snapshot, 'time_played_hours', 0.0)
+        wins = self._safe_get(snapshot, 'wins')
+        teamkills = self._safe_get(snapshot, 'teamkills')
+
+        clutch_total = clutches.get('total', 0)
+        clutch_lost_total = clutches.get('lost_total', 0)
+        att_1v1 = clutches.get('1v1', 0) + clutches.get('lost_1v1', 0)
+        att_1v2 = clutches.get('1v2', 0) + clutches.get('lost_1v2', 0)
+        att_1v3 = clutches.get('1v3', 0) + clutches.get('lost_1v3', 0)
+        att_1v4 = clutches.get('1v4', 0) + clutches.get('lost_1v4', 0)
+        att_1v5 = clutches.get('1v5', 0) + clutches.get('lost_1v5', 0)
+        clutch_attempts = clutch_total + clutch_lost_total
 
         # Entry metrics
         metrics['entry_efficiency'] = self.calc_entry_efficiency(
-            self._safe_get(snapshot, 'first_bloods'),
-            self._safe_get(snapshot, 'first_deaths')
+            first_bloods,
+            first_deaths
         )
 
         metrics['aggression_score'] = self.calc_aggression_score(
-            self._safe_get(snapshot, 'first_bloods'),
-            self._safe_get(snapshot, 'first_deaths'),
-            self._safe_get(snapshot, 'rounds_played')
+            first_bloods,
+            first_deaths,
+            rounds_played
         )
         
         # Clutch metrics
         metrics['clutch_attempt_rate'] = self.calc_clutch_attempt_rate(
-            clutches['total'],
-            clutches['lost_total'],
-            snapshot['rounds_played']
+            clutch_total,
+            clutch_lost_total,
+            rounds_played
         )
         
         metrics['clutch_1v1_success'] = self.calc_clutch_success(
@@ -74,16 +98,16 @@ class MetricsCalculator:
 
         # Teamplay
         metrics['teamplay_index'] = self.calc_teamplay_index(
-            self._safe_get(snapshot, 'assists'),
-            self._safe_get(snapshot, 'kills')
+            assists,
+            kills
         )
 
         # Role scores
         metrics['fragger_score'] = self.calc_fragger_score(
             self._safe_get(snapshot, 'kd', 0.0),
             self._safe_get(snapshot, 'kills_per_round', 0.0),
-            self._safe_get(snapshot, 'first_bloods'),
-            self._safe_get(snapshot, 'rounds_played')
+            first_bloods,
+            rounds_played
         )
 
         metrics['entry_score'] = self.calc_entry_score(
@@ -104,14 +128,14 @@ class MetricsCalculator:
 
         metrics['clutch_specialist_score'] = self.calc_clutch_specialist_score(
             clutches.get('total', 0),
-            self._safe_get(snapshot, 'rounds_played'),
+            rounds_played,
             metrics['clutch_1v1_success'],
             metrics['clutch_disadvantaged_success']
         )
 
         metrics['carry_score'] = self.calc_carry_score(
             self._safe_get(snapshot, 'kd', 0.0),
-            self._safe_get(snapshot, 'match_win_pct', 0.0),
+            match_win_pct,
             self._safe_get(snapshot, 'kills_per_round', 0.0),
             metrics['clutch_1v1_success']
         )
@@ -125,20 +149,87 @@ class MetricsCalculator:
 
         # Additional metrics
         metrics['impact_rating'] = self.calc_impact_rating(
-            self._safe_get(snapshot, 'kills'),
-            self._safe_get(snapshot, 'assists'),
-            clutches.get('total', 0),
-            self._safe_get(snapshot, 'rounds_played')
+            kills,
+            assists,
+            clutch_total,
+            rounds_played
         )
 
         metrics['wins_per_hour'] = self.calc_wins_per_hour(
-            self._safe_get(snapshot, 'wins'),
-            self._safe_get(snapshot, 'time_played_hours', 0.0)
+            wins,
+            time_played_hours
         )
 
         metrics['kd_win_gap'] = self.calc_kd_win_gap(
             self._safe_get(snapshot, 'kd', 0.0),
-            self._safe_get(snapshot, 'match_win_pct', 0.0)
+            match_win_pct
+        )
+
+        # Combat involvement and efficiency expansion
+        metrics['engagement_rate'] = self._safe_div(kills + deaths, rounds_played)
+        metrics['contrib_per_round'] = self._safe_div(kills + assists, rounds_played)
+        metrics['wcontrib_per_round'] = self._safe_div(kills + (0.5 * assists), rounds_played)
+        metrics['net_kills_per_round'] = self._safe_div(kills - deaths, rounds_played)
+        metrics['assist_to_kill'] = self._safe_div(assists, kills)
+        metrics['kill_to_assist'] = self._safe_div(kills, assists)
+        metrics['frag_share'] = self._safe_div(kills, kills + assists)
+
+        # Opening duel suite
+        metrics['first_blood_rate'] = self._safe_div(first_bloods, rounds_played)
+        metrics['first_death_rate'] = self._safe_div(first_deaths, rounds_played)
+        metrics['opening_net_per_round'] = self._safe_div(first_bloods - first_deaths, rounds_played)
+        metrics['opening_kill_share'] = self._safe_div(first_bloods, kills)
+        metrics['opening_involvement'] = self._safe_div(first_bloods + first_deaths, rounds_played)
+
+        # Clutch depth metrics
+        metrics['clutch_attempts'] = clutch_attempts
+        metrics['clutch_attempts_per_100'] = self._safe_div(clutch_attempts, rounds_played) * 100.0
+        metrics['clutch_choke_rate'] = self._safe_div(clutch_lost_total, clutch_attempts)
+        metrics['clutch_1v2_success'] = clutch_1v2_success
+        metrics['clutch_1v3_success'] = self.calc_clutch_success(clutches.get('1v3', 0), clutches.get('lost_1v3', 0))
+        metrics['clutch_1v4_success'] = self.calc_clutch_success(clutches.get('1v4', 0), clutches.get('lost_1v4', 0))
+        metrics['clutch_1v5_success'] = self.calc_clutch_success(clutches.get('1v5', 0), clutches.get('lost_1v5', 0))
+
+        high_pressure_attempts = att_1v3 + att_1v4 + att_1v5
+        high_pressure_wins = clutches.get('1v3', 0) + clutches.get('1v4', 0) + clutches.get('1v5', 0)
+        disadv_attempts = att_1v2 + att_1v3 + att_1v4 + att_1v5
+
+        metrics['high_pressure_attempts'] = high_pressure_attempts
+        metrics['high_pressure_success'] = self._safe_div(high_pressure_wins, high_pressure_attempts)
+        metrics['high_pressure_attempt_rate'] = self._safe_div(high_pressure_attempts, rounds_played)
+        metrics['disadv_attempts'] = disadv_attempts
+        metrics['disadv_attempt_share'] = self._safe_div(disadv_attempts, clutch_attempts)
+        metrics['isolated_attempt_share'] = self._safe_div(att_1v1, clutch_attempts)
+        metrics['avg_clutch_difficulty'] = self._safe_div(metrics['clutch_efficiency_score'], clutch_total)
+        metrics['dropoff_1v1_to_1v2'] = metrics['clutch_1v1_success'] - metrics['clutch_1v2_success']
+        metrics['dropoff_1v2_to_1v3'] = metrics['clutch_1v2_success'] - metrics['clutch_1v3_success']
+
+        # Survival and risk
+        metrics['survival_rate'] = max(0.0, min(1.0, 1.0 - self._safe_get(snapshot, 'deaths_per_round', 0.0)))
+        metrics['risk_index'] = metrics['engagement_rate'] * self._safe_get(snapshot, 'deaths_per_round', 0.0)
+
+        # Time-normalized productivity
+        metrics['rounds_per_hour'] = self._safe_div(rounds_played, time_played_hours)
+        metrics['kills_per_hour'] = self._safe_div(kills, time_played_hours)
+        metrics['deaths_per_hour'] = self._safe_div(deaths, time_played_hours)
+        metrics['assists_per_hour'] = self._safe_div(assists, time_played_hours)
+        metrics['wcontrib_per_hour'] = self._safe_div(kills + (0.5 * assists), time_played_hours)
+        metrics['clutch_attempts_per_hour'] = self._safe_div(clutch_attempts, time_played_hours)
+        metrics['clutch_wins_per_hour'] = self._safe_div(clutch_total, time_played_hours)
+
+        # Discipline and confidence
+        metrics['tk_per_kill'] = self._safe_div(teamkills, kills)
+        metrics['tk_per_hour'] = self._safe_div(teamkills, time_played_hours)
+        clean_play_penalty = min(1.0, self._safe_div(teamkills, rounds_played) / 0.02)
+        metrics['clean_play_index'] = 1.0 - clean_play_penalty
+
+        metrics['rounds_conf'] = min(1.0, self._safe_div(rounds_played, 300.0))
+        metrics['time_conf'] = min(1.0, self._safe_div(time_played_hours, 50.0))
+        metrics['clutch_conf'] = min(1.0, self._safe_div(clutch_attempts, 30.0))
+        metrics['overall_conf'] = (
+            (0.6 * metrics['rounds_conf']) +
+            (0.25 * metrics['time_conf']) +
+            (0.15 * metrics['clutch_conf'])
         )
 
         return metrics

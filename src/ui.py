@@ -45,6 +45,9 @@ class TerminalUI:
     def get_metadata(self) -> Dict[str, str]:
         """Get player metadata with validation."""
         print("\n" + "-"*50)
+        now = datetime.now()
+        date = now.strftime("%Y-%m-%d")
+        time = now.strftime("%H:%M:%S")
 
         # Username validation
         while True:
@@ -53,39 +56,28 @@ class TerminalUI:
                 break
             print("Error: Username must be at least 2 characters long")
 
-        # Date validation
+        # Device tag validation
+        device_aliases = {
+            'pc': 'pc',
+            'xbox': 'xbox',
+            'xb': 'xbox',
+            'playstation': 'playstation',
+            'ps': 'playstation',
+            'psn': 'playstation'
+        }
         while True:
-            date = input("Enter date (YYYY-MM-DD) or press Enter for today: ").strip()
-            if not date:
-                date = datetime.now().strftime("%Y-%m-%d")
+            device_input = input(
+                "Enter device tag [pc/xbox/playstation] (default: pc): "
+            ).strip().lower()
+            if not device_input:
+                device_tag = 'pc'
                 break
-
-            # Validate date format
-            if re.match(r'^\d{4}-\d{2}-\d{2}$', date):
-                try:
-                    datetime.strptime(date, "%Y-%m-%d")
-                    break
-                except ValueError:
-                    print("Error: Invalid date. Please use YYYY-MM-DD format (e.g., 2024-02-12)")
-            else:
-                print("Error: Invalid format. Please use YYYY-MM-DD format (e.g., 2024-02-12)")
-
-        # Time validation
-        while True:
-            time = input("Enter time (HH:MM) or press Enter to skip: ").strip()
-            if not time:
-                time = None
+            if device_input in device_aliases:
+                device_tag = device_aliases[device_input]
                 break
+            print("Error: Device must be one of: pc, xbox, playstation")
 
-            # Validate time format
-            if re.match(r'^\d{2}:\d{2}$', time):
-                try:
-                    datetime.strptime(time, "%H:%M")
-                    break
-                except ValueError:
-                    print("Error: Invalid time. Please use HH:MM format (e.g., 14:30)")
-            else:
-                print("Error: Invalid format. Please use HH:MM format (e.g., 14:30)")
+        print(f"Snapshot timestamp auto-set: {date} {time}")
 
         # Season validation
         while True:
@@ -102,6 +94,7 @@ class TerminalUI:
 
         return {
             'username': username,
+            'device_tag': device_tag,
             'date': date,
             'time': time,
             'season': season
@@ -115,7 +108,8 @@ class TerminalUI:
         for i, player in enumerate(players, 1):
             username = player['username']
             tag = player.get('tag', 'untagged')
-            print(f"{i}. {username} [{tag}]")
+            device_tag = player.get('device_tag', 'pc')
+            print(f"{i}. {username} [{device_tag}] [{tag}]")
         print("="*50)
     
     def select_players_for_comparison(self, all_players: List[Dict]) -> List[str]:
@@ -215,7 +209,12 @@ class TerminalUI:
         """Display success message."""
         print(f"\n✅ {message}\n")
 
-    def show_player_details(self, snapshot: Dict[str, Any], metrics: Dict[str, Any]):
+    def show_player_details(
+        self,
+        snapshot: Dict[str, Any],
+        metrics: Dict[str, Any],
+        insights: List[Dict[str, str]] = None
+    ):
         """Display detailed player stats and metrics."""
         print("\n" + "="*50)
         print(f"PLAYER DETAILS: {snapshot['username']}")
@@ -224,6 +223,7 @@ class TerminalUI:
         print(f"\nSnapshot Date: {snapshot['snapshot_date']}")
         if snapshot.get('snapshot_time'):
             print(f"Snapshot Time: {snapshot['snapshot_time']}")
+        print(f"Device: {snapshot.get('device_tag', 'pc')}")
         print(f"Season: {snapshot.get('season', 'N/A')}")
 
         # Game Stats
@@ -300,5 +300,19 @@ class TerminalUI:
         print(f"Anchor:           {metrics.get('anchor_score', 0):.1f}")
         print(f"Clutch Specialist:{metrics.get('clutch_specialist_score', 0):.1f}")
         print(f"Carry:            {metrics.get('carry_score', 0):.1f}")
+
+        # Insight Generation
+        print("\n" + "-"*50)
+        print("INSIGHTS")
+        print("-"*50)
+        if insights:
+            for idx, insight in enumerate(insights, 1):
+                print(f"{idx}. [{insight.get('severity', 'info').upper()}] {insight.get('message', '')}")
+                print(f"   Evidence: {insight.get('evidence', '')}")
+                print(f"   Action:   {insight.get('action', '')}")
+        else:
+            print("1. [INFO] No major risk flags from current snapshot.")
+            print(f"   Evidence: Primary Role: {metrics.get('primary_role', 'Unknown')}")
+            print("   Action:   Keep collecting snapshots for trend-based insights.")
 
         print("="*50)
