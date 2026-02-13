@@ -33,3 +33,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+#Claude settings
+.claude/settings.local.json
