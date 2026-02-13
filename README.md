@@ -7,9 +7,9 @@ Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tr
 
 ## Current Status
 
-- Current release: `v0.3.2` (database-backed CLI with metrics, comparison, and expanded insight generation)
+- Current release: `v0.3.4` (high-pressure sample guards, clean-play normalization constant, data-quality surfacing, and consistency updates)
 - Next major target: `v0.4` export/reporting and scrape ingestion pipeline
-- Test status: full suite passing (`76` tests)
+- Test status: full suite passing (`92` tests)
 
 ## Core Features
 
@@ -17,7 +17,7 @@ Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tr
 - SQLite persistence for players, snapshots, and computed metrics
 - Derived metrics (entry/clutch/teamplay/impact/win-efficiency)
 - Role classification (primary + secondary confidence)
-- Multi-player side-by-side comparison with tie-safe winner handling
+- Multi-player side-by-side comparison with tie-safe winner handling and live metric recalculation for consistency
 - Automated rule-based insight generation with evidence and recommended actions
 - Device classification per player (`pc`, `xbox`, `playstation`) for future scraper targeting
 - Automatic snapshot timestamp capture (`YYYY-MM-DD` + `HH:MM:SS`)
@@ -25,7 +25,7 @@ Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tr
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.9+
 - No runtime dependencies outside Python standard library
 - Optional for tests: `pytest`
 
@@ -118,4 +118,3 @@ pytest -q -p no:cacheprovider
 ## License
 
 This project is for personal use. Rainbow Six Siege and R6 Tracker are properties of their respective owners.
->>>>>>> 7d94de4 (Initial Commit - JAKAL v0.2.0)

@@ -2,6 +2,17 @@
 
 from typing import List, Dict, Any
 
+PER_HOUR_METRIC_KEYS = {
+    'wins_per_hour',
+    'kills_per_hour',
+    'deaths_per_hour',
+    'assists_per_hour',
+    'wcontrib_per_hour',
+    'clutch_attempts_per_hour',
+    'clutch_wins_per_hour',
+    'tk_per_hour',
+}
+
 class PlayerComparator:
     """Compare multiple players."""
     
@@ -59,10 +70,15 @@ class PlayerComparator:
                 else:
                     value = metrics.get(stat_key, 0)
                 
+                if stat_key in PER_HOUR_METRIC_KEYS and metrics.get('time_played_unreliable', False):
+                    value = None
+
                 stat_comparison['values'].append(value)
             
-            # Determine winner
-            if better_when == 'higher':
+            # Determine winner. Any suppressed value (None) makes this metric no-contest.
+            if any(value is None for value in stat_comparison['values']):
+                winner_idx = None
+            elif better_when == 'higher':
                 max_value = max(stat_comparison['values'])
                 winner_indices = [idx for idx, value in enumerate(stat_comparison['values']) if value == max_value]
                 winner_idx = winner_indices[0] if len(winner_indices) == 1 else None
@@ -84,3 +100,6 @@ class PlayerComparator:
             )
         
         return comparison
+
+
+

@@ -1,6 +1,27 @@
 import json
 from typing import Dict, Any, List
 
+from src.thresholds import (
+    SMALL_SAMPLE_ROUNDS,
+    CLUTCH_LOW_SUCCESS_ATTEMPT_RATE,
+    CLUTCH_LOW_SUCCESS_THRESHOLD,
+    CLUTCH_STRONG_SUCCESS_THRESHOLD,
+    CLUTCH_MIN_STRONG_SAMPLE,
+    TEAMKILL_SEVERITY_BANDS,
+    EFFICIENCY_MIN_HOURS,
+    EFFICIENCY_LOW_WINS_PER_HOUR,
+    HIGH_PRESSURE_MIN_ATTEMPT_RATE,
+    HIGH_PRESSURE_MIN_ATTEMPTS,
+    HIGH_PRESSURE_LOW_SUCCESS,
+    HIGH_PRESSURE_STRONG_SUCCESS,
+    LOW_CONFIDENCE_OVERALL,
+    CLUTCH_BURDEN_ATTEMPT_RATE,
+    CLUTCH_BURDEN_DISADV_SHARE,
+    CLUTCH_BURDEN_MIN_ATTEMPTS,
+    EXTREME_CLUTCH_MIN_ATTEMPTS,
+    EXTREME_CLUTCH_MIN_TOTAL_ATTEMPTS,
+)
+
 
 class InsightAnalyzer:
     """Generate deterministic, rule-based insights from snapshot + metrics."""
@@ -18,14 +39,36 @@ class InsightAnalyzer:
         return value if value is not None else default
 
     @staticmethod
-    def _parse_clutches(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_clutches(snapshot: Dict[str, Any]) -> Dict[str, int]:
         raw = snapshot.get("clutches_data", "{}")
         if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            return {}
+            parsed: Dict[str, Any] = {}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                parsed = {}
+
+        if not isinstance(parsed, dict):
+            parsed = {}
+
+        keys = (
+            "total", "1v1", "1v2", "1v3", "1v4", "1v5",
+            "lost_total", "lost_1v1", "lost_1v2", "lost_1v3", "lost_1v4", "lost_1v5",
+        )
+        result: Dict[str, int] = {}
+        for key in keys:
+            try:
+                result[key] = int(parsed.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                result[key] = 0
+
+        # Keep analyzer math aligned with calculator's computed-sum behavior.
+        result["total"] = result["1v1"] + result["1v2"] + result["1v3"] + result["1v4"] + result["1v5"]
+        result["lost_total"] = (
+            result["lost_1v1"] + result["lost_1v2"] + result["lost_1v3"] + result["lost_1v4"] + result["lost_1v5"]
+        )
+        return result
 
     def _insight(
         self,
@@ -42,6 +85,12 @@ class InsightAnalyzer:
             "evidence": evidence,
             "action": action,
         }
+
+    def _teamkill_severity(self, teamkill_rate: float) -> str:
+        for threshold, severity in TEAMKILL_SEVERITY_BANDS:
+            if teamkill_rate >= threshold:
+                return severity
+        return ""
 
     def generate_insights(self, snapshot: Dict[str, Any], metrics: Dict[str, Any]) -> List[Dict[str, str]]:
         """
@@ -75,14 +124,22 @@ class InsightAnalyzer:
         opening_net_per_round = float(self._safe_get(metrics, "opening_net_per_round", 0.0))
         high_pressure_success = float(self._safe_get(metrics, "high_pressure_success", 0.0))
         high_pressure_attempt_rate = float(self._safe_get(metrics, "high_pressure_attempt_rate", 0.0))
+        high_pressure_attempts = int(self._safe_get(metrics, "high_pressure_attempts", 0))
+        high_pressure_wins = int(self._safe_get(metrics, "high_pressure_wins", 0))
         risk_index = float(self._safe_get(metrics, "risk_index", 0.0))
         clean_play_index = float(self._safe_get(metrics, "clean_play_index", 1.0))
+        clutch_attempts = int(self._safe_get(metrics, "clutch_attempts", 0))
+        disadv_attempts = int(self._safe_get(metrics, "disadv_attempts", 0))
+        disadv_attempt_share = float(self._safe_get(metrics, "disadv_attempt_share", 0.0))
+        extreme_attempts = int(self._safe_get(metrics, "extreme_attempts", 0))
+        time_played_unreliable = bool(self._safe_get(metrics, "time_played_unreliable", False))
 
         clutches = self._parse_clutches(snapshot)
         clutch_wins = int(clutches.get("total", 0))
         clutch_losses = int(clutches.get("lost_total", 0))
+        extreme_wins = int(clutches.get("1v4", 0)) + int(clutches.get("1v5", 0))
 
-        if rounds < 120:
+        if rounds < SMALL_SAMPLE_ROUNDS:
             insights.append(
                 self._insight(
                     severity="info",
@@ -135,24 +192,54 @@ class InsightAnalyzer:
                 )
             )
 
-        if clutch_attempt_rate >= 0.12 and overall_clutch_success < 0.22:
+        if clutch_attempt_rate >= CLUTCH_LOW_SUCCESS_ATTEMPT_RATE and overall_clutch_success < CLUTCH_LOW_SUCCESS_THRESHOLD:
             insights.append(
                 self._insight(
                     severity="medium",
                     category="clutch",
                     message="You face many clutches but conversion is low.",
-                    evidence=f"Attempt Rate: {clutch_attempt_rate:.2f}, Success: {overall_clutch_success:.2f}",
+                    evidence=(
+                        f"Overall Clutches: {clutch_wins}/{clutch_wins + clutch_losses} wins ({overall_clutch_success:.2f}), "
+                        f"Rate: {clutch_wins + clutch_losses}/{rounds} ({clutch_attempt_rate:.2f})"
+                    ),
                     action="Prioritize early-round survival and repositioning to avoid repeated disadvantage states.",
                 )
             )
-        elif overall_clutch_success >= 0.30 and (clutch_wins + clutch_losses) >= 20:
+        elif overall_clutch_success >= CLUTCH_STRONG_SUCCESS_THRESHOLD and (clutch_wins + clutch_losses) >= CLUTCH_MIN_STRONG_SAMPLE:
             insights.append(
                 self._insight(
                     severity="low",
                     category="clutch",
                     message="Above-average clutch conversion.",
-                    evidence=f"Clutch wins/losses: {clutch_wins}/{clutch_losses}, Success: {overall_clutch_success:.2f}",
+                    evidence=f"Clutch wins: {clutch_wins}/{clutch_wins + clutch_losses} ({overall_clutch_success:.2f})",
                     action="Lean into late-round decision making and information denial setups.",
+                )
+            )
+
+        if (
+            clutch_attempt_rate >= CLUTCH_BURDEN_ATTEMPT_RATE
+            and disadv_attempt_share >= CLUTCH_BURDEN_DISADV_SHARE
+            and clutch_attempts >= CLUTCH_BURDEN_MIN_ATTEMPTS
+        ):
+            insights.append(
+                self._insight(
+                    severity="high",
+                    category="clutch_burden",
+                    message="Clutch burden is high.",
+                    evidence=f"Disadvantaged clutches: {disadv_attempts}/{clutch_attempts} ({disadv_attempt_share:.2f})",
+                    action="Play closer to trade support; avoid isolated late-round positions; preserve a teammate for crossfires.",
+                )
+            )
+
+        if extreme_attempts >= EXTREME_CLUTCH_MIN_ATTEMPTS and clutch_attempts >= EXTREME_CLUTCH_MIN_TOTAL_ATTEMPTS:
+            severity = "high" if extreme_wins == 0 else "medium"
+            insights.append(
+                self._insight(
+                    severity=severity,
+                    category="extreme_clutch",
+                    message="Extreme clutches (1v4/1v5) are frequent.",
+                    evidence=f"1v4/1v5 attempts: {extreme_attempts}, wins: {extreme_wins}",
+                    action="Prioritize early-man-count discipline and trade spacing to reduce impossible end-round states.",
                 )
             )
 
@@ -167,30 +254,40 @@ class InsightAnalyzer:
                 )
             )
 
+        discipline_emitted = False
         if rounds > 0:
             teamkill_rate = teamkills / rounds
-            if teamkill_rate >= 0.02:
-                insights.append(
-                    self._insight(
-                        severity="medium",
-                        category="discipline",
-                        message="Teamkill rate is high enough to affect round outcomes.",
-                        evidence=f"Teamkills: {teamkills}, Rounds: {rounds}",
-                        action="Tighten crossfire comms and avoid swinging through teammate lines.",
-                    )
+            teamkill_severity = self._teamkill_severity(teamkill_rate)
+            if teamkill_severity:
+                discipline_emitted = True
+                message = "Teamkill rate is high enough to affect round outcomes." if teamkill_severity == "medium" else "Teamkill rate is elevated and worth monitoring."
+                action = (
+                    "Tighten crossfire comms and avoid swinging through teammate lines."
+                    if teamkill_severity == "medium"
+                    else "Improve crossfire spacing and call teammate pathing before swings."
                 )
-            elif teamkill_rate >= 0.01:
                 insights.append(
                     self._insight(
-                        severity="low",
+                        severity=teamkill_severity,
                         category="discipline",
-                        message="Teamkill rate is elevated and worth monitoring.",
-                        evidence=f"Teamkills: {teamkills}, Rounds: {rounds}",
-                        action="Improve crossfire spacing and call teammate pathing before swings.",
+                        message=message,
+                        evidence=f"Teamkills: {teamkills}/{rounds} ({teamkill_rate:.2%}), Clean Play Index: {clean_play_index:.2f}",
+                        action=action,
                     )
                 )
 
-        if time_played_hours >= 50 and wins_per_hour < 0.12:
+        if not discipline_emitted and clean_play_index < 0.5:
+            insights.append(
+                self._insight(
+                    severity="medium",
+                    category="discipline",
+                    message="Clean play score is low and may be costing rounds.",
+                    evidence=f"Clean Play Index: {clean_play_index:.2f}",
+                    action="Tighten crosshair discipline around teammate pathing and utility execution timing.",
+                )
+            )
+
+        if (not time_played_unreliable) and time_played_hours >= EFFICIENCY_MIN_HOURS and wins_per_hour < EFFICIENCY_LOW_WINS_PER_HOUR:
             insights.append(
                 self._insight(
                     severity="low",
@@ -233,23 +330,29 @@ class InsightAnalyzer:
                 )
             )
 
-        if high_pressure_attempt_rate >= 0.03 and high_pressure_success < 0.12:
+        if (high_pressure_attempts >= HIGH_PRESSURE_MIN_ATTEMPTS and high_pressure_attempt_rate >= HIGH_PRESSURE_MIN_ATTEMPT_RATE and high_pressure_success < HIGH_PRESSURE_LOW_SUCCESS):
             insights.append(
                 self._insight(
                     severity="medium",
                     category="high_pressure",
                     message="High-pressure clutch conversion is low.",
-                    evidence=f"High Pressure Attempt Rate: {high_pressure_attempt_rate:.2f}, Success: {high_pressure_success:.2f}",
+                    evidence=(
+                        f"High Pressure: {high_pressure_wins}/{high_pressure_attempts} wins ({high_pressure_success:.2f}), "
+                        f"Rate: {high_pressure_attempts}/{rounds} ({high_pressure_attempt_rate:.2f})"
+                    ),
                     action="Prioritize isolating 1v1s and preserving utility for final 20 seconds.",
                 )
             )
-        elif high_pressure_attempt_rate >= 0.03 and high_pressure_success >= 0.20:
+        elif (high_pressure_attempts >= HIGH_PRESSURE_MIN_ATTEMPTS and high_pressure_attempt_rate >= HIGH_PRESSURE_MIN_ATTEMPT_RATE and high_pressure_success >= HIGH_PRESSURE_STRONG_SUCCESS):
             insights.append(
                 self._insight(
                     severity="low",
                     category="high_pressure",
                     message="Strong high-pressure clutch profile.",
-                    evidence=f"High Pressure Attempt Rate: {high_pressure_attempt_rate:.2f}, Success: {high_pressure_success:.2f}",
+                    evidence=(
+                        f"High Pressure: {high_pressure_wins}/{high_pressure_attempts} wins ({high_pressure_success:.2f}), "
+                        f"Rate: {high_pressure_attempts}/{rounds} ({high_pressure_attempt_rate:.2f})"
+                    ),
                     action="Lean into late-round reads and force isolated duels.",
                 )
             )
@@ -265,18 +368,7 @@ class InsightAnalyzer:
                 )
             )
 
-        if clean_play_index < 0.5:
-            insights.append(
-                self._insight(
-                    severity="medium",
-                    category="discipline",
-                    message="Clean play score is low and may be costing rounds.",
-                    evidence=f"Clean Play Index: {clean_play_index:.2f}",
-                    action="Tighten crosshair discipline around teammate pathing and utility execution timing.",
-                )
-            )
-
-        if "overall_conf" in metrics and overall_conf < 0.45:
+        if "overall_conf" in metrics and overall_conf < LOW_CONFIDENCE_OVERALL:
             insights.append(
                 self._insight(
                     severity="info",
@@ -300,3 +392,4 @@ class InsightAnalyzer:
 
         insights.sort(key=lambda insight: (self.SEVERITY_ORDER.get(insight["severity"], 99), insight["category"]))
         return insights
+

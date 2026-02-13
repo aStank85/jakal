@@ -6,6 +6,9 @@ from src.calculator import MetricsCalculator
 from src.comparator import PlayerComparator
 from src.analyzer import InsightAnalyzer
 from src.ui import TerminalUI
+from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
+
+
 
 def main():
     # Initialize components
@@ -59,6 +62,12 @@ def main():
                     if metrics['secondary_role']:
                         print(f"Secondary: {metrics['secondary_role']} ({metrics['secondary_confidence']:.1f})")
 
+                    print(f"Rounds/Hour: {metrics.get('rounds_per_hour', 0.0):.2f}")
+                    if metrics.get('time_played_unreliable', False):
+                        print(
+                            f"Warning: time-played metrics unreliable (Rounds/Hour < {MIN_RELIABLE_ROUNDS_PER_HOUR:.1f}); per-hour metrics suppressed."
+                        )
+
                     insights = analyzer.generate_insights(snapshot, metrics)
                     if insights:
                         top_insight = insights[0]
@@ -101,10 +110,8 @@ def main():
                         snapshot = db.get_latest_snapshot(username)
                         if snapshot:
                             snapshots.append(snapshot)
-                            # Try to get metrics from DB first, calculate if not found
-                            metrics = db.get_latest_metrics(username)
-                            if not metrics:
-                                metrics = calculator.calculate_all(snapshot)
+                            # Recalculate from snapshot for full consistency with player details view.
+                            metrics = calculator.calculate_all(snapshot)
                             metrics_list.append(metrics)
 
                     if len(snapshots) < 2:
@@ -158,5 +165,11 @@ def main():
         # Ensure database is always closed
         db.close()
 
+
 if __name__ == '__main__':
     main()
+
+
+
+
+

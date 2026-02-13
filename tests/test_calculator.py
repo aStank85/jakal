@@ -50,6 +50,7 @@ class TestMetricsCalculator:
             'hs_pct': 60.0,
             'first_bloods': 96,
             'first_deaths': 57,
+            'time_played_hours': 120.0,
             'clutches_data': json.dumps(clutches_data)
         }
 
@@ -250,7 +251,11 @@ class TestMetricsCalculator:
             'primary_role',
             'primary_confidence',
             'secondary_role',
-            'secondary_confidence'
+            'secondary_confidence',
+            'rounds_per_hour',
+            'time_played_unreliable',
+            'high_pressure_wins',
+            'extreme_attempts',
         ]
 
         for key in expected_keys:
@@ -274,6 +279,53 @@ class TestMetricsCalculator:
 
         # 1v1 clutch success: 16 / (16 + 6) = 0.727
         assert metrics['clutch_1v1_success'] == pytest.approx(0.727, rel=0.01)
+
+    def test_krazy_clutch_golden_metrics(self, calculator):
+        """Golden test for clutch math consistency on a Krazy-like profile."""
+        snapshot = {
+            'rounds_played': 702,
+            'kills': 680,
+            'deaths': 493,
+            'assists': 193,
+            'kd': 1.38,
+            'kills_per_round': 0.97,
+            'deaths_per_round': 0.70,
+            'assists_per_round': 0.27,
+            'first_bloods': 96,
+            'first_deaths': 57,
+            'match_win_pct': 52.1,
+            'wins': 61,
+            'time_played_hours': 288.0,
+            'clutches_data': json.dumps({
+                'total': 21,
+                '1v1': 12,
+                '1v2': 7,
+                '1v3': 2,
+                '1v4': 0,
+                '1v5': 0,
+                'lost_total': 88,
+                'lost_1v1': 10,
+                'lost_1v2': 30,
+                'lost_1v3': 11,
+                'lost_1v4': 25,
+                'lost_1v5': 12,
+            })
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+
+        assert metrics['clutch_attempt_rate'] == pytest.approx(109 / 702, rel=0.001)
+        assert metrics['overall_clutch_success'] == pytest.approx(21 / 109, rel=0.001)
+        assert metrics['clutch_1v1_success'] == pytest.approx(12 / 22, rel=0.001)
+        assert metrics['clutch_1v2_success'] == pytest.approx(7 / 37, rel=0.001)
+
+        assert metrics['high_pressure_attempt_rate'] == pytest.approx(50 / 702, rel=0.001)
+        assert metrics['high_pressure_success'] == pytest.approx(2 / 50, rel=0.001)
+        assert metrics['high_pressure_attempts'] == 50
+        assert metrics['high_pressure_wins'] == 2
+
+        assert metrics['disadv_attempt_share'] == pytest.approx(87 / 109, rel=0.001)
+        assert metrics['extreme_attempts'] == 37
 
 
 class TestCalculatorEdgeCases:
@@ -353,8 +405,89 @@ class TestCalculatorEdgeCases:
         }
 
         metrics = calculator.calculate_all(snapshot)
-        assert metrics['clutch_attempt_rate'] == 0.0
+        assert metrics['clutch_attempt_rate'] == pytest.approx(0.05, rel=0.01)
         assert metrics['clutch_1v1_success'] == pytest.approx(0.6, rel=0.01)
+
+    def test_clutch_total_mismatch_logs_warning_and_uses_computed_sum(self, caplog):
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 100,
+            'kills': 10,
+            'deaths': 10,
+            'assists': 2,
+            'first_bloods': 1,
+            'first_deaths': 1,
+            'wins': 5,
+            'time_played_hours': 20.0,
+            'clutches_data': json.dumps({
+                'total': 99,
+                '1v1': 1,
+                'lost_total': 88,
+                'lost_1v1': 2,
+            })
+        }
+
+        with caplog.at_level('WARNING'):
+            metrics = calculator.calculate_all(snapshot)
+
+        assert metrics['clutch_attempt_rate'] == pytest.approx(0.03, rel=0.01)
+        assert metrics['clutch_totals_mismatch'] is True
+        assert metrics['clutch_lost_totals_mismatch'] is True
+        assert metrics['clutch_totals_unreliable'] is True
+        assert metrics['overall_clutch_success'] == pytest.approx(1 / 3, rel=0.01)
+        assert "Clutch total mismatch" in caplog.text
+        assert "Clutch lost_total mismatch" in caplog.text
+
+    def test_time_unreliable_suppresses_per_hour_metrics(self):
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 120,
+            'kills': 80,
+            'deaths': 60,
+            'assists': 20,
+            'wins': 30,
+            'kd': 1.33,
+            'kills_per_round': 0.67,
+            'deaths_per_round': 0.5,
+            'assists_per_round': 0.17,
+            'first_bloods': 10,
+            'first_deaths': 8,
+            'time_played_hours': 60.0,
+            'clutches_data': json.dumps({'1v1': 2, 'lost_1v1': 2}),
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+
+        assert metrics['rounds_per_hour'] == pytest.approx(2.0, rel=0.01)
+        assert metrics['time_played_unreliable'] is True
+        assert metrics['wins_per_hour'] is None
+        assert metrics['kills_per_hour'] is None
+        assert metrics['tk_per_hour'] is None
+
+    def test_time_reliable_keeps_per_hour_metrics(self):
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 300,
+            'kills': 210,
+            'deaths': 180,
+            'assists': 60,
+            'wins': 120,
+            'kd': 1.16,
+            'kills_per_round': 0.7,
+            'deaths_per_round': 0.6,
+            'assists_per_round': 0.2,
+            'first_bloods': 20,
+            'first_deaths': 15,
+            'time_played_hours': 40.0,
+            'clutches_data': json.dumps({'1v1': 2, 'lost_1v1': 2}),
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+
+        assert metrics['rounds_per_hour'] == pytest.approx(7.5, rel=0.01)
+        assert metrics['time_played_unreliable'] is False
+        assert metrics['wins_per_hour'] == pytest.approx(3.0, rel=0.01)
+        assert metrics['kills_per_hour'] == pytest.approx(5.25, rel=0.01)
 
     def test_expansion_pack_metrics(self):
         """Test new v1 expansion metrics and confidence weighting."""
@@ -398,11 +531,58 @@ class TestCalculatorEdgeCases:
         assert metrics['clutch_attempts'] == 60
         assert metrics['clutch_attempts_per_100'] == pytest.approx(30.0, rel=0.01)
         assert metrics['high_pressure_attempts'] == 29
+        assert metrics['high_pressure_wins'] == 4
         assert metrics['survival_rate'] == pytest.approx(0.10, rel=0.01)
         assert metrics['rounds_per_hour'] == pytest.approx(2.0, rel=0.01)
+        assert metrics['time_played_unreliable'] is True
+        assert metrics['wins_per_hour'] is None
         assert metrics['tk_per_kill'] == pytest.approx(4 / 220, rel=0.01)
         assert metrics['clean_play_index'] == pytest.approx(0.0, rel=0.01)
         assert metrics['rounds_conf'] == pytest.approx(200 / 300, rel=0.01)
-        assert metrics['time_conf'] == pytest.approx(1.0, rel=0.01)
+        assert metrics['time_conf'] == pytest.approx(0.0, rel=0.01)
         assert metrics['clutch_conf'] == pytest.approx(1.0, rel=0.01)
-        assert metrics['overall_conf'] == pytest.approx(0.80, rel=0.01)
+        assert metrics['overall_conf'] == pytest.approx(0.55, rel=0.01)
+
+    def test_clean_play_index_at_normalization_rate(self):
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 100,
+            'kills': 50,
+            'deaths': 50,
+            'assists': 10,
+            'wins': 20,
+            'kd': 1.0,
+            'kills_per_round': 0.5,
+            'deaths_per_round': 0.5,
+            'assists_per_round': 0.1,
+            'first_bloods': 5,
+            'first_deaths': 5,
+            'time_played_hours': 10.0,
+            'teamkills': 2,
+            'clutches_data': json.dumps({'1v1': 1, 'lost_1v1': 1}),
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+        assert metrics['clean_play_index'] == pytest.approx(0.0, rel=0.01)
+
+    def test_clean_play_index_at_half_normalization_rate(self):
+        calculator = MetricsCalculator()
+        snapshot = {
+            'rounds_played': 100,
+            'kills': 50,
+            'deaths': 50,
+            'assists': 10,
+            'wins': 20,
+            'kd': 1.0,
+            'kills_per_round': 0.5,
+            'deaths_per_round': 0.5,
+            'assists_per_round': 0.1,
+            'first_bloods': 5,
+            'first_deaths': 5,
+            'time_played_hours': 10.0,
+            'teamkills': 1,
+            'clutches_data': json.dumps({'1v1': 1, 'lost_1v1': 1}),
+        }
+
+        metrics = calculator.calculate_all(snapshot)
+        assert metrics['clean_play_index'] == pytest.approx(0.5, rel=0.01)

@@ -5,6 +5,57 @@ All notable changes to Jakal will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-02-13
+
+### Added
+- High-pressure minimum sample-size guard (`HIGH_PRESSURE_MIN_ATTEMPTS = 10`) for both low-success and strong-success insights.
+- Clean-play normalization constant (`CLEAN_PLAY_NORMALIZATION_RATE = TEAMKILL_RATE_MEDIUM`) to remove hardcoded discipline normalization.
+- Data-quality metric flags from calculator:
+  - `clutch_totals_mismatch`
+  - `clutch_lost_totals_mismatch`
+  - `clutch_totals_unreliable`
+- `DATA QUALITY` block in player details output (time scope + clutch totals reliability).
+
+### Changed
+- Per-hour metrics are suppressed to `None` (instead of `0.0`) when `time_played_unreliable` is true.
+- UI renders suppressed per-hour values as `N/A`.
+- Comparator treats suppressed values as no-contest (`winner_index = None`).
+- Compare flow now recalculates metrics from latest snapshots (matching player-details formulas and avoiding stale stored-computed drift).
+
+### Fixed
+- Prevented legacy stored per-hour values from appearing as valid numeric performance in unreliable time scopes.
+## [0.3.3] - 2026-02-13
+
+### Added
+- **Reliability Threshold Config** in new `src/thresholds.py` to centralize analyzer/calculator tuning.
+- **Time-Played Sanity Guard**:
+  - Added `rounds_per_hour` reliability check (`< 5.0` default threshold).
+  - Added `time_played_unreliable` metric flag.
+  - Added CLI warning output when time scope appears unreliable.
+- **Clutch JSON Defenses** in calculator:
+  - All clutch keys now default safely when missing/partial.
+  - Soft invariant validation for:
+    - `total == 1v1+1v2+1v3+1v4+1v5`
+    - `lost_total == lost_1v1+lost_1v2+lost_1v3+lost_1v4+lost_1v5`
+  - Warning logs on mismatch with computed-sum fallback.
+- **New Clutch Insights**:
+  - `clutch_burden` for high disadvantaged-clutch load.
+  - `extreme_clutch` for frequent `1v4/1v5` situations.
+- **Expanded Clutch Metrics Exposure** in player details:
+  - `clutch_1v2_success`, `clutch_1v3_success`, `clutch_1v4_success`, `clutch_1v5_success`
+  - `high_pressure_attempts`, `high_pressure_wins`
+  - `disadv_attempt_share`, `extreme_attempts`
+
+### Changed
+- Per-hour metrics are now suppressed when time-played scope is unreliable.
+- Efficiency insight rules now skip time-dependent judgments when `time_played_unreliable` is true.
+- Clutch-related insight evidence now includes count-based numerators/denominators, not only rates.
+- Teamkill vs clean-play discipline messaging now emits a single deduplicated discipline insight per snapshot.
+
+### Fixed
+- Prevented silently misleading `wins_per_hour` values when `time_played_hours` is likely out-of-scope.
+- Prevented brittle clutch-rate behavior on partial clutch JSON payloads.
+
 ## [0.3.2] - 2026-02-13
 
 ### Added
@@ -151,3 +202,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.1]: https://github.com/yourusername/jakal/compare/v0.2.0...v0.2.1
 [0.3.1]: https://github.com/yourusername/jakal/compare/v0.2.1...v0.3.1
 [0.3.2]: https://github.com/yourusername/jakal/compare/v0.3.1...v0.3.2
+[0.3.3]: https://github.com/yourusername/jakal/compare/v0.3.2...v0.3.3
+
+[0.3.4]: https://github.com/yourusername/jakal/compare/v0.3.3...v0.3.4
+
+
+

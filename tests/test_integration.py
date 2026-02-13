@@ -7,6 +7,7 @@ from src.parser import R6TrackerParser
 from src.database import Database
 from src.calculator import MetricsCalculator
 from src.comparator import PlayerComparator
+from src.ui import TerminalUI
 
 
 class TestIntegration:
@@ -477,9 +478,10 @@ TRN Elo
         # Insert newer snapshot first.
         db.add_stats_snapshot("BackfillUser", stats, "2024-03-01", None, "Y10S4")
 
-        # Mutate wins and insert older snapshot (backfill).
+        # Mutate wins/time and insert older snapshot (backfill).
         backfill_stats = {section: values.copy() for section, values in stats.items()}
         backfill_stats['game']['wins'] = 10
+        backfill_stats['game']['time_played_hours'] = 50.0
         backfill_snapshot_id = db.add_stats_snapshot("BackfillUser", backfill_stats, "2024-01-01", None, "Y10S3")
 
         inserted_snapshot = db.get_snapshot_by_id(backfill_snapshot_id)
@@ -516,3 +518,121 @@ TRN Elo
 
         assert kd_stat is not None
         assert kd_stat['winner_index'] is None
+
+
+    def test_ui_displays_na_for_suppressed_per_hour_metrics(self, capsys):
+        ui = TerminalUI()
+        snapshot = {
+            'username': 'UIUser',
+            'snapshot_date': '2024-02-12',
+            'snapshot_time': '14:30:00',
+            'device_tag': 'pc',
+            'season': 'Y10S4',
+        }
+        metrics = {
+            'wins_per_hour': 0.0,
+            'rounds_per_hour': 2.0,
+            'time_played_unreliable': True,
+            'clutch_totals_mismatch': True,
+            'clutch_lost_totals_mismatch': False,
+            'primary_role': 'Support',
+        }
+
+        ui.show_player_details(snapshot, metrics, insights=[])
+        output = capsys.readouterr().out
+
+        assert 'Wins Per Hour:            N/A' in output
+        assert 'DATA QUALITY' in output
+        assert 'Time Scope:       UNRELIABLE' in output
+        assert 'Clutch Totals:    MISMATCH (total)' in output
+
+    def test_comparator_skips_none_metrics_for_winner_awards(self):
+        comparator = PlayerComparator()
+
+        snapshots = [
+            {
+                'username': 'P1',
+                'snapshot_date': '2024-02-12',
+                'kd': 1.1,
+                'match_win_pct': 50.0,
+                'hs_pct': 50.0,
+                'kills_per_round': 0.8,
+                'assists_per_round': 0.2,
+                'first_bloods': 10,
+            },
+            {
+                'username': 'P2',
+                'snapshot_date': '2024-02-12',
+                'kd': 1.0,
+                'match_win_pct': 49.0,
+                'hs_pct': 49.0,
+                'kills_per_round': 0.7,
+                'assists_per_round': 0.2,
+                'first_bloods': 9,
+            },
+        ]
+        metrics_list = [
+            {
+                'primary_role': 'Support',
+                'entry_efficiency': None,
+                'clutch_1v1_success': 0.5,
+                'teamplay_index': 0.3,
+                'aggression_score': 0.2,
+            },
+            {
+                'primary_role': 'Support',
+                'entry_efficiency': 0.6,
+                'clutch_1v1_success': 0.4,
+                'teamplay_index': 0.2,
+                'aggression_score': 0.2,
+            },
+        ]
+
+        comparison = comparator.compare(snapshots, metrics_list)
+        entry_stat = next((item for item in comparison['stats'] if item['name'] == 'Entry Efficiency'), None)
+
+        assert entry_stat is not None
+        assert entry_stat['winner_index'] is None
+
+
+    def test_compare_flow_uses_recalculated_metrics_not_stored_metrics(self, components, sample_paste_1, sample_paste_2):
+        """Compare flow should use live calculator output, not stale stored computed_metrics rows."""
+        parser = components['parser']
+        db = components['db']
+        calculator = components['calculator']
+        comparator = components['comparator']
+
+        # Insert players + snapshots + initial computed rows.
+        stats1 = parser.parse(sample_paste_1)
+        snapshot_id1 = db.add_stats_snapshot('CalcA', stats1, '2024-02-12', None, 'Y10S4')
+        snapshot1 = db.get_latest_snapshot('CalcA')
+        metrics1 = calculator.calculate_all(snapshot1)
+        player1 = db.get_player('CalcA')
+        db.add_computed_metrics(snapshot_id1, player1['player_id'], metrics1)
+
+        stats2 = parser.parse(sample_paste_2)
+        snapshot_id2 = db.add_stats_snapshot('CalcB', stats2, '2024-02-12', None, 'Y10S4')
+        snapshot2 = db.get_latest_snapshot('CalcB')
+        metrics2 = calculator.calculate_all(snapshot2)
+        player2 = db.get_player('CalcB')
+        db.add_computed_metrics(snapshot_id2, player2['player_id'], metrics2)
+
+        # Corrupt stored entry_efficiency to force opposite winner if DB metrics were used.
+        cursor = db.conn.cursor()
+        cursor.execute('UPDATE computed_metrics SET entry_efficiency = ? WHERE snapshot_id = ?', (0.01, snapshot_id1))
+        cursor.execute('UPDATE computed_metrics SET entry_efficiency = ? WHERE snapshot_id = ?', (0.99, snapshot_id2))
+        db.conn.commit()
+
+        stale_a = db.get_latest_metrics('CalcA')
+        stale_b = db.get_latest_metrics('CalcB')
+        assert stale_a['entry_efficiency'] < stale_b['entry_efficiency']
+
+        # Mirror main compare flow: recalculate from latest snapshots.
+        snapshots = [db.get_latest_snapshot('CalcA'), db.get_latest_snapshot('CalcB')]
+        metrics_list = [calculator.calculate_all(snapshots[0]), calculator.calculate_all(snapshots[1])]
+
+        comparison = comparator.compare(snapshots, metrics_list)
+        entry_stat = next((item for item in comparison['stats'] if item['name'] == 'Entry Efficiency'), None)
+
+        assert entry_stat is not None
+        assert entry_stat['winner_index'] == 0
