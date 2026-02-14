@@ -248,32 +248,45 @@ class R6TrackerParser:
     def _validate_parsed_data(self, result: Dict[str, Any]) -> None:
         """
         Validate that essential data was parsed.
-        
+
         Args:
             result: Parsed stats dictionary
-            
+
         Raises:
-            ValueError: If critical data is missing
+            ValueError: If ALL critical data is missing (likely parse failure)
+
+        Note: Made tolerant of missing sections for web scraping (v0.5).
+              Only fails if we got absolutely nothing useful.
         """
-        # Check that we have data in key sections
-        required_sections = ['game', 'combat', 'clutches']
-        
-        for section in required_sections:
-            if not result[section]:
-                raise ValueError(f"Failed to parse {section} section - no data found")
-        
-        # Check for specific critical stats
-        critical_stats = [
+        # Check if we got ANY data at all
+        total_stats = sum(len(section_data) for section_data in result.values())
+
+        if total_stats == 0:
+            raise ValueError(
+                "Failed to parse any stats from input text. "
+                "Text may be malformed or from wrong source."
+            )
+
+        # Check for at least SOME critical stats (not all required)
+        # If we have at least 2 of these, consider it valid
+        important_stats = [
             ('game', 'matches'),
-            ('game', 'wins'),
+            ('rounds', 'rounds_played'),
             ('combat', 'kills'),
-            ('combat', 'deaths'),
             ('combat', 'kd')
         ]
-        
-        for section, stat in critical_stats:
-            if stat not in result[section]:
-                raise ValueError(f"Missing critical stat: {section}.{stat}")
+
+        found_count = 0
+        for section, stat in important_stats:
+            if result.get(section, {}).get(stat) is not None:
+                found_count += 1
+
+        if found_count < 2:
+            raise ValueError(
+                "Insufficient critical stats found. "
+                f"Found {found_count}/4 important stats. "
+                "Parse may have failed or input incomplete."
+            )
 
 
 def pretty_print_stats(stats: Dict[str, Any]) -> None:

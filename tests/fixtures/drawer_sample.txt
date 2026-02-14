@@ -1,0 +1,113 @@
+Game
+Matches
+117
+Wins
+61
+Losses
+56
+Match Win %
+52.1%
+Time Played
+288h
+Abandons
+0
+Score
+372,459
+
+Rounds
+Rounds Played
+702
+Wins
+364
+Losses
+338
+Win %
+51.9%
+Disconnected
+0
+
+Combat
+Kills
+680
+Deaths
+493
+Assists
+144
+K/D
+1.38
+Kills Per Round
+0.97
+Deaths Per Round
+0.70
+Assists Per Round
+0.21
+Kills Per Game
+5.81
+Headshots
+408
+Headshots Per Round
+0.58
+HS %
+60.0%
+First Bloods
+89
+First Deaths
+72
+Teamkills
+3
+ESR
+0.52
+
+Rounds - Clutches
+Clutches
+28
+1v1
+16
+1v2
+7
+1v3
+5
+1v4
+0
+1v5
+0
+Clutches Lost
+81
+1v1 Lost
+6
+1v2 Lost
+14
+1v3 Lost
+24
+1v4 Lost
+25
+1v5 Lost
+12
+
+Multikills
+Aces
+2
+4K
+45
+3K
+118
+2K
+215
+1K
+300
+
+Ranked
+Current Rank
+19
+Max Rank
+29
+Top Rank Position
+14,523
+
+Uncategorized
+Rank Points
+2,869
+Max Rank Points
+3,869
+TRN Elo
+1,248

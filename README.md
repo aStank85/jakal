@@ -1,15 +1,12 @@
-<<<<<<< HEAD
-# jakal
-=======
 # Jakal - Rainbow Six Siege Stats Analyzer
 
 Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tracker season drawer data, stores historical snapshots, computes derived metrics, and compares players over time.
 
 ## Current Status
 
-- Current release: `v0.3.4` (high-pressure sample guards, clean-play normalization constant, data-quality surfacing, and consistency updates)
-- Next major target: `v0.4` export/reporting and scrape ingestion pipeline
-- Test status: full suite passing (`92` tests)
+- Current release: `v0.5` (Playwright-based web scraping for automated stats fetching)
+- Previous release: `v0.3.4` (high-pressure sample guards, clean-play normalization constant, data-quality surfacing, and consistency updates)
+- Test status: full suite passing
 
 ## Core Features
 
@@ -28,6 +25,18 @@ Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tr
 - Python 3.9+
 - No runtime dependencies outside Python standard library
 - Optional for tests: `pytest`
+- **Optional for web scraping (v0.5+):** `playwright`
+
+### Web Scraping Setup (Optional)
+
+To enable automated stats fetching from R6 Tracker:
+
+```bash
+pip install playwright
+python -m playwright install
+```
+
+See [docs/v0.5-notes.md](docs/v0.5-notes.md) for complete setup and usage guide.
 
 ## Run
 
@@ -37,7 +46,7 @@ python main.py
 
 ## CLI Workflow
 
-### Add New Stats Snapshot
+### Add New Stats Snapshot (Manual Paste)
 
 1. Open [R6 Tracker](https://r6.tracker.network/) and copy the season drawer stats.
 2. In Jakal, choose `1`.
@@ -47,6 +56,16 @@ python main.py
    - Device tag (`pc`, `xbox`, or `playstation`)
    - Season (default `Y10S4`)
 5. Date/time are auto-recorded by the app.
+
+### Add New Stats Snapshot (Web Scraping - v0.5+)
+
+Automatically fetch stats from R6 Tracker:
+
+```bash
+python scripts/scrape_drawer.py --username SaucedZyn
+```
+
+See [docs/v0.5-notes.md](docs/v0.5-notes.md) for all options and troubleshooting.
 
 ### View / Compare
 
@@ -64,17 +83,25 @@ jakal-mvp/
 │   ├── calculator.py
 │   ├── comparator.py
 │   ├── ui.py
-│   └── analyzer.py
+│   ├── analyzer.py
+│   └── scraper/          # v0.5+
+│       ├── drawer.py
+│       ├── session.py
+│       └── validation.py
+├── scripts/               # v0.5+
+│   └── scrape_drawer.py
 ├── tests/
 │   ├── test_parser.py
 │   ├── test_calculator.py
 │   ├── test_database.py
 │   ├── test_integration.py
-│   └── test_analyzer.py
+│   ├── test_analyzer.py
+│   └── test_scraper.py   # v0.5+
 ├── docs/
 │   ├── v0.1-notes.md
 │   ├── v0.2-notes.md
-│   └── v0.3-notes.md
+│   ├── v0.3-notes.md
+│   └── v0.5-notes.md     # v0.5+
 ├── data/
 │   └── jakal.db
 ├── main.py
@@ -112,8 +139,8 @@ pytest -q -p no:cacheprovider
 
 ## Roadmap Snapshot
 
-- `v0.4`: export/reporting features and saved insight reports
-- `v0.5+`: web-scrape ingestion pipeline and profile sync workflows
+- `v0.5`: ✅ Playwright-based web scraping (complete)
+- `v0.6+`: export/reporting features, saved insight reports, advanced scraping features
 
 ## License
 

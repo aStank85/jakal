@@ -1,0 +1,21 @@
+Game
+Rounds Played
+0
+Matches
+0
+Wins
+0
+Time Played
+0h
+
+Rounds
+Rounds Played
+0
+
+Combat
+Kills
+0
+Deaths
+0
+K/D
+0.00
