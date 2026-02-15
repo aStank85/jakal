@@ -12,8 +12,11 @@ from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
 from src.api_client import TrackerAPIClient
-from datetime import datetime
+from datetime import datetime, timezone
 import time
+
+CURRENT_SEASON_START = datetime(2025, 11, 1, tzinfo=timezone.utc)
+DEFAULT_MATCH_HISTORY_CAP = None
 
 
 def _safe_print(message: str) -> None:
@@ -27,6 +30,12 @@ def _safe_print(message: str) -> None:
             .replace("❌", "[ERROR]")
         )
         print(fallback)
+
+
+def _match_scope_label(max_matches: int | None) -> str:
+    if max_matches is None:
+        return "full season"
+    return f"last {max_matches} matches"
 
 
 def _save_scraped_profile(
@@ -101,7 +110,8 @@ def main():
                         ui.show_error("Username is required")
                         continue
 
-                    print(f"Syncing {username}...")
+                    scope_label = _match_scope_label(DEFAULT_MATCH_HISTORY_CAP)
+                    print(f"Syncing {username} ({scope_label})...")
                     result = scraper.scrape_full_profile(username)
                     if result.get("season_stats") is None:
                         raise RuntimeError("Season stats missing; sync cannot continue")
@@ -116,7 +126,11 @@ def main():
 
                     detail_rows = []
                     try:
-                        detail_rows = api_client.scrape_full_match_history(username, max_matches=40)
+                        detail_rows = api_client.scrape_full_match_history(
+                            username,
+                            max_matches=DEFAULT_MATCH_HISTORY_CAP,
+                            since_date=CURRENT_SEASON_START,
+                        )
                     except Exception as exc:
                         result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
 
@@ -219,7 +233,8 @@ def main():
 
                     for idx, player in enumerate(players, 1):
                         username = player.get("username")
-                        print(f"Syncing {idx}/{total}: {username}...")
+                        scope_label = _match_scope_label(DEFAULT_MATCH_HISTORY_CAP)
+                        print(f"Syncing {idx}/{total}: {username} ({scope_label})...")
                         try:
                             result = scraper.scrape_full_profile(username)
                             if result.get("season_stats") is None:
@@ -227,7 +242,11 @@ def main():
 
                             detail_rows = []
                             try:
-                                detail_rows = api_client.scrape_full_match_history(username, max_matches=40)
+                                detail_rows = api_client.scrape_full_match_history(
+                                    username,
+                                    max_matches=DEFAULT_MATCH_HISTORY_CAP,
+                                    since_date=CURRENT_SEASON_START,
+                                )
                             except Exception as exc:
                                 result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
 

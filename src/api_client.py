@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -84,6 +85,32 @@ class TrackerAPIClient:
         if isinstance(reason, str) and reason:
             return reason.lower().replace(" ", "_")
         return self.END_REASON_MAP.get(self._safe_int(reason, -1), "unknown")
+
+    @staticmethod
+    def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_since_date(since_date: Optional[Any]) -> Optional[datetime]:
+        if since_date is None:
+            return None
+        if isinstance(since_date, datetime):
+            dt = since_date
+        elif isinstance(since_date, str):
+            dt = TrackerAPIClient._parse_timestamp(since_date)
+            if dt is None:
+                return None
+        else:
+            return None
+
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
 
     def parse_match_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -227,24 +254,56 @@ class TrackerAPIClient:
             "segment_counts": {k: len(v) for k, v in grouped.items()},
         }
 
-    def get_all_matches(self, username: str, max_pages: int = 2) -> List[Dict[str, Any]]:
+    def get_all_matches(
+        self,
+        username: str,
+        max_pages: Optional[int] = None,
+        since_date: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
         matches: List[Dict[str, Any]] = []
         next_token: Optional[int] = None
+        pages_fetched = 0
+        cutoff = self._normalize_since_date(since_date)
 
-        for _ in range(max_pages):
+        while True:
+            if max_pages is not None and pages_fetched >= max_pages:
+                break
             page = self.get_match_list(username, next_token=next_token)
-            matches.extend(page.get("matches", []))
+            page_matches = page.get("matches", [])
+            stop_for_cutoff = False
+            if cutoff is not None:
+                filtered: List[Dict[str, Any]] = []
+                for item in page_matches:
+                    ts = self._parse_timestamp(item.get("timestamp"))
+                    if ts is None or ts >= cutoff:
+                        filtered.append(item)
+                    else:
+                        stop_for_cutoff = True
+                page_matches = filtered
+
+            matches.extend(page_matches)
             next_token = page.get("next")
+            pages_fetched += 1
+
+            if stop_for_cutoff:
+                break
             if next_token is None:
                 break
             time.sleep(self.sleep_seconds)
 
         return matches
 
-    def scrape_full_match_history(self, username: str, max_matches: int = 40) -> List[Dict[str, Any]]:
-        pages = max(1, (max_matches + 19) // 20)
-        all_matches = self.get_all_matches(username, max_pages=pages)
-        selected = all_matches[:max_matches]
+    def scrape_full_match_history(
+        self,
+        username: str,
+        max_matches: Optional[int] = None,
+        since_date: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
+        pages = None
+        if max_matches is not None:
+            pages = max(1, (max_matches + 19) // 20)
+        all_matches = self.get_all_matches(username, max_pages=pages, since_date=since_date)
+        selected = all_matches[:max_matches] if max_matches is not None else all_matches
 
         out: List[Dict[str, Any]] = []
         for match in selected:

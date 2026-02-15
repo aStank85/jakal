@@ -136,6 +136,35 @@ def test_pagination_next_token(client, monkeypatch):
     assert "next=1" in called_urls[1]
 
 
+def test_since_date_cutoff_stops_pagination(client, monkeypatch):
+    page1 = {
+        "matches": [
+            {"match_id": "m1", "timestamp": "2026-02-14T06:35:25.404+00:00"},
+            {"match_id": "m2", "timestamp": "2026-01-10T00:00:00+00:00"},
+        ],
+        "next": 1,
+    }
+    page2 = {
+        "matches": [
+            {"match_id": "m3", "timestamp": "2025-10-01T00:00:00+00:00"},
+            {"match_id": "m4", "timestamp": "2025-09-15T00:00:00+00:00"},
+        ],
+        "next": 2,
+    }
+    pages = [page1, page2]
+    calls = {"count": 0}
+
+    def fake_get_match_list(username, next_token=None):
+        calls["count"] += 1
+        return pages.pop(0)
+
+    monkeypatch.setattr(client, "get_match_list", fake_get_match_list)
+    matches = client.get_all_matches("SaucedZyn", since_date="2025-11-01T00:00:00+00:00")
+
+    assert [m["match_id"] for m in matches] == ["m1", "m2"]
+    assert calls["count"] == 2
+
+
 def test_rate_limit_retry(monkeypatch):
     import src.api_client as api_module
 
