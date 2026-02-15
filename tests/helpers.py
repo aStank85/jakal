@@ -39,25 +39,32 @@ def _make_snapshot(db: Database, username: str, kd: float, win_pct: float,
     losses = matches - wins
     headshots = int(kills * hs_pct / 100)
 
+    kills_per_game = kills / matches if matches > 0 else 0.0
+    headshots_per_round = headshots / rounds_played if rounds_played > 0 else 0.0
+
     cursor = db.conn.cursor()
     cursor.execute("""
         INSERT INTO stats_snapshots (
             player_id, snapshot_date, snapshot_time, season,
             abandons, matches, wins, losses, match_win_pct, time_played_hours,
+            score,
             rounds_played, rounds_wins, rounds_losses, rounds_win_pct, disconnected,
             kills, deaths, assists, kd, kills_per_round, deaths_per_round,
-            assists_per_round, headshots, hs_pct, first_bloods, first_deaths,
+            assists_per_round, kills_per_game, headshots, headshots_per_round, hs_pct,
+            first_bloods, first_deaths,
             teamkills, esr,
             clutches_data,
             aces, kills_3k, kills_4k, kills_2k, kills_1k,
             current_rank, max_rank, rank_points, max_rank_points, trn_elo
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         player_id, '2025-01-15', '12:00', 'Y10S4',
         0, matches, wins, losses, win_pct, 200.0,
+        0,
         rounds_played, int(rounds_played * 0.52), int(rounds_played * 0.48), 52.0, 0,
         kills, deaths, assists, kd, kpr, dpr,
-        apr, headshots, hs_pct, first_bloods, first_deaths,
+        apr, kills_per_game, headshots, headshots_per_round, hs_pct,
+        first_bloods, first_deaths,
         5, 0.0,
         json.dumps(clutches),
         1, 10, 5, 30, 80,

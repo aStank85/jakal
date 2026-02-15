@@ -22,7 +22,7 @@ class Database:
         if path.is_absolute():
             return str(path)
 
-        project_root = Path(__file__).resolve().parents[2]
+        project_root = Path(__file__).resolve().parents[1]
         return str(project_root / path)
     
     def init_database(self):

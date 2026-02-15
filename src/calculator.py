@@ -129,14 +129,75 @@ class MetricsCalculator:
             metrics['clutch_1v1_success']
         )
         
+        # Overall clutch metrics
+        clutches_won = self._num(clutches.get('total', 0))
+        clutches_lost = self._num(clutches.get('lost_total', 0))
+        clutch_attempts = int(clutches_won + clutches_lost)
+        metrics['overall_clutch_success'] = (
+            clutches_won / clutch_attempts if clutch_attempts > 0 else 0.0
+        )
+        metrics['clutch_attempts'] = clutch_attempts
+
+        # Disadvantaged clutch breakdown
+        disadv_wins = sum([
+            self._num(clutches.get('1v2', 0)),
+            self._num(clutches.get('1v3', 0)),
+            self._num(clutches.get('1v4', 0)),
+            self._num(clutches.get('1v5', 0)),
+        ])
+        disadv_losses = sum([
+            self._num(clutches.get('lost_1v2', 0)),
+            self._num(clutches.get('lost_1v3', 0)),
+            self._num(clutches.get('lost_1v4', 0)),
+            self._num(clutches.get('lost_1v5', 0)),
+        ])
+        disadv_attempts = int(disadv_wins + disadv_losses)
+        metrics['disadv_attempts'] = disadv_attempts
+        metrics['disadv_attempt_share'] = (
+            disadv_attempts / clutch_attempts if clutch_attempts > 0 else 0.0
+        )
+
+        # Extreme clutch (1v4 / 1v5)
+        extreme_wins = self._num(clutches.get('1v4', 0)) + self._num(clutches.get('1v5', 0))
+        extreme_losses = self._num(clutches.get('lost_1v4', 0)) + self._num(clutches.get('lost_1v5', 0))
+        metrics['extreme_attempts'] = int(extreme_wins + extreme_losses)
+
+        # High-pressure clutch (1v3+)
+        rounds_played = self._num(snapshot.get('rounds_played'))
+        hp_wins = int(disadv_wins)
+        hp_attempts = int(disadv_attempts)
+        metrics['high_pressure_wins'] = hp_wins
+        metrics['high_pressure_attempts'] = hp_attempts
+        metrics['high_pressure_success'] = (
+            hp_wins / hp_attempts if hp_attempts > 0 else 0.0
+        )
+        metrics['high_pressure_attempt_rate'] = (
+            hp_attempts / rounds_played if rounds_played > 0 else 0.0
+        )
+
+        # Impact rating
+        kills = self._num(snapshot.get('kills'))
+        assists = self._num(snapshot.get('assists'))
+        metrics['impact_rating'] = (
+            (kills + assists) / rounds_played if rounds_played > 0 else 0.0
+        )
+
+        # Wins per hour
+        wins = self._num(snapshot.get('wins'))
+        time_played_hours = self._num(snapshot.get('time_played_hours'))
+        metrics['wins_per_hour'] = (
+            wins / time_played_hours if time_played_hours > 0 else 0.0
+        )
+
         # Role classification
         role_info = self.identify_role(metrics)
         metrics['primary_role'] = role_info['primary']
         metrics['primary_confidence'] = role_info['primary_confidence']
         metrics['secondary_role'] = role_info.get('secondary')
         metrics['secondary_confidence'] = role_info.get('secondary_confidence', 0)
+        metrics['overall_conf'] = role_info['primary_confidence']
         metrics['_defaulted_snapshot_fields'] = defaulted_fields
-        
+
         return metrics
     
     # Individual calculation methods
@@ -230,7 +291,12 @@ class MetricsCalculator:
         return (kd * 25) + (win_pct * 0.3) + (kpr * 30) + (clutch * 20)
     
     def identify_role(self, metrics: Dict[str, float]) -> Dict[str, Any]:
-        """Identify primary and secondary roles based on scores."""
+        """Identify primary and secondary roles based on scores.
+
+        Confidence is the normalized gap between the top two role scores
+        (0-100).  A large gap means high certainty; a tiny gap means
+        the role assignment is ambiguous.
+        """
         scores = {
             'Fragger': metrics['fragger_score'],
             'Entry': metrics['entry_score'],
@@ -239,21 +305,34 @@ class MetricsCalculator:
             'Clutch': metrics['clutch_specialist_score'],
             'Carry': metrics['carry_score']
         }
-        
-        # Sort by score
+
         sorted_roles = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        
+
         primary = sorted_roles[0][0]
-        primary_conf = sorted_roles[0][1]
-        
+        primary_score = sorted_roles[0][1]
+
         secondary = sorted_roles[1][0] if len(sorted_roles) > 1 else None
-        secondary_conf = sorted_roles[1][1] if len(sorted_roles) > 1 else 0
-        primary_conf = min(primary_conf, 100.0)
-        secondary_conf = min(secondary_conf, 100.0)
-        
+        secondary_score = sorted_roles[1][1] if len(sorted_roles) > 1 else 0
+
+        # Confidence = how far ahead the primary is vs. the runner-up,
+        # normalized against the primary score (the max possible gap).
+        score_gap = primary_score - secondary_score
+        if primary_score > 0:
+            primary_conf = min((score_gap / primary_score) * 100.0, 100.0)
+        else:
+            primary_conf = 50.0
+
+        # Secondary confidence: gap between 2nd and 3rd place.
+        third_score = sorted_roles[2][1] if len(sorted_roles) > 2 else 0
+        sec_gap = secondary_score - third_score
+        if secondary_score > 0:
+            secondary_conf = min((sec_gap / secondary_score) * 100.0, 100.0)
+        else:
+            secondary_conf = 0.0
+
         return {
             'primary': primary,
-            'primary_confidence': primary_conf,
-            'secondary': secondary if secondary_conf > 30 else None,
-            'secondary_confidence': secondary_conf if secondary_conf > 30 else 0
+            'primary_confidence': round(primary_conf, 1),
+            'secondary': secondary if secondary_conf > 5 else None,
+            'secondary_confidence': round(secondary_conf, 1) if secondary_conf > 5 else 0,
         }

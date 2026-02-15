@@ -9,7 +9,12 @@ Web integration tests are skipped unless RUN_WEB_TESTS env var is set.
 import os
 import unittest
 from typing import Dict, Any
-from bs4 import BeautifulSoup
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    import pytest
+    pytest.skip("bs4 not installed (scraper module deprecated)", allow_module_level=True)
 
 from src.scraper.validation import is_valid_snapshot
 from src.scraper.drawer import normalize_drawer_text, slice_from_game_section

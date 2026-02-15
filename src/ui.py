@@ -483,6 +483,80 @@ class TerminalUI:
 
         return (stack_a_id, stack_b_id)
 
+    def show_player_details(self, snapshot: Dict[str, Any], metrics: Dict[str, Any],
+                            insights: List[Dict]) -> None:
+        """Display detailed player stats, metrics, and insights."""
+        username = snapshot.get('username', 'Unknown')
+        print("\n" + "=" * 50)
+        print(f"PLAYER DETAILS: {username}")
+        print("=" * 50)
+
+        # Season / snapshot info
+        season = snapshot.get('season', '-')
+        date = snapshot.get('snapshot_date', '-')
+        print(f"  Season: {season}  |  Snapshot: {date}")
+
+        # Core stats
+        print("\nCORE STATS")
+        print("-" * 50)
+        kd = snapshot.get('kd') or 0
+        win_pct = snapshot.get('match_win_pct') or 0
+        hs_pct = snapshot.get('hs_pct') or 0
+        rounds = snapshot.get('rounds_played') or 0
+        matches = snapshot.get('matches') or 0
+        print(f"  {'Matches':<20}{matches}")
+        print(f"  {'Rounds Played':<20}{rounds}")
+        print(f"  {'K/D':<20}{kd:.2f}")
+        print(f"  {'Win %':<20}{win_pct:.1f}%")
+        print(f"  {'HS %':<20}{hs_pct:.1f}%")
+        print(f"  {'Kills/Round':<20}{(snapshot.get('kills_per_round') or 0):.2f}")
+        print(f"  {'Deaths/Round':<20}{(snapshot.get('deaths_per_round') or 0):.2f}")
+        print(f"  {'Assists/Round':<20}{(snapshot.get('assists_per_round') or 0):.2f}")
+        print(f"  {'First Bloods':<20}{snapshot.get('first_bloods') or 0}")
+        print(f"  {'First Deaths':<20}{snapshot.get('first_deaths') or 0}")
+        print(f"  {'Teamkills':<20}{snapshot.get('teamkills') or 0}")
+
+        # Role classification
+        print("\nROLE")
+        print("-" * 50)
+        primary = metrics.get('primary_role', '-')
+        primary_conf = metrics.get('primary_confidence', 0)
+        print(f"  Primary:   {primary} ({primary_conf:.0f}% confidence)")
+        secondary = metrics.get('secondary_role')
+        if secondary:
+            secondary_conf = metrics.get('secondary_confidence', 0)
+            print(f"  Secondary: {secondary} ({secondary_conf:.0f}% confidence)")
+
+        # Computed metrics
+        print("\nMETRICS")
+        print("-" * 50)
+        metric_rows = [
+            ('Entry Efficiency', 'entry_efficiency', '.2f'),
+            ('Aggression Score', 'aggression_score', '.2f'),
+            ('Clutch 1v1 Success', 'clutch_1v1_success', '.2f'),
+            ('Overall Clutch Success', 'overall_clutch_success', '.2f'),
+            ('Clutch Attempt Rate', 'clutch_attempt_rate', '.2f'),
+            ('Teamplay Index', 'teamplay_index', '.2f'),
+            ('Impact Rating', 'impact_rating', '.2f'),
+        ]
+        for label, key, fmt in metric_rows:
+            val = metrics.get(key)
+            if val is not None:
+                print(f"  {label:<25}{val:{fmt}}")
+
+        # Insights
+        if insights:
+            print("\nINSIGHTS")
+            print("-" * 50)
+            for insight in insights:
+                sev = insight.get('severity', 'info').upper()
+                print(f"  [{sev}] {insight['message']}")
+                print(f"    Evidence: {insight.get('evidence', '-')}")
+                print(f"    Action:   {insight.get('action', '-')}")
+                print()
+
+        print("=" * 50)
+
     def show_error(self, message: str):
         """Display error message."""
         print(f"\n! ERROR: {message}\n")

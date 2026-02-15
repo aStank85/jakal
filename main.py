@@ -24,9 +24,9 @@ def _safe_print(message: str) -> None:
         print(message)
     except UnicodeEncodeError:
         fallback = (
-            message.replace("✅", "[OK]")
-            .replace("⚠️", "[WARN]")
-            .replace("❌", "[ERROR]")
+            message.replace("\u2705", "[OK]")
+            .replace("\u26a0\ufe0f", "[WARN]")
+            .replace("\u274c", "[ERROR]")
         )
         print(fallback)
 
@@ -97,6 +97,103 @@ def _save_scraped_profile(
     return snapshot, metrics, insights, detail_summary
 
 
+def _sync_player(
+    username: str,
+    db: Database,
+    api_client: TrackerAPIClient,
+    calculator: MetricsCalculator,
+    analyzer: InsightAnalyzer,
+    show_progress: bool = True,
+) -> dict:
+    """Fetch and persist a full sync for one player.
+
+    Returns a result dict with keys:
+        snapshot, metrics, insights, detail_summary, errors
+    """
+    existing_player = db.get_player(username)
+    player_id = existing_player["player_id"] if existing_player else db.add_player(username)
+    last_synced_at = db.get_player_last_match_synced_at(username)
+    is_initial_sync = last_synced_at is None
+    match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
+    since_date = None if is_initial_sync else last_synced_at
+
+    result: dict = {"errors": []}
+
+    # --- Profile / season stats ---
+    profile = api_client.get_profile(username)
+    season_raw = profile.get("season_stats") or {}
+    if not season_raw:
+        raise RuntimeError("Season stats missing; sync cannot continue")
+    result["season_stats"] = api_client.season_stats_to_snapshot(season_raw)
+    tracker_uuid = profile.get("uuid")
+    if tracker_uuid:
+        db.update_player_tracker_uuid(username, tracker_uuid)
+    if show_progress:
+        _safe_print("\u2705 Profile stats")
+
+    # --- Map stats ---
+    try:
+        result["map_stats"] = api_client.get_map_stats(username)
+    except Exception as exc:
+        result["map_stats"] = []
+        result["errors"].append(f"Map stats failed: {exc}")
+
+    # --- Operator stats ---
+    try:
+        result["operator_stats"] = api_client.get_operator_stats(username)
+    except Exception as exc:
+        result["operator_stats"] = []
+        result["errors"].append(f"Operator stats failed: {exc}")
+
+    if show_progress:
+        _safe_print(f"\u2705 Map stats ({len(result.get('map_stats', []))} maps)")
+        _safe_print(f"\u2705 Operator stats ({len(result.get('operator_stats', []))} operators)")
+
+    # --- Match detail history ---
+    detail_rows: list = []
+    try:
+        existing_ids = db.get_existing_match_detail_ids(player_id)
+        detail_rows = api_client.scrape_full_match_history(
+            username,
+            max_matches=match_cap,
+            since_date=since_date,
+            skip_match_ids=existing_ids,
+            show_progress=show_progress,
+        )
+    except Exception as exc:
+        result["errors"].append(f"Match detail sync failed: {exc}")
+
+    # --- Persist everything ---
+    snapshot, metrics, insights, detail_summary = _save_scraped_profile(
+        db,
+        calculator,
+        analyzer,
+        username=username,
+        season_stats=result["season_stats"],
+        map_stats=result.get("map_stats", []),
+        operator_stats=result.get("operator_stats", []),
+        match_details=detail_rows,
+    )
+
+    if show_progress:
+        _safe_print(
+            f"\u2705 Match detail ({detail_summary['matches']} matches, "
+            f"{detail_summary['round_rows']} round records)"
+        )
+
+    latest_synced_at = _latest_detail_timestamp(detail_rows)
+    if latest_synced_at:
+        db.update_player_last_match_synced_at(username, latest_synced_at)
+
+    if show_progress:
+        _safe_print("\u2705 Saved to database")
+
+    result["snapshot"] = snapshot
+    result["metrics"] = metrics
+    result["insights"] = insights
+    result["detail_summary"] = detail_summary
+    return result
+
 
 def main():
     # Initialize components
@@ -123,73 +220,14 @@ def main():
                         ui.show_error("Username is required")
                         continue
 
-                    existing_player = db.get_player(username)
-                    existing_player_id = existing_player["player_id"] if existing_player else db.add_player(username)
-                    last_synced_at = db.get_player_last_match_synced_at(username)
-                    is_initial_sync = last_synced_at is None
-                    match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
-                    since_date = None if is_initial_sync else last_synced_at
                     print(f"Syncing {username} (full season)...")
-                    result = {"errors": []}
-
-                    profile = api_client.get_profile(username)
-                    season_raw = profile.get("season_stats") or {}
-                    if not season_raw:
-                        raise RuntimeError("Season stats missing; sync cannot continue")
-                    result["season_stats"] = api_client.season_stats_to_snapshot(season_raw)
-                    tracker_uuid = profile.get("uuid")
-                    if tracker_uuid:
-                        db.update_player_tracker_uuid(username, tracker_uuid)
-                    _safe_print("✅ Profile stats")
-
-                    try:
-                        result["map_stats"] = api_client.get_map_stats(username)
-                    except Exception as exc:
-                        result["map_stats"] = []
-                        result["errors"].append(f"Map stats failed: {exc}")
-
-                    try:
-                        result["operator_stats"] = api_client.get_operator_stats(username)
-                    except Exception as exc:
-                        result["operator_stats"] = []
-                        result["errors"].append(f"Operator stats failed: {exc}")
-
-                    map_count = len(result.get("map_stats", []))
-                    operator_count = len(result.get("operator_stats", []))
-                    _safe_print(f"✅ Map stats ({map_count} maps)")
-                    _safe_print(f"✅ Operator stats ({operator_count} operators)")
-
-                    detail_rows = []
-                    try:
-                        existing_ids = db.get_existing_match_detail_ids(existing_player_id)
-                        detail_rows = api_client.scrape_full_match_history(
-                            username,
-                            max_matches=match_cap,
-                            since_date=since_date,
-                            skip_match_ids=existing_ids,
-                            show_progress=True,
-                        )
-                    except Exception as exc:
-                        result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
-
-                    snapshot, metrics, insights, detail_summary = _save_scraped_profile(
-                        db,
-                        calculator,
-                        analyzer,
-                        username=username,
-                        season_stats=result["season_stats"],
-                        map_stats=result.get("map_stats", []),
-                        operator_stats=result.get("operator_stats", []),
-                        match_details=detail_rows,
+                    result = _sync_player(
+                        username, db, api_client, calculator, analyzer,
+                        show_progress=True,
                     )
+                    metrics = result["metrics"]
+                    insights = result["insights"]
 
-                    _safe_print(
-                        f"✅ Match detail ({detail_summary['matches']} matches, {detail_summary['round_rows']} round records)"
-                    )
-                    latest_synced_at = _latest_detail_timestamp(detail_rows)
-                    if latest_synced_at:
-                        db.update_player_last_match_synced_at(username, latest_synced_at)
-                    _safe_print("✅ Saved to database")
                     print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
                     if insights:
                         print(f"Top insight: {insights[0]['message']}")
@@ -200,7 +238,7 @@ def main():
                             print(f"  - {err}")
 
                 except Exception as e:
-                    _safe_print(f"❌ Sync failed: {e}")
+                    _safe_print(f"\u274c Sync failed: {e}")
 
             elif choice == '2':
                 # Add new stats manually (copy/paste fallback)
@@ -237,15 +275,9 @@ def main():
                     ui.show_success(f"Stats added for {metadata['username']}!")
 
                     # Show role
-                    print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.1f})")
+                    print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
                     if metrics['secondary_role']:
-                        print(f"Secondary: {metrics['secondary_role']} ({metrics['secondary_confidence']:.1f})")
-
-                    print(f"Rounds/Hour: {metrics.get('rounds_per_hour', 0.0):.2f}")
-                    if metrics.get('time_played_unreliable', False):
-                        print(
-                            f"Warning: time-played metrics unreliable (Rounds/Hour < {MIN_RELIABLE_ROUNDS_PER_HOUR:.1f}); per-hour metrics suppressed."
-                        )
+                        print(f"Secondary: {metrics['secondary_role']} ({metrics['secondary_confidence']:.0f}% confidence)")
 
                     insights = analyzer.generate_insights(snapshot, metrics)
                     if insights:
@@ -269,68 +301,20 @@ def main():
 
                     for idx, player in enumerate(players, 1):
                         username = player.get("username")
-                        last_synced_at = db.get_player_last_match_synced_at(username)
-                        is_initial_sync = last_synced_at is None
-                        match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
-                        since_date = None if is_initial_sync else last_synced_at
                         print(f"Syncing {idx}/{total}: {username} (full season)...")
                         try:
-                            result = {"errors": []}
-
-                            profile = api_client.get_profile(username)
-                            season_raw = profile.get("season_stats") or {}
-                            if not season_raw:
-                                raise RuntimeError("Season stats missing")
-                            result["season_stats"] = api_client.season_stats_to_snapshot(season_raw)
-                            tracker_uuid = profile.get("uuid")
-                            if tracker_uuid:
-                                db.update_player_tracker_uuid(username, tracker_uuid)
-                            _safe_print("✅ Profile stats")
-
-                            try:
-                                result["map_stats"] = api_client.get_map_stats(username)
-                            except Exception as exc:
-                                result["map_stats"] = []
-                                result["errors"].append(f"Map stats failed: {exc}")
-
-                            try:
-                                result["operator_stats"] = api_client.get_operator_stats(username)
-                            except Exception as exc:
-                                result["operator_stats"] = []
-                                result["errors"].append(f"Operator stats failed: {exc}")
-
-                            detail_rows = []
-                            try:
-                                existing_ids = db.get_existing_match_detail_ids(player["player_id"])
-                                detail_rows = api_client.scrape_full_match_history(
-                                    username,
-                                    max_matches=match_cap,
-                                    since_date=since_date,
-                                    skip_match_ids=existing_ids,
-                                    show_progress=True,
-                                )
-                            except Exception as exc:
-                                result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
-
-                            _, _, _, detail_summary = _save_scraped_profile(
-                                db,
-                                calculator,
-                                analyzer,
-                                username=username,
-                                season_stats=result["season_stats"],
-                                map_stats=result.get("map_stats", []),
-                                operator_stats=result.get("operator_stats", []),
-                                match_details=detail_rows,
+                            result = _sync_player(
+                                username, db, api_client, calculator, analyzer,
+                                show_progress=True,
                             )
+                            detail_summary = result["detail_summary"]
                             _safe_print(
-                                f"✅ OK (match detail: {detail_summary['matches']} matches, {detail_summary['round_rows']} rounds)"
+                                f"\u2705 OK (match detail: {detail_summary['matches']} matches, "
+                                f"{detail_summary['round_rows']} rounds)"
                             )
-                            latest_synced_at = _latest_detail_timestamp(detail_rows)
-                            if latest_synced_at:
-                                db.update_player_last_match_synced_at(username, latest_synced_at)
                             success += 1
                         except Exception as e:
-                            _safe_print(f"❌ Sync failed: {e}")
+                            _safe_print(f"\u274c Sync failed: {e}")
                             failed += 1
 
                         time.sleep(2)
@@ -554,8 +538,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
