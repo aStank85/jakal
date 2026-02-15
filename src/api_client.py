@@ -17,8 +17,11 @@ class TrackerAPIClient:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://r6.tracker.network",
         "Referer": "https://r6.tracker.network/",
+        "x-app-version": "1.0.0",
     }
 
     END_REASON_MAP = {
@@ -30,9 +33,15 @@ class TrackerAPIClient:
         6: "defuser_planted",
     }
 
-    def __init__(self, timeout_seconds: int = 20, sleep_seconds: float = 0.5):
+    def __init__(
+        self,
+        timeout_seconds: int = 20,
+        sleep_seconds: float = 0.5,
+        detail_sleep_seconds: float = 1.0,
+    ):
         self.timeout_seconds = timeout_seconds
         self.sleep_seconds = sleep_seconds
+        self.detail_sleep_seconds = detail_sleep_seconds
 
     @staticmethod
     def _progress_print(message: str, end: str = "\n") -> None:
@@ -359,7 +368,7 @@ class TrackerAPIClient:
 
             detail["match_meta"] = match
             out.append(detail)
-            time.sleep(self.sleep_seconds)
+            time.sleep(self.detail_sleep_seconds)
 
         if show_progress and total > 0:
             self._progress_print("")

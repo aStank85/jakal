@@ -122,7 +122,7 @@ def main():
                     match_count = len(result.get("match_history", []))
                     _safe_print(f"✅ Map stats ({map_count} maps)")
                     _safe_print(f"✅ Operator stats ({operator_count} operators)")
-                    _safe_print(f"✅ Match history ({match_count} matches)")
+                    _safe_print(f"✅ Match page scraped ({match_count} rows)")
 
                     detail_rows = []
                     try:
