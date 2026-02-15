@@ -84,6 +84,24 @@ class TestMatchupAnalyzer(unittest.TestCase):
         comp = self.analyzer.compare_category(1.05, 1.02, 'K/D')
         self.assertEqual(comp['significance'], 'small')
 
+    def test_carry_metric_weights_win_rate_heavily(self):
+        player_a = {
+            'role': 'Carry',
+            'snapshot': {'match_win_pct': 58.6, 'kd': 0.73},
+            'metrics': {}
+        }
+        player_b = {
+            'role': 'Carry',
+            'snapshot': {'match_win_pct': 57.1, 'kd': 0.83},
+            'metrics': {}
+        }
+
+        metric = self.analyzer._pair_metric(player_a, player_b)
+        advantage = self.analyzer._advantage_from_values(
+            metric['value_a'], metric['value_b'], metric['threshold']
+        )
+        self.assertIn(advantage, ['yours', 'even'])
+
     # --- Role matchups ---
 
     def test_role_matchups_is_list(self):
@@ -98,6 +116,32 @@ class TestMatchupAnalyzer(unittest.TestCase):
             self.assertIn('your_player', rm)
             self.assertIn('their_player', rm)
             self.assertIn('advantage', rm)
+
+    def test_role_matchups_include_all_players(self):
+        result = self.analyzer.analyze_matchup(self.stack_a_id, self.stack_b_id)
+        matchups = result['role_matchups']
+        yours = {m['your_player'] for m in matchups if m['your_player'] != '-'}
+        theirs = {m['their_player'] for m in matchups if m['their_player'] != '-'}
+
+        self.assertEqual(len(yours), 5)
+        self.assertEqual(len(theirs), 5)
+        self.assertEqual(len(matchups), 5)
+
+    def test_support_row_aligns_with_teamplay_winner(self):
+        result = self.analyzer.analyze_matchup(self.stack_a_id, self.stack_b_id)
+        support_winner = result['category_comparisons']['support']['winner']
+        support_rows = [
+            m for m in result['role_matchups']
+            if 'Support' in m['role']
+        ]
+        self.assertGreater(len(support_rows), 0)
+
+        if support_winner == 'A':
+            self.assertTrue(all(m['advantage'] != 'theirs' for m in support_rows))
+        elif support_winner == 'B':
+            self.assertTrue(all(m['advantage'] != 'yours' for m in support_rows))
+        else:
+            self.assertTrue(all(m['advantage'] == 'even' for m in support_rows))
 
     # --- Prediction ---
 
@@ -135,11 +179,40 @@ class TestMatchupAnalyzer(unittest.TestCase):
     def test_battlegrounds_is_list(self):
         result = self.analyzer.analyze_matchup(self.stack_a_id, self.stack_b_id)
         self.assertIsInstance(result['key_battlegrounds'], list)
-        self.assertGreater(len(result['key_battlegrounds']), 0)
 
     def test_battlegrounds_max_3(self):
         result = self.analyzer.analyze_matchup(self.stack_a_id, self.stack_b_id)
         self.assertLessEqual(len(result['key_battlegrounds']), 3)
+
+    def test_battlegrounds_are_category_labels_only(self):
+        result = self.analyzer.analyze_matchup(self.stack_a_id, self.stack_b_id)
+        for bg in result['key_battlegrounds']:
+            self.assertNotIn('decides', bg.lower())
+            self.assertNotIn('closest margin', bg.lower())
+
+    def test_battlegrounds_clear_advantage_message(self):
+        comps = {
+            'kd': {'winner': 'A', 'margin': 0.10, 'category': 'K/D'},
+            'entry': {'winner': 'A', 'margin': 0.12, 'category': 'Entry Eff.'},
+            'clutch': {'winner': 'A', 'margin': 0.08, 'category': 'Clutch 1v1'},
+            'support': {'winner': 'A', 'margin': 0.09, 'category': 'Teamplay'},
+            'hs_pct': {'winner': 'A', 'margin': 0.05, 'category': 'HS %'},
+            'win_rate': {'winner': 'B', 'margin': 0.01, 'category': 'Win Rate'},
+        }
+        battlegrounds = self.analyzer.identify_key_battlegrounds(comps)
+        self.assertEqual(battlegrounds, ["Clear advantage - no significant battlegrounds"])
+
+    def test_battlegrounds_require_split_category_wins(self):
+        comps = {
+            'kd': {'winner': 'A', 'margin': 0.04, 'category': 'K/D'},
+            'entry': {'winner': 'A', 'margin': 0.03, 'category': 'Entry Eff.'},
+            'clutch': {'winner': 'A', 'margin': 0.05, 'category': 'Clutch 1v1'},
+            'support': {'winner': 'A', 'margin': 0.02, 'category': 'Teamplay'},
+            'hs_pct': {'winner': 'Even', 'margin': 0.01, 'category': 'HS %'},
+            'win_rate': {'winner': 'B', 'margin': 0.02, 'category': 'Win Rate'},
+        }
+        battlegrounds = self.analyzer.identify_key_battlegrounds(comps)
+        self.assertEqual(battlegrounds, [])
 
     # --- Database persistence ---
 

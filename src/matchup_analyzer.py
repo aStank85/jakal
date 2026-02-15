@@ -28,7 +28,11 @@ class MatchupAnalyzer:
         analysis_b = self.team_analyzer.analyze_stack(stack_b_id)
 
         category_comparisons = self.compare_all_categories(analysis_a, analysis_b)
-        role_matchups = self.analyze_role_matchups(analysis_a['members'], analysis_b['members'])
+        role_matchups = self.analyze_role_matchups(
+            analysis_a['members'],
+            analysis_b['members'],
+            category_comparisons
+        )
         prediction = self.predict_outcome(category_comparisons)
         recommendations = self.generate_recommendations(analysis_a, analysis_b, category_comparisons)
         battlegrounds = self.identify_key_battlegrounds(category_comparisons)
@@ -142,66 +146,142 @@ class MatchupAnalyzer:
 
     # --- Role matchups ---
 
-    def analyze_role_matchups(self, members_a: List[Dict], members_b: List[Dict]) -> List[Dict]:
-        """Match each role against opponent's same role."""
-        # Build role lookup for each team
-        roles_a = {}
-        for m in members_a:
-            role = m['role']
-            if role not in roles_a:
-                roles_a[role] = m
+    def _pair_metric(self, player_a: Dict, player_b: Dict) -> Dict[str, Any]:
+        """Return metric tuple used for matchup pairing and edge calculation."""
+        role_a = player_a.get('role')
+        role_b = player_b.get('role')
 
-        roles_b = {}
-        for m in members_b:
-            role = m['role']
-            if role not in roles_b:
-                roles_b[role] = m
+        if role_a == 'Carry' or role_b == 'Carry':
+            win_a = (player_a.get('snapshot', {}).get('match_win_pct') or 0)
+            win_b = (player_b.get('snapshot', {}).get('match_win_pct') or 0)
+            kd_a = (player_a.get('snapshot', {}).get('kd') or 0)
+            kd_b = (player_b.get('snapshot', {}).get('kd') or 0)
 
+            # Carry pairing favors results (win rate) over raw fragging.
+            carry_a = (win_a * 0.75) + ((kd_a * 20.0) * 0.25)
+            carry_b = (win_b * 0.75) + ((kd_b * 20.0) * 0.25)
+            return {
+                'name': 'carry_match_score',
+                'value_a': carry_a,
+                'value_b': carry_b,
+                'threshold': 0.75,
+                'precision': 2
+            }
+
+        if role_a == 'Support' or role_b == 'Support':
+            return {
+                'name': 'assists_per_round',
+                'value_a': (player_a.get('snapshot', {}).get('assists_per_round') or 0),
+                'value_b': (player_b.get('snapshot', {}).get('assists_per_round') or 0),
+                'threshold': 0.03,
+                'precision': 3
+            }
+
+        if role_a == role_b == 'Entry':
+            return {
+                'name': 'entry_efficiency',
+                'value_a': (player_a.get('metrics', {}).get('entry_efficiency') or 0),
+                'value_b': (player_b.get('metrics', {}).get('entry_efficiency') or 0),
+                'threshold': 0.03,
+                'precision': 3
+            }
+
+        if role_a == role_b == 'Clutch':
+            return {
+                'name': 'clutch_1v1_success',
+                'value_a': (player_a.get('metrics', {}).get('clutch_1v1_success') or 0),
+                'value_b': (player_b.get('metrics', {}).get('clutch_1v1_success') or 0),
+                'threshold': 0.03,
+                'precision': 3
+            }
+
+        return {
+            'name': 'carry_score',
+            'value_a': (player_a.get('metrics', {}).get('carry_score') or 0),
+            'value_b': (player_b.get('metrics', {}).get('carry_score') or 0),
+            'threshold': 2.0,
+            'precision': 1
+        }
+
+    def _advantage_from_values(self, value_a: float, value_b: float, threshold: float) -> str:
+        """Convert numeric gap to matchup edge label."""
+        diff = value_a - value_b
+        if abs(diff) < threshold:
+            return 'even'
+        if diff > 0:
+            return 'yours'
+        return 'theirs'
+
+    def _format_role_label(self, role_a: str, role_b: str) -> str:
+        """Display role label for role-matchup row."""
+        if role_a == role_b:
+            return role_a
+        return f"{role_a} vs {role_b}"
+
+    def analyze_role_matchups(self, members_a: List[Dict], members_b: List[Dict],
+                              category_comparisons: Dict[str, Dict]) -> List[Dict]:
+        """Create complete player matchup rows with best-available pairing."""
         matchups = []
-        all_roles = set(list(roles_a.keys()) + list(roles_b.keys()))
+        unmatched_b = list(members_b)
+        support_winner = category_comparisons.get('support', {}).get('winner')
 
-        for role in sorted(all_roles):
-            player_a = roles_a.get(role)
-            player_b = roles_b.get(role)
+        for player_a in members_a:
+            same_role_pool = [m for m in unmatched_b if m.get('role') == player_a.get('role')]
+            candidate_pool = same_role_pool if same_role_pool else unmatched_b
 
-            if player_a and player_b:
-                score_a = (player_a['metrics'].get('carry_score') or 0)
-                score_b = (player_b['metrics'].get('carry_score') or 0)
+            if candidate_pool:
+                def _pair_distance(player_b: Dict) -> float:
+                    metric = self._pair_metric(player_a, player_b)
+                    return abs(metric['value_a'] - metric['value_b'])
 
-                diff = score_a - score_b
-                if abs(diff) < 2:
-                    advantage = 'even'
-                elif diff > 0:
-                    advantage = 'yours'
-                else:
-                    advantage = 'theirs'
+                player_b = min(candidate_pool, key=_pair_distance)
+                unmatched_b.remove(player_b)
 
+                metric = self._pair_metric(player_a, player_b)
+                advantage = self._advantage_from_values(
+                    metric['value_a'],
+                    metric['value_b'],
+                    metric['threshold']
+                )
+
+                # Keep support row edge aligned with teamplay category direction.
+                if player_a.get('role') == 'Support' or player_b.get('role') == 'Support':
+                    if support_winner == 'A':
+                        advantage = 'yours'
+                    elif support_winner == 'B':
+                        advantage = 'theirs'
+                    else:
+                        advantage = 'even'
+
+                precision = metric['precision']
                 matchups.append({
-                    'role': role,
-                    'your_player': player_a['username'],
-                    'their_player': player_b['username'],
+                    'role': self._format_role_label(player_a.get('role', '-'), player_b.get('role', '-')),
+                    'your_player': player_a.get('username', '-'),
+                    'their_player': player_b.get('username', '-'),
                     'advantage': advantage,
-                    'your_value': round(score_a, 1),
-                    'their_value': round(score_b, 1)
+                    'your_value': round(metric['value_a'], precision),
+                    'their_value': round(metric['value_b'], precision)
                 })
-            elif player_a:
+            else:
                 matchups.append({
-                    'role': role,
-                    'your_player': player_a['username'],
+                    'role': player_a.get('role', '-'),
+                    'your_player': player_a.get('username', '-'),
                     'their_player': '-',
                     'advantage': 'yours',
-                    'your_value': round((player_a['metrics'].get('carry_score') or 0), 1),
+                    'your_value': round((player_a.get('metrics', {}).get('carry_score') or 0), 1),
                     'their_value': 0
                 })
-            elif player_b:
-                matchups.append({
-                    'role': role,
-                    'your_player': '-',
-                    'their_player': player_b['username'],
-                    'advantage': 'theirs',
-                    'your_value': 0,
-                    'their_value': round((player_b['metrics'].get('carry_score') or 0), 1)
-                })
+
+        # If stacks are uneven, keep every opponent represented as well.
+        for player_b in unmatched_b:
+            matchups.append({
+                'role': player_b.get('role', '-'),
+                'your_player': '-',
+                'their_player': player_b.get('username', '-'),
+                'advantage': 'theirs',
+                'your_value': 0,
+                'their_value': round((player_b.get('metrics', {}).get('carry_score') or 0), 1)
+            })
 
         return matchups
 
@@ -300,18 +380,30 @@ class MatchupAnalyzer:
         return recs
 
     def identify_key_battlegrounds(self, category_comparisons: Dict) -> List[str]:
-        """Identify categories where the match will be decided (closest margins)."""
+        """Return closest contested categories, or a clear-advantage message."""
+        a_wins = sum(1 for comp in category_comparisons.values() if comp.get('winner') == 'A')
+        b_wins = sum(1 for comp in category_comparisons.values() if comp.get('winner') == 'B')
+
+        dominant = max(a_wins, b_wins)
+        trailing = min(a_wins, b_wins)
+
+        # 6-0 or 5-1 style edge: no meaningful battlegrounds to call out.
+        if dominant >= 5 and trailing <= 1:
+            return ["Clear advantage - no significant battlegrounds"]
+
+        # Only surface battlegrounds when both sides have meaningful category wins.
+        if a_wins < 2 or b_wins < 2:
+            return []
+
+        CLOSE_MARGIN_MAX = 0.06
         sorted_cats = sorted(
             category_comparisons.items(),
             key=lambda x: x[1]['margin']
         )
+        close_cats = [
+            comp['category']
+            for _, comp in sorted_cats
+            if (comp.get('margin') or 0) <= CLOSE_MARGIN_MAX
+        ]
 
-        battlegrounds = []
-        for cat_key, comp in sorted_cats[:3]:  # Top 3 closest categories
-            label = comp['category']
-            if comp['winner'] == 'Even':
-                battlegrounds.append(f"{label} - dead even, could swing either way")
-            else:
-                battlegrounds.append(f"{label} - closest margin, decides {label.lower()} control")
-
-        return battlegrounds
+        return close_cats[:3]

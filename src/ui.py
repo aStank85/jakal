@@ -14,6 +14,14 @@ class TerminalUI:
             return str(player.get('username', ''))
         return str(player)
 
+    @staticmethod
+    def _truncate_username(username: str, max_len: int = 14) -> str:
+        """Truncate long usernames for fixed-width tables."""
+        name = str(username or "")
+        if len(name) <= max_len:
+            return name
+        return name[:max_len - 1] + "."
+
     def show_menu(self) -> str:
         """Show main menu and get user choice."""
         print("\n" + "=" * 50)
@@ -418,7 +426,7 @@ class TerminalUI:
 
         print("\nROLE MATCHUPS")
         print("-" * 50)
-        print(f"{'Role':<12}{'You':<13}{'Them':<13}{'Edge'}")
+        print(f"{'Role':<20}{'You':<15}{'Them':<15}{'Edge'}")
         print("-" * 50)
         for rm in matchups:
             adv = rm['advantage'].upper()
@@ -428,7 +436,9 @@ class TerminalUI:
                 edge = "THEIRS !"
             else:
                 edge = "EVEN"
-            print(f"{rm['role']:<12}{rm['your_player']:<13}{rm['their_player']:<13}{edge}")
+            your_name = self._truncate_username(rm['your_player'], 14)
+            their_name = self._truncate_username(rm['their_player'], 14)
+            print(f"{rm['role']:<20}{your_name:<15}{their_name:<15}{edge}")
         print("-" * 50)
 
     def show_team_insights(self, insights: List[Dict]) -> None:
