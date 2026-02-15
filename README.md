@@ -1,10 +1,11 @@
 # Jakal - Rainbow Six Siege Analytics Engine
 
-Jakal is a terminal-based analytics platform for Rainbow Six Siege. It started as a copy/paste parser and is now in Stage 0 expansion with stack analysis in progress.
+Jakal is a terminal-based analytics platform for Rainbow Six Siege. It started as a copy/paste parser and is now in Stage 0 expansion with stack analysis completed.
 
 ## Current Status
 
-- Current version: `v0.4.0` (in progress)
+- Current version: `v0.4.0` (released)
+- Active milestone: `v0.4.1` (5v5 matchup analysis)
 - Completed milestones:
   - `v0.1.1` Parser MVP
   - `v0.2.0` Database Integration
@@ -83,8 +84,8 @@ jakal/
 - `v0.1.1` Parser MVP (complete)
 - `v0.2.0` Database Integration (complete)
 - `v0.3.0` Insight Generation (complete)
-- `v0.4.0` Stack Analysis (in progress)
-- `v0.4.1` 5v5 Matchup Analysis
+- `v0.4.0` Stack Analysis (complete)
+- `v0.4.1` 5v5 Matchup Analysis (in progress)
 - `v0.4.2` Map Data Integration (V2 plugins)
 - `v0.5.0` Trajectory Analysis
 - `v0.5.1` Short Term Plateau Detector

@@ -5,16 +5,21 @@ All notable changes to Jakal are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - In Progress
+## [0.4.1] - In Progress
+
+### Added
+- Ongoing 5v5 matchup analysis enhancements and strategic output tuning.
+
+## [0.4.0] - 2026-02-15
 
 ### Added
 - Stack management foundations (`named`, `quick`, `tagged` stack modes).
 - Team composition analysis flow with role-distribution and carry-dependency signals.
-- 5v5 matchup analysis scaffolding for stack-vs-stack comparison.
+- 5v5 matchup analysis baseline for stack-vs-stack comparison.
 
 ### Changed
 - Project roadmap/status aligned to Stage 0 timeline.
-- Version line advanced from `0.3.x` to `0.4.0` (active development milestone).
+- Version line advanced from `0.3.x` to `0.4.0` (stack analysis release milestone).
 
 ## [0.3.0] - 2026-02-13
 

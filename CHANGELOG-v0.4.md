@@ -1,14 +1,14 @@
 # Changelog
 
-## v0.4.0 - Stack Analysis (In Progress)
+## v0.4.0 - Stack Analysis (Complete)
 
 ### Scope
 - Named, quick, and tagged stack workflows.
 - Team composition scoring and role distribution checks.
 - Carry dependency and clutch hierarchy detection.
 
-### Planned Follow-ups in Stage 0
-- `v0.4.1` 5v5 Matchup Analysis
+### Active/Planned Follow-ups in Stage 0
+- `v0.4.1` 5v5 Matchup Analysis (in progress)
 - `v0.4.2` Map Data Integration (V2 plugin line)
 - `v0.5.0` Trajectory Analysis
 - `v0.5.1` Short Term Plateau Detector
