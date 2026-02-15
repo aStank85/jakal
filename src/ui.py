@@ -286,9 +286,9 @@ class TerminalUI:
         for m in members:
             kd = m['snapshot'].get('kd', 0) or 0
             win = m['snapshot'].get('match_win_pct', 0) or 0
-            print(f"{m['username']:<14}{m['role']:<14}{kd:<7.2f}{win:<7.1f}%")
+            print(f"{m['username']:<14}{m['role']:<14}{kd:<7.2f}{str(round(win, 1)) + '%':<7}")
         print("-" * 50)
-        print(f"{'TEAM AVG':<28}{analysis['team_avg_kd']:<7.2f}{analysis['team_avg_win_pct']:<7.1f}%")
+        print(f"{'TEAM AVG':<28}{analysis['team_avg_kd']:<7.2f}{str(round(analysis['team_avg_win_pct'], 1)) + '%':<7}")
 
         # Composition
         print(f"\nCOMPOSITION SCORE: {analysis['composition_score']:.0f}/100")
