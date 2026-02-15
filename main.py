@@ -10,6 +10,63 @@ from src.stack_manager import StackManager
 from src.team_analyzer import TeamAnalyzer
 from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
+from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
+from datetime import datetime
+import time
+
+
+def _safe_print(message: str) -> None:
+    """Print with Unicode fallback for restricted terminal encodings."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        fallback = (
+            message.replace("✅", "[OK]")
+            .replace("⚠️", "[WARN]")
+            .replace("❌", "[ERROR]")
+        )
+        print(fallback)
+
+
+def _save_scraped_profile(
+    db: Database,
+    calculator: MetricsCalculator,
+    analyzer: InsightAnalyzer,
+    username: str,
+    season_stats: dict,
+    map_stats: list,
+    operator_stats: list,
+    match_history: list,
+    season: str = "Y10S4",
+):
+    """Persist scraped profile data and return snapshot/metrics/insights tuple."""
+    now = datetime.now()
+    snapshot_id = db.add_stats_snapshot(
+        username=username,
+        stats=season_stats,
+        snapshot_date=now.strftime("%Y-%m-%d"),
+        snapshot_time=now.strftime("%H:%M:%S"),
+        season=season,
+        device_tag="pc",
+    )
+
+    player = db.get_player(username)
+    if not player:
+        raise RuntimeError(f"Player '{username}' missing after snapshot insert")
+    player_id = player["player_id"]
+
+    snapshot = db.get_snapshot_by_id(snapshot_id)
+    if not snapshot:
+        raise RuntimeError(f"Failed to load snapshot {snapshot_id} after insert")
+
+    metrics = calculator.calculate_all(snapshot)
+    db.add_computed_metrics(snapshot_id, player_id, metrics)
+    db.save_map_stats(player_id, map_stats, snapshot_id=snapshot_id, season=season)
+    db.save_operator_stats(player_id, operator_stats, snapshot_id=snapshot_id, season=season)
+    db.save_match_history(player_id, match_history)
+    insights = analyzer.generate_insights(snapshot, metrics)
+
+    return snapshot, metrics, insights
 
 
 
@@ -24,13 +81,63 @@ def main():
     stack_manager = StackManager(db)
     team_analyzer = TeamAnalyzer(db)
     matchup_analyzer = MatchupAnalyzer(db)
+    scraper = R6Scraper(headless=True, slow_mo=500)
 
     try:
         while True:
             choice = ui.show_menu()
 
             if choice == '1':
-                # Add new stats
+                # Sync player (auto-scrape)
+                try:
+                    username = input("Enter username to sync: ").strip()
+                    if not username:
+                        ui.show_error("Username is required")
+                        continue
+
+                    print(f"Syncing {username}...")
+                    result = scraper.scrape_full_profile(username)
+                    if result.get("season_stats") is None:
+                        raise RuntimeError("Season stats missing; sync cannot continue")
+
+                    _safe_print("✅ Season stats")
+                    map_count = len(result.get("map_stats", []))
+                    operator_count = len(result.get("operator_stats", []))
+                    match_count = len(result.get("match_history", []))
+                    _safe_print(f"✅ Map stats ({map_count} maps)")
+                    _safe_print(f"✅ Operator stats ({operator_count} operators)")
+                    _safe_print(f"✅ Match history ({match_count} matches)")
+
+                    snapshot, metrics, insights = _save_scraped_profile(
+                        db,
+                        calculator,
+                        analyzer,
+                        username=username,
+                        season_stats=result["season_stats"],
+                        map_stats=result.get("map_stats", []),
+                        operator_stats=result.get("operator_stats", []),
+                        match_history=result.get("match_history", []),
+                    )
+
+                    _safe_print("✅ Saved to database")
+                    print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
+                    if insights:
+                        print(f"Top insight: {insights[0]['message']}")
+
+                    if result.get("errors"):
+                        print("Sync warnings:")
+                        for err in result["errors"]:
+                            print(f"  - {err}")
+
+                except ScraperBlockedError:
+                    _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")
+                except PlayerNotFoundError:
+                    _safe_print("❌ Username not found on R6 Tracker.")
+                except Exception as e:
+                    _safe_print(f"❌ Sync failed: {e}")
+
+            elif choice == '2':
+                # Add new stats manually (copy/paste fallback)
                 try:
                     pasted_text = ui.get_paste_input()
                     metadata = ui.get_metadata()
@@ -82,7 +189,56 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '2':
+            elif choice == '3':
+                # Sync all players
+                try:
+                    players = db.get_all_players()
+                    if not players:
+                        ui.show_error("No players in database yet")
+                        continue
+
+                    total = len(players)
+                    success = 0
+                    failed = 0
+
+                    for idx, player in enumerate(players, 1):
+                        username = player.get("username")
+                        print(f"Syncing {idx}/{total}: {username}...")
+                        try:
+                            result = scraper.scrape_full_profile(username)
+                            if result.get("season_stats") is None:
+                                raise RuntimeError("Season stats missing")
+
+                            _save_scraped_profile(
+                                db,
+                                calculator,
+                                analyzer,
+                                username=username,
+                                season_stats=result["season_stats"],
+                                map_stats=result.get("map_stats", []),
+                                operator_stats=result.get("operator_stats", []),
+                                match_history=result.get("match_history", []),
+                            )
+                            _safe_print("✅ OK")
+                            success += 1
+                        except ScraperBlockedError:
+                            _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")
+                            failed += 1
+                        except PlayerNotFoundError:
+                            _safe_print("❌ Username not found on R6 Tracker.")
+                            failed += 1
+                        except Exception as e:
+                            _safe_print(f"❌ Sync failed: {e}")
+                            failed += 1
+
+                        time.sleep(2)
+
+                    print(f"Synced {success}/{total} players ({failed} failed)")
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice == '4':
                 # View all players
                 try:
                     players = db.get_all_players()
@@ -93,7 +249,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '3':
+            elif choice == '5':
                 # Compare players
                 try:
                     all_players = db.get_all_players()
@@ -131,7 +287,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '4':
+            elif choice == '6':
                 # View player details
                 try:
                     all_players = db.get_all_players()
@@ -162,7 +318,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '5':
+            elif choice == '7':
                 # Stack Management
                 try:
                     while True:
@@ -256,7 +412,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '6':
+            elif choice == '8':
                 # Analyze Stack
                 try:
                     stacks = stack_manager.get_all_stacks()
@@ -270,7 +426,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '7':
+            elif choice == '9':
                 # 5v5 Matchup Analysis
                 try:
                     stacks = stack_manager.get_all_stacks()
@@ -284,7 +440,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice == '8':
+            elif choice == '0':
                 # Exit
                 print("\nGoodbye!")
                 break

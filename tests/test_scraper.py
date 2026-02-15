@@ -9,9 +9,11 @@ Web integration tests are skipped unless RUN_WEB_TESTS env var is set.
 import os
 import unittest
 from typing import Dict, Any
+from bs4 import BeautifulSoup
 
 from src.scraper.validation import is_valid_snapshot
 from src.scraper.drawer import normalize_drawer_text, slice_from_game_section
+from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
 from src.parser import R6TrackerParser
 
 
@@ -204,6 +206,122 @@ class TestParserIntegration(unittest.TestCase):
         is_valid, warnings = is_valid_snapshot(stats)
         self.assertFalse(is_valid)
         self.assertTrue(any('REJECTED' in w for w in warnings))
+
+
+class TestScraperParsers(unittest.TestCase):
+    """Unit tests for v0.5 scraper parsing helpers (fixture-only, no live web)."""
+
+    def setUp(self):
+        self.scraper = R6Scraper(headless=True, slow_mo=0)
+
+    def _fixture_path(self, filename: str) -> str:
+        candidates = [
+            os.path.join(os.path.dirname(__file__), "fixtures", filename),
+            os.path.join(os.path.dirname(__file__), "..", "..", "tests", "fixtures", filename),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        raise FileNotFoundError(f"Fixture not found: {filename}")
+
+    def _read_fixture(self, filename: str) -> str:
+        with open(self._fixture_path(filename), "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_parse_map_row(self):
+        html = self._read_fixture("dump_maps_ranked.html")
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select('tr[class*="group/row"]')[0]
+        parsed = self.scraper._parse_map_row(row)
+        self.assertEqual(parsed["map_name"], "Clubhouse")
+        self.assertEqual(parsed["matches"], 54)
+        self.assertAlmostEqual(parsed["win_pct"], 51.9, places=1)
+
+    def test_parse_operator_row(self):
+        html = self._read_fixture("dump_operators.html")
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select('tr[class*="group/row"]')[0]
+        parsed = self.scraper._parse_operator_row(row)
+        self.assertEqual(parsed["operator_name"], "Kaid")
+        self.assertEqual(parsed["rounds"], 117)
+        self.assertAlmostEqual(parsed["kd"], 1.29, places=2)
+
+    def test_parse_match_row(self):
+        html = self._read_fixture("dump_matches.html")
+        soup = BeautifulSoup(html, "html.parser")
+        row = soup.select('[class*="v3-match-row"]')[0]
+        parsed = self.scraper._parse_match_row(row)
+        self.assertEqual(parsed["map_name"], "Fortress")
+        self.assertEqual(parsed["mode"], "Ranked")
+        self.assertEqual(parsed["score"], "4:2")
+
+    def test_parse_match_detail_table(self):
+        html = self._read_fixture("dump_match_detail.html")
+        detail = self.scraper._parse_match_detail_html(html, "SaucedZyn")
+        self.assertEqual(len(detail["team_a"]), 5)
+        self.assertEqual(len(detail["team_b"]), 5)
+        self.assertEqual(detail["your_team"], "A")
+
+    def test_parse_rp_string(self):
+        rp, delta = self.scraper._parse_rp_string("3,053+27")
+        self.assertEqual(rp, 3053)
+        self.assertEqual(delta, 27)
+
+    def test_parse_rp_string_negative(self):
+        rp, delta = self.scraper._parse_rp_string("2,712-21")
+        self.assertEqual(rp, 2712)
+        self.assertEqual(delta, -21)
+
+    def test_parse_percent(self):
+        self.assertAlmostEqual(self.scraper._parse_percent("51.9%"), 51.9, places=1)
+
+    def test_parse_number_commas(self):
+        self.assertEqual(self.scraper._parse_number("6,110"), 6110)
+
+    def test_multikill_detection(self):
+        html = '<div class="v3-match-row v3-match-row--win">Ace 3K RP 3,053+27 K/D 1.11 K/D/A 123 HS % 40.0%</div>'
+        row = BeautifulSoup(html, "html.parser").select_one('[class*="v3-match-row"]')
+        parsed = self.scraper._parse_match_row(row)
+        self.assertTrue(parsed["had_ace"])
+        self.assertTrue(parsed["had_3k"])
+
+    def test_win_loss_detection(self):
+        win_html = '<div class="v3-match-row v3-match-row--win">RP 3,053+27</div>'
+        loss_html = '<div class="v3-match-row v3-match-row--loss">RP 2,712-21</div>'
+        win_row = BeautifulSoup(win_html, "html.parser").select_one('[class*="v3-match-row"]')
+        loss_row = BeautifulSoup(loss_html, "html.parser").select_one('[class*="v3-match-row"]')
+        self.assertEqual(self.scraper._parse_match_row(win_row)["result"], "win")
+        self.assertEqual(self.scraper._parse_match_row(loss_row)["result"], "loss")
+
+    def test_map_stats_count(self):
+        html = self._read_fixture("dump_maps_ranked.html")
+        parsed = self.scraper._parse_map_stats_html(html)
+        self.assertEqual(len(parsed), 17)
+
+    def test_operator_stats_count(self):
+        html = self._read_fixture("dump_operators.html")
+        parsed = self.scraper._parse_operator_stats_html(html)
+        self.assertGreater(len(parsed), 20)
+
+    def test_match_history_count(self):
+        html = self._read_fixture("dump_matches.html")
+        parsed = self.scraper._parse_match_history_html(html)
+        self.assertEqual(len(parsed), 20)
+
+    def test_match_detail_teams(self):
+        html = self._read_fixture("dump_match_detail.html")
+        parsed = self.scraper._parse_match_detail_html(html, "SaucedZyn")
+        self.assertIn("team_a", parsed)
+        self.assertIn("team_b", parsed)
+        self.assertEqual(parsed["your_team"], "A")
+
+    def test_player_not_found(self):
+        with self.assertRaises(PlayerNotFoundError):
+            raise PlayerNotFoundError("missing")
+
+    def test_scraper_blocked(self):
+        with self.assertRaises(ScraperBlockedError):
+            raise ScraperBlockedError("blocked")
 
 
 @unittest.skipUnless(os.getenv('RUN_WEB_TESTS'), "Skipping web integration test")

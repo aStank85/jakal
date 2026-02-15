@@ -105,15 +105,15 @@ def scrape_drawer_text(
         RuntimeError: If extraction fails
     """
     try:
-        # Click "View All Stats" button using robust selector
+        # Click "View All Stats" button using robust selector.
         view_all_btn = page.get_by_role('button', name=re.compile(r'View All Stats', re.I))
-        view_all_btn.click()
+        view_all_btn.first.click()
 
-        # Wait for page to load completely
-        page.wait_for_load_state("networkidle")
+        # R6 Tracker keeps background requests alive; use fixed wait, not networkidle.
+        page.wait_for_timeout(2000)
 
-        # Wait for drawer to be visible
-        page.wait_for_selector('text="Game"', state='visible', timeout=10000)
+        # Wait for drawer to be visible.
+        page.wait_for_selector('text="Game"', state='visible', timeout=30000)
 
         # Click "Game" header to ensure drawer is expanded/focused
         game_header = page.locator('text="Game"').first

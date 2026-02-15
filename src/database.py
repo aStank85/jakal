@@ -250,6 +250,98 @@ class Database:
                 )
             """)
 
+            # Map stats table (scraped)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS map_stats (
+                    map_stat_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id       INTEGER NOT NULL,
+                    snapshot_id     INTEGER,
+                    season          TEXT DEFAULT 'Y10S4',
+                    map_name        TEXT NOT NULL,
+                    matches         INTEGER,
+                    win_pct         REAL,
+                    wins            INTEGER,
+                    losses          INTEGER,
+                    kd              REAL,
+                    atk_win_pct     REAL,
+                    def_win_pct     REAL,
+                    hs_pct          REAL,
+                    esr             REAL,
+                    scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
+            # Operator stats table (scraped)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_stats (
+                    op_stat_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id       INTEGER NOT NULL,
+                    snapshot_id     INTEGER,
+                    season          TEXT DEFAULT 'Y10S4',
+                    operator_name   TEXT NOT NULL,
+                    rounds          INTEGER,
+                    win_pct         REAL,
+                    kd              REAL,
+                    hs_pct          REAL,
+                    kills           INTEGER,
+                    deaths          INTEGER,
+                    wins            INTEGER,
+                    losses          INTEGER,
+                    assists         INTEGER,
+                    aces            INTEGER,
+                    teamkills       INTEGER,
+                    scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
+            # Match history table (scraped)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS match_history (
+                    match_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id       INTEGER NOT NULL,
+                    time_ago        TEXT,
+                    map_name        TEXT,
+                    mode            TEXT,
+                    score           TEXT,
+                    result          TEXT,
+                    rp              INTEGER,
+                    rp_change       INTEGER,
+                    kd              REAL,
+                    kda             TEXT,
+                    hs_pct          REAL,
+                    had_ace         INTEGER DEFAULT 0,
+                    had_4k          INTEGER DEFAULT 0,
+                    had_3k          INTEGER DEFAULT 0,
+                    had_2k          INTEGER DEFAULT 0,
+                    scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
+            # Match detail player leaderboard table (scraped)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS match_players (
+                    match_player_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id        INTEGER NOT NULL,
+                    team            TEXT,
+                    username        TEXT,
+                    rp              INTEGER,
+                    rp_change       INTEGER,
+                    kd              REAL,
+                    kills           INTEGER,
+                    deaths          INTEGER,
+                    assists         INTEGER,
+                    hs_pct          REAL,
+                    first_kills     INTEGER,
+                    first_deaths    INTEGER,
+                    clutches        INTEGER,
+                    operators       TEXT,
+                    FOREIGN KEY (match_id) REFERENCES match_history(match_id)
+                )
+            """)
+
             self.conn.commit()
             self._migrate_schema()
         except sqlite3.Error as e:
@@ -851,6 +943,205 @@ class Database:
         ))
         self.conn.commit()
         return cursor.lastrowid
+
+    # --- Scraper data persistence ---
+
+    def save_map_stats(self, player_id: int, maps: List[Dict], snapshot_id: int = None, season: str = 'Y10S4') -> None:
+        """Persist scraped map stats for a player and season."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM map_stats WHERE player_id = ? AND season = ?",
+            (player_id, season),
+        )
+        for item in maps:
+            cursor.execute("""
+                INSERT INTO map_stats (
+                    player_id, snapshot_id, season, map_name, matches, win_pct, wins, losses,
+                    kd, atk_win_pct, def_win_pct, hs_pct, esr
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                snapshot_id,
+                season,
+                item.get('map_name'),
+                item.get('matches'),
+                item.get('win_pct'),
+                item.get('wins'),
+                item.get('losses'),
+                item.get('kd'),
+                item.get('atk_win_pct'),
+                item.get('def_win_pct'),
+                item.get('hs_pct'),
+                item.get('esr'),
+            ))
+        self.conn.commit()
+
+    def get_map_stats(self, player_id: int, season: str = None) -> List[Dict]:
+        """Fetch map stats for a player (optionally by season)."""
+        cursor = self.conn.cursor()
+        if season:
+            cursor.execute(
+                "SELECT * FROM map_stats WHERE player_id = ? AND season = ? ORDER BY map_name",
+                (player_id, season),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM map_stats WHERE player_id = ? ORDER BY scraped_at DESC, map_name",
+                (player_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_operator_stats(self, player_id: int, operators: List[Dict], snapshot_id: int = None, season: str = 'Y10S4') -> None:
+        """Persist scraped operator stats for a player and season."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM operator_stats WHERE player_id = ? AND season = ?",
+            (player_id, season),
+        )
+        for item in operators:
+            cursor.execute("""
+                INSERT INTO operator_stats (
+                    player_id, snapshot_id, season, operator_name, rounds, win_pct, kd, hs_pct,
+                    kills, deaths, wins, losses, assists, aces, teamkills
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                snapshot_id,
+                season,
+                item.get('operator_name'),
+                item.get('rounds'),
+                item.get('win_pct'),
+                item.get('kd'),
+                item.get('hs_pct'),
+                item.get('kills'),
+                item.get('deaths'),
+                item.get('wins'),
+                item.get('losses'),
+                item.get('assists'),
+                item.get('aces'),
+                item.get('teamkills'),
+            ))
+        self.conn.commit()
+
+    def get_operator_stats(self, player_id: int, season: str = None) -> List[Dict]:
+        """Fetch operator stats for a player (optionally by season)."""
+        cursor = self.conn.cursor()
+        if season:
+            cursor.execute(
+                "SELECT * FROM operator_stats WHERE player_id = ? AND season = ? ORDER BY rounds DESC, operator_name",
+                (player_id, season),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM operator_stats WHERE player_id = ? ORDER BY scraped_at DESC, rounds DESC, operator_name",
+                (player_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_match_history(self, player_id: int, matches: List[Dict]) -> None:
+        """Persist scraped match history and replace previous history snapshot."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM match_history WHERE player_id = ?", (player_id,))
+        for item in matches:
+            cursor.execute("""
+                INSERT INTO match_history (
+                    player_id, time_ago, map_name, mode, score, result, rp, rp_change, kd, kda,
+                    hs_pct, had_ace, had_4k, had_3k, had_2k
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                item.get('time_ago'),
+                item.get('map_name'),
+                item.get('mode'),
+                item.get('score'),
+                item.get('result'),
+                item.get('rp'),
+                item.get('rp_change'),
+                item.get('kd'),
+                item.get('kda'),
+                item.get('hs_pct'),
+                1 if item.get('had_ace') else 0,
+                1 if item.get('had_4k') else 0,
+                1 if item.get('had_3k') else 0,
+                1 if item.get('had_2k') else 0,
+            ))
+        self.conn.commit()
+
+    def get_match_history(self, player_id: int, limit: int = 40) -> List[Dict]:
+        """Fetch recent match history for a player."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM match_history WHERE player_id = ? ORDER BY match_id DESC LIMIT ?",
+            (player_id, limit),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_match_players(self, match_id: int, team_a: List[Dict], team_b: List[Dict]) -> None:
+        """Persist match-detail leaderboard players for both teams."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM match_players WHERE match_id = ?", (match_id,))
+
+        def _insert_team(team_label: str, players: List[Dict]) -> None:
+            for p in players:
+                cursor.execute("""
+                    INSERT INTO match_players (
+                        match_id, team, username, rp, rp_change, kd, kills, deaths, assists,
+                        hs_pct, first_kills, first_deaths, clutches, operators
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    match_id,
+                    team_label,
+                    p.get('username'),
+                    p.get('rp'),
+                    p.get('rp_change'),
+                    p.get('kd'),
+                    p.get('kills'),
+                    p.get('deaths'),
+                    p.get('assists'),
+                    p.get('hs_pct'),
+                    p.get('first_kills'),
+                    p.get('first_deaths'),
+                    p.get('clutches'),
+                    json.dumps(p.get('operators', [])),
+                ))
+
+        _insert_team('A', team_a)
+        _insert_team('B', team_b)
+        self.conn.commit()
+
+    def get_match_players(self, match_id: int) -> Dict[str, List[Dict]]:
+        """Fetch match-detail leaderboard grouped by team."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM match_players WHERE match_id = ? ORDER BY match_player_id",
+            (match_id,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        out = {'team_a': [], 'team_b': []}
+        for row in rows:
+            operators = row.get('operators')
+            try:
+                row['operators'] = json.loads(operators) if operators else []
+            except json.JSONDecodeError:
+                row['operators'] = []
+
+            if row.get('team') == 'A':
+                out['team_a'].append(row)
+            else:
+                out['team_b'].append(row)
+        return out
+
+    def player_has_map_stats(self, player_id: int) -> bool:
+        """Return True if player has any stored map stats."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM map_stats WHERE player_id = ? LIMIT 1", (player_id,))
+        return cursor.fetchone() is not None
+
+    def player_has_match_history(self, player_id: int) -> bool:
+        """Return True if player has any stored match history."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM match_history WHERE player_id = ? LIMIT 1", (player_id,))
+        return cursor.fetchone() is not None
 
     def close(self):
         """Close database connection."""

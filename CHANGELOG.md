@@ -5,10 +5,38 @@ All notable changes to Jakal are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] - In Progress
+## [0.5.0] - 2026-02-15
 
 ### Added
-- Ongoing 5v5 matchup analysis enhancements and strategic output tuning.
+- Web scraper integration via Playwright for automated player sync.
+- Auto-sync for season stats, map stats, operator stats, and match history.
+- Four new scraped-data tables:
+  - `map_stats`
+  - `operator_stats`
+  - `match_history`
+  - `match_players`
+- New menu flows:
+  - Sync single player
+  - Sync all players
+  - Manual paste as fallback path
+- Anti-bot aware navigation flow:
+  - domcontentloaded navigation
+  - modal dismissal
+  - drawer close before tab changes
+  - staged waits/rate limiting
+  - match-history pagination/scroll loading
+- New scraper exceptions:
+  - `ScraperBlockedError`
+  - `PlayerNotFoundError`
+
+### Changed
+- Main workflow now prioritizes auto-scrape sync over manual copy/paste.
+- Snapshot ingest path now supports saving scraped section data alongside computed metrics.
+
+## [0.4.1] - 2026-02-15
+
+### Added
+- 5v5 matchup analysis enhancements and strategic output tuning.
 
 ## [0.4.0] - 2026-02-15
 
