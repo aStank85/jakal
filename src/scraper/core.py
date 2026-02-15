@@ -19,7 +19,7 @@ class PlayerNotFoundError(Exception):
 
 
 class R6Scraper:
-    """Automated R6 Tracker data scraper using Playwright."""
+    """Deprecated legacy scraper. Sync now uses Tracker API only."""
 
     BASE_URL = "https://r6.tracker.network/r6siege/profile/ubi/{username}/{section}"
     USER_AGENT = (
@@ -40,300 +40,48 @@ class R6Scraper:
     # --- Main entry points ---
 
     def scrape_full_profile(self, username: str) -> Dict[str, Any]:
-        """Scrape all available profile sections for a player."""
-        errors: List[str] = []
-        season_stats: Optional[Dict[str, Any]] = None
-        map_stats: List[Dict[str, Any]] = []
-        operator_stats: List[Dict[str, Any]] = []
-        match_history: List[Dict[str, Any]] = []
-
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-
-            try:
-                season_stats = self._scrape_season_stats_from_page(self.page)
-            except Exception as exc:
-                errors.append(f"Season stats failed: {exc}")
-
-            try:
-                self._close_drawer(self.page)
-            except Exception:
-                pass
-
-            try:
-                self._click_nav_link(self.page, "Maps")
-                self.page.wait_for_timeout(3000)
-                self._dismiss_modals(self.page)
-                ranked_button = self.page.get_by_role("button", name="Ranked", exact=True)
-                if ranked_button.count() > 0:
-                    ranked_button.first.click()
-                    self.page.wait_for_timeout(2000)
-                map_stats = self._parse_map_stats_html(self.page.content())
-            except Exception as exc:
-                errors.append(f"Map stats failed: {exc}")
-
-            try:
-                self._click_nav_link(self.page, "Operators")
-                self.page.wait_for_timeout(3000)
-                self._dismiss_modals(self.page)
-                operator_stats = self._parse_operator_stats_html(self.page.content())
-            except Exception as exc:
-                errors.append(f"Operator stats failed: {exc}")
-
-            # Match history is now sourced from Tracker API in sync flow.
-
-            return {
-                "username": username,
-                "scraped_at": datetime.now().isoformat(),
-                "season_stats": season_stats,
-                "map_stats": map_stats,
-                "operator_stats": operator_stats,
-                "match_history": match_history,
-                "errors": errors,
-            }
-        finally:
-            self._close_browser()
+        raise RuntimeError("R6Scraper is deprecated. Use TrackerAPIClient endpoints instead.")
 
     def scrape_season_stats(self, username: str) -> Dict[str, Any]:
-        """Scrape season drawer stats in parser-compatible output format."""
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-            return self._scrape_season_stats_from_page(self.page)
-        finally:
-            self._close_browser()
+        raise RuntimeError("scrape_season_stats is deprecated. Use TrackerAPIClient.get_profile().")
 
     def scrape_map_stats(self, username: str, filter_ranked: bool = True) -> List[Dict]:
-        """Scrape map stats table from /maps."""
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-            self._click_nav_link(self.page, "Maps")
-            self.page.wait_for_timeout(3000)
-            self._dismiss_modals(self.page)
-            if filter_ranked:
-                ranked_button = self.page.get_by_role("button", name="Ranked", exact=True)
-                if ranked_button.count() > 0:
-                    ranked_button.first.click()
-                    self.page.wait_for_timeout(2000)
-            return self._parse_map_stats_html(self.page.content())
-        finally:
-            self._close_browser()
+        raise RuntimeError("scrape_map_stats is deprecated. Use TrackerAPIClient.get_map_stats().")
 
     def scrape_operator_stats(self, username: str) -> List[Dict]:
-        """Scrape operator stats table from /operators."""
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-            self._click_nav_link(self.page, "Operators")
-            self.page.wait_for_timeout(3000)
-            self._dismiss_modals(self.page)
-            return self._parse_operator_stats_html(self.page.content())
-        finally:
-            self._close_browser()
+        raise RuntimeError("scrape_operator_stats is deprecated. Use TrackerAPIClient.get_operator_stats().")
 
     def scrape_match_history(self, username: str) -> List[Dict]:
-        """Deprecated: match history should be fetched via Tracker API client."""
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-            self._click_nav_link(self.page, "Matches")
-            self.page.wait_for_timeout(3000)
-            self._dismiss_modals(self.page)
-            self._load_match_history_rows(self.page, target_rows=40)
-            return self._parse_match_history_html(self.page.content())
-        finally:
-            self._close_browser()
+        raise RuntimeError("scrape_match_history is deprecated. Use TrackerAPIClient APIs.")
 
     def scrape_match_detail(self, username: str, match_index: int = 0) -> Dict:
-        """Scrape expanded match detail scoreboard."""
-        self._launch_browser()
-        try:
-            overview_url = self.BASE_URL.format(username=username, section="overview")
-            self._navigate(self.page, overview_url, wait_ms=3000)
-            self._dismiss_modals(self.page)
-            self._click_nav_link(self.page, "Matches")
-            self.page.wait_for_timeout(3000)
-            self._dismiss_modals(self.page)
-            self._load_match_history_rows(self.page, target_rows=max(40, match_index + 1))
-
-            rows = self.page.locator('[class*="v3-match-row"]')
-            if rows.count() == 0:
-                raise PlayerNotFoundError(f"No matches found for '{username}'")
-            if match_index >= rows.count():
-                raise ValueError(f"Match index {match_index} out of range")
-
-            rows.nth(match_index).click()
-            self.page.wait_for_timeout(3000)
-            return self._parse_match_detail_html(self.page.content(), username)
-        finally:
-            self._close_browser()
+        raise RuntimeError("scrape_match_detail is deprecated. Use TrackerAPIClient match detail APIs.")
 
     # --- Internal helpers ---
 
     def _launch_browser(self) -> None:
-        """Start Playwright browser with anti-detection headers."""
-        if self.browser:
-            return
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            raise ImportError(
-                "Playwright is not installed. Install with: pip install playwright; playwright install chromium"
-            ) from exc
-
-        self._playwright = sync_playwright().start()
-        self.browser = self._playwright.chromium.launch(headless=self.headless, slow_mo=self.slow_mo)
-        self.context = self.browser.new_context(
-            user_agent=self.USER_AGENT,
-            viewport=self.VIEWPORT,
-            locale="en-US",
-        )
-        self.page = self.context.new_page()
+        raise RuntimeError("Playwright browser automation is removed from v0.5.1 sync flow.")
 
     def _close_browser(self) -> None:
-        """Clean up browser resources."""
-        if self.context:
-            try:
-                self.context.close()
-            except Exception:
-                pass
-        if self.browser:
-            try:
-                self.browser.close()
-            except Exception:
-                pass
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-
         self._playwright = None
         self.browser = None
         self.context = None
         self.page = None
 
     def _navigate(self, page, url: str, wait_ms: int = 3000) -> None:
-        """Navigate to URL with proper waits and Cloudflare detection."""
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(wait_ms)
-        title = page.title().lower()
-
-        if "attention" in title:
-            page.wait_for_timeout(10000)
-            page.reload(wait_until="domcontentloaded")
-            page.wait_for_timeout(wait_ms)
-            if "attention" in page.title().lower():
-                raise ScraperBlockedError("Cloudflare blocked this request")
-
-        if "not found" in title or "404" in title:
-            raise PlayerNotFoundError(f"Profile page not found at {url}")
+        raise RuntimeError("Playwright navigation is removed from v0.5.1 sync flow.")
 
     def _load_match_history_rows(self, page, target_rows: int = 40, max_attempts: int = 10) -> int:
-        """Load additional match rows via scrolling/pagination where available."""
-        last_count = -1
-        stable_loops = 0
-
-        for _ in range(max_attempts):
-            count = page.locator(".v3-match-row").count()
-            if count >= target_rows:
-                return count
-
-            if count == last_count:
-                stable_loops += 1
-            else:
-                stable_loops = 0
-            last_count = count
-
-            if stable_loops >= 2:
-                break
-
-            try:
-                page.mouse.wheel(0, 2200)
-            except Exception:
-                pass
-            page.wait_for_timeout(1200)
-
-            load_more_buttons = [
-                page.get_by_role("button", name=re.compile(r"show more|load more|more", re.I)),
-                page.locator("button:has-text('Show More')"),
-                page.locator("button:has-text('Load More')"),
-            ]
-            for locator in load_more_buttons:
-                try:
-                    if locator.count() > 0:
-                        locator.first.click(timeout=1200)
-                        page.wait_for_timeout(1200)
-                        break
-                except Exception:
-                    continue
-
-        return page.locator(".v3-match-row").count()
+        raise RuntimeError("Playwright pagination is removed from v0.5.1 sync flow.")
 
     def _dismiss_modals(self, page) -> None:
-        """Dismiss cookie/premium popups that block clicks."""
-        close_candidates = [
-            page.get_by_role("button", name=re.compile("accept|agree", re.I)),
-            page.get_by_role("button", name=re.compile("close", re.I)),
-            page.locator('[aria-label*="close" i]'),
-            page.locator("button[class*='close']"),
-        ]
-
-        for locator in close_candidates:
-            try:
-                if locator.count() > 0:
-                    locator.first.click(timeout=1200)
-                    page.wait_for_timeout(500)
-            except Exception:
-                continue
+        raise RuntimeError("Playwright modal handling is removed from v0.5.1 sync flow.")
 
     def _click_nav_link(self, page, label: str) -> None:
-        """Click top-nav profile link with robust selector fallbacks."""
-        exact = page.get_by_role("link", name=label, exact=True)
-        if exact.count() > 0:
-            exact.first.click()
-            return
-
-        case_sensitive = page.get_by_role("link", name=re.compile(rf"^{re.escape(label)}$"))
-        if case_sensitive.count() > 0:
-            case_sensitive.first.click()
-            return
-
-        fuzzy = page.get_by_role("link", name=re.compile(label, re.I))
-        if fuzzy.count() > 0:
-            fuzzy.first.click()
-            return
-
-        raise RuntimeError(f"Could not locate '{label}' tab")
+        raise RuntimeError("Playwright navigation is removed from v0.5.1 sync flow.")
 
     def _close_drawer(self, page) -> None:
-        """Close expanded season drawer before tab navigation."""
-        candidates = [
-            page.locator(".size-6.cursor-pointer"),
-            page.get_by_role("button", name=re.compile("close", re.I)),
-            page.locator('[aria-label="Close"]'),
-        ]
-        for locator in candidates:
-            try:
-                if locator.count() > 0:
-                    locator.first.click(timeout=1200)
-                    page.wait_for_timeout(1000)
-                    return
-            except Exception:
-                continue
+        raise RuntimeError("Playwright drawer interactions are removed from v0.5.1 sync flow.")
 
     def _scrape_season_stats_from_page(self, page) -> Dict[str, Any]:
         """Use existing drawer parser path to preserve output schema exactly."""

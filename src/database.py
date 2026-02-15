@@ -47,6 +47,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS players (
                     player_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE NOT NULL,
+                    tracker_uuid TEXT,
                     device_tag TEXT DEFAULT 'pc',
                     tag TEXT DEFAULT 'untagged',
                     last_match_synced_at TEXT,
@@ -461,6 +462,7 @@ class Database:
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
 
     def _migrate_players_table(self) -> None:
+        self._add_column_if_missing("players", "tracker_uuid TEXT", "tracker_uuid")
         self._add_column_if_missing("players", "device_tag TEXT DEFAULT 'pc'", "device_tag")
         self._add_column_if_missing("players", "tag TEXT DEFAULT 'untagged'", "tag")
         self._add_column_if_missing("players", "last_match_synced_at TEXT", "last_match_synced_at")
@@ -649,7 +651,7 @@ class Database:
         try:
             cursor = self.conn.cursor()
             cursor.execute(
-                "SELECT player_id, username, device_tag, tag, created_at, notes FROM players ORDER BY username"
+                "SELECT player_id, username, tracker_uuid, device_tag, tag, created_at, notes FROM players ORDER BY username"
             )
             return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
@@ -721,7 +723,7 @@ class Database:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT player_id, username, device_tag, tag, created_at, notes
+                SELECT player_id, username, tracker_uuid, device_tag, tag, created_at, notes
                 FROM players
                 WHERE username = ?
             """, (username,))
@@ -749,6 +751,19 @@ class Database:
         except sqlite3.Error as e:
             self.conn.rollback()
             raise RuntimeError(f"Failed to update last_match_synced_at for '{username}': {e}")
+
+    def update_player_tracker_uuid(self, username: str, tracker_uuid: str) -> None:
+        """Persist tracker platform UUID for a player."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE players SET tracker_uuid = ? WHERE username = ?",
+                (tracker_uuid, username),
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to update tracker_uuid for '{username}': {e}")
 
     def get_player_id(self, username: str) -> Optional[int]:
         """Get player_id for username, or None if not found."""

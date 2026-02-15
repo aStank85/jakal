@@ -1,0 +1,56 @@
+{
+  "data": [
+    {
+      "type": "operator",
+      "attributes": {
+        "operator": "gridlock"
+      },
+      "metadata": {
+        "operatorName": "Gridlock",
+        "sideName": "Attacker"
+      },
+      "stats": {
+        "matchesPlayed": {"value": 39},
+        "matchesWon": {"value": 23},
+        "matchesLost": {"value": 14},
+        "matchesAbandoned": {"value": 2},
+        "winPercentage": {"value": 58.97},
+        "roundsPlayed": {"value": 121},
+        "kills": {"value": 84},
+        "deaths": {"value": 66},
+        "assists": {"value": 17},
+        "kdRatio": {"value": 1.27},
+        "headshotPct": {"value": 43.2},
+        "esr": {"value": 0.63},
+        "teamKills": {"value": 1},
+        "kills5K": {"value": 0}
+      }
+    },
+    {
+      "type": "operator",
+      "attributes": {
+        "operator": "kaid"
+      },
+      "metadata": {
+        "operatorName": "Kaid",
+        "sideName": "Defender"
+      },
+      "stats": {
+        "matchesPlayed": {"value": 28},
+        "matchesWon": {"value": 15},
+        "matchesLost": {"value": 13},
+        "matchesAbandoned": {"value": 0},
+        "winPercentage": {"value": 53.57},
+        "roundsPlayed": {"value": 117},
+        "kills": {"value": 76},
+        "deaths": {"value": 59},
+        "assists": {"value": 11},
+        "kdRatio": {"value": 1.29},
+        "headshotPct": {"value": 51.0},
+        "esr": {"value": 0.60},
+        "teamKills": {"value": 0},
+        "kills5K": {"value": 1}
+      }
+    }
+  ]
+}

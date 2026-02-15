@@ -1,10 +1,10 @@
 # Jakal - Rainbow Six Siege Analytics Engine
 
-Jakal is a terminal-based analytics platform for Rainbow Six Siege. v0.5.0 introduces automated data sync via Playwright scraping while keeping manual paste as fallback.
+Jakal is a terminal-based analytics platform for Rainbow Six Siege. v0.5.1 uses Tracker.gg API sync for profile, map, operator, and match-detail data while keeping manual paste as fallback.
 
 ## Current Status
 
-- Current version: `v0.5.0` (released)
+- Current version: `v0.5.1` (in progress)
 - Next milestone: `v0.5.1` (short-term plateau detector)
 - Completed milestones:
   - `v0.1.1` Parser MVP
@@ -13,6 +13,7 @@ Jakal is a terminal-based analytics platform for Rainbow Six Siege. v0.5.0 intro
   - `v0.4.0` Stack Analysis
   - `v0.4.1` 5v5 Matchup Analysis
   - `v0.5.0` Auto-Scraper Integration
+  - `v0.5.1` API Sync Migration
 
 ## Core Features
 
@@ -31,8 +32,6 @@ Jakal is a terminal-based analytics platform for Rainbow Six Siege. v0.5.0 intro
 
 ```bash
 pip install -r requirements.txt
-pip install playwright beautifulsoup4
-playwright install chromium
 ```
 
 ## Run
@@ -47,11 +46,11 @@ python main.py
 
 1. Choose option `1`.
 2. Enter username when prompted.
-3. Jakal scrapes and saves:
-   - Season stats
+3. Jakal syncs via API and saves:
+   - Profile season stats
    - Map stats
    - Operator stats
-   - Match history
+   - Match history + match detail
 4. Metrics and insights are recalculated from the saved snapshot.
 
 ### Add Stats Manually (Fallback)
@@ -69,7 +68,7 @@ python main.py
 ## Roadmap Snapshot
 
 - `v0.5.0`: Complete (web scraper + auto-sync)
-- `v0.5.1`: Next (short-term plateau detector)
+- `v0.5.1`: In progress (API sync migration + short-term plateau detector)
 - `v0.5.2`: Player evolution plugin set
 - `v1.0.0`: Stage 0 complete
 

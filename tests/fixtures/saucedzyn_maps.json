@@ -1,0 +1,46 @@
+{
+  "data": [
+    {
+      "type": "map",
+      "attributes": {
+        "map": "emerald-plains"
+      },
+      "metadata": {
+        "mapName": "Emerald Plains"
+      },
+      "stats": {
+        "matchesPlayed": {"value": 42},
+        "matchesWon": {"value": 24},
+        "matchesLost": {"value": 16},
+        "matchesAbandoned": {"value": 2},
+        "winPercentage": {"value": 57.14},
+        "kdRatio": {"value": 1.08},
+        "attackerWinPercentage": {"value": 52.4},
+        "defenderWinPercentage": {"value": 54.1},
+        "headshotPct": {"value": 46.9},
+        "esr": {"value": 0.61}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {
+        "map": "clubhouse"
+      },
+      "metadata": {
+        "mapName": "Clubhouse"
+      },
+      "stats": {
+        "matchesPlayed": {"value": 54},
+        "matchesWon": {"value": 28},
+        "matchesLost": {"value": 26},
+        "matchesAbandoned": {"value": 0},
+        "winPercentage": {"value": 51.9},
+        "kdRatio": {"value": 0.94},
+        "attackerWinPercentage": {"value": 49.2},
+        "defenderWinPercentage": {"value": 50.8},
+        "headshotPct": {"value": 44.0},
+        "esr": {"value": 0.57}
+      }
+    }
+  ]
+}

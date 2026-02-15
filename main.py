@@ -10,7 +10,6 @@ from src.stack_manager import StackManager
 from src.team_analyzer import TeamAnalyzer
 from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
-from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
 from src.api_client import TrackerAPIClient
 from datetime import datetime
 import time
@@ -110,7 +109,6 @@ def main():
     stack_manager = StackManager(db)
     team_analyzer = TeamAnalyzer(db)
     matchup_analyzer = MatchupAnalyzer(db)
-    scraper = R6Scraper(headless=True, slow_mo=500)
     api_client = TrackerAPIClient()
 
     try:
@@ -131,13 +129,31 @@ def main():
                     is_initial_sync = last_synced_at is None
                     match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
                     since_date = None if is_initial_sync else last_synced_at
-                    scope_label = "last 20 matches (initial)" if is_initial_sync else "incremental"
-                    print(f"Syncing {username} ({scope_label})...")
-                    result = scraper.scrape_full_profile(username)
-                    if result.get("season_stats") is None:
-                        raise RuntimeError("Season stats missing; sync cannot continue")
+                    print(f"Syncing {username} (full season)...")
+                    result = {"errors": []}
 
-                    _safe_print("✅ Season stats")
+                    profile = api_client.get_profile(username)
+                    season_raw = profile.get("season_stats") or {}
+                    if not season_raw:
+                        raise RuntimeError("Season stats missing; sync cannot continue")
+                    result["season_stats"] = api_client.season_stats_to_snapshot(season_raw)
+                    tracker_uuid = profile.get("uuid")
+                    if tracker_uuid:
+                        db.update_player_tracker_uuid(username, tracker_uuid)
+                    _safe_print("✅ Profile stats")
+
+                    try:
+                        result["map_stats"] = api_client.get_map_stats(username)
+                    except Exception as exc:
+                        result["map_stats"] = []
+                        result["errors"].append(f"Map stats failed: {exc}")
+
+                    try:
+                        result["operator_stats"] = api_client.get_operator_stats(username)
+                    except Exception as exc:
+                        result["operator_stats"] = []
+                        result["errors"].append(f"Operator stats failed: {exc}")
+
                     map_count = len(result.get("map_stats", []))
                     operator_count = len(result.get("operator_stats", []))
                     _safe_print(f"✅ Map stats ({map_count} maps)")
@@ -183,10 +199,6 @@ def main():
                         for err in result["errors"]:
                             print(f"  - {err}")
 
-                except ScraperBlockedError:
-                    _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")
-                except PlayerNotFoundError:
-                    _safe_print("❌ Username not found on R6 Tracker.")
                 except Exception as e:
                     _safe_print(f"❌ Sync failed: {e}")
 
@@ -261,12 +273,31 @@ def main():
                         is_initial_sync = last_synced_at is None
                         match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
                         since_date = None if is_initial_sync else last_synced_at
-                        scope_label = "last 20 matches (initial)" if is_initial_sync else "incremental"
-                        print(f"Syncing {idx}/{total}: {username} ({scope_label})...")
+                        print(f"Syncing {idx}/{total}: {username} (full season)...")
                         try:
-                            result = scraper.scrape_full_profile(username)
-                            if result.get("season_stats") is None:
+                            result = {"errors": []}
+
+                            profile = api_client.get_profile(username)
+                            season_raw = profile.get("season_stats") or {}
+                            if not season_raw:
                                 raise RuntimeError("Season stats missing")
+                            result["season_stats"] = api_client.season_stats_to_snapshot(season_raw)
+                            tracker_uuid = profile.get("uuid")
+                            if tracker_uuid:
+                                db.update_player_tracker_uuid(username, tracker_uuid)
+                            _safe_print("✅ Profile stats")
+
+                            try:
+                                result["map_stats"] = api_client.get_map_stats(username)
+                            except Exception as exc:
+                                result["map_stats"] = []
+                                result["errors"].append(f"Map stats failed: {exc}")
+
+                            try:
+                                result["operator_stats"] = api_client.get_operator_stats(username)
+                            except Exception as exc:
+                                result["operator_stats"] = []
+                                result["errors"].append(f"Operator stats failed: {exc}")
 
                             detail_rows = []
                             try:
@@ -298,12 +329,6 @@ def main():
                             if latest_synced_at:
                                 db.update_player_last_match_synced_at(username, latest_synced_at)
                             success += 1
-                        except ScraperBlockedError:
-                            _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")
-                            failed += 1
-                        except PlayerNotFoundError:
-                            _safe_print("❌ Username not found on R6 Tracker.")
-                            failed += 1
                         except Exception as e:
                             _safe_print(f"❌ Sync failed: {e}")
                             failed += 1

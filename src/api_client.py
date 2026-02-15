@@ -33,6 +33,58 @@ class TrackerAPIClient:
         5: "defuser_disabled",
         6: "defuser_planted",
     }
+    PROFILE_SEASON_FIELDS = (
+        "matchesPlayed",
+        "matchesWon",
+        "matchesLost",
+        "matchesAbandoned",
+        "kills",
+        "deaths",
+        "assists",
+        "headshots",
+        "firstBloods",
+        "firstDeaths",
+        "clutches",
+        "clutchesLost",
+        "clutches1v1",
+        "clutches1v2",
+        "clutches1v3",
+        "clutches1v4",
+        "clutches1v5",
+        "clutchesLost1v1",
+        "clutchesLost1v2",
+        "clutchesLost1v3",
+        "clutchesLost1v4",
+        "clutchesLost1v5",
+        "kills1K",
+        "kills2K",
+        "kills3K",
+        "kills4K",
+        "kills5K",
+        "rankPoints",
+        "maxRankPoints",
+        "rank",
+        "maxRank",
+        "kdRatio",
+        "headshotPct",
+        "esr",
+        "killsPerRound",
+        "deathsPerRound",
+        "assistsPerRound",
+        "roundsPlayed",
+        "roundsWon",
+        "roundsLost",
+        "winPercentage",
+        "elo",
+        "timePlayed",
+        "roundsDisconnected",
+        "teamKills",
+        "topRankPosition",
+        "score",
+        "killsPerGame",
+        "headshotsPerRound",
+        "roundWinPct",
+    )
 
     def __init__(
         self,
@@ -266,6 +318,338 @@ class TrackerAPIClient:
             url = f"{base}?{urlencode({'next': next_token})}"
         payload = self._get_json(url)
         return self.parse_match_list(payload)
+
+    @classmethod
+    def _stats_raw_map(cls, stats: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(stats, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for key, node in stats.items():
+            if isinstance(node, dict):
+                out[key] = node.get("value")
+            else:
+                out[key] = None
+        return out
+
+    @classmethod
+    def _find_profile_segment(
+        cls,
+        segments: List[Dict[str, Any]],
+        *,
+        kind: str,
+        season: Optional[int] = None,
+        gamemode: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        for segment in segments:
+            if segment.get("type") != kind:
+                continue
+            attrs = segment.get("attributes", {})
+            if season is not None and cls._safe_int(attrs.get("season"), -1) != season:
+                continue
+            if gamemode is not None and attrs.get("gamemode") != gamemode:
+                continue
+            return segment
+        return None
+
+    def parse_profile(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        platform_info = data.get("platformInfo", {}) if isinstance(data, dict) else {}
+        segments = data.get("segments", []) if isinstance(data, dict) else []
+
+        season_segment = self._find_profile_segment(
+            segments,
+            kind="season",
+            season=40,
+            gamemode="pvp_ranked",
+        )
+        if season_segment is None:
+            ranked_seasons = [
+                s for s in segments if s.get("type") == "season" and (s.get("attributes", {}) or {}).get("gamemode") == "pvp_ranked"
+            ]
+            ranked_seasons.sort(
+                key=lambda s: self._safe_int((s.get("attributes", {}) or {}).get("season"), -1),
+                reverse=True,
+            )
+            season_segment = ranked_seasons[0] if ranked_seasons else {}
+
+        overview_segment = self._find_profile_segment(segments, kind="overview") or {}
+        season_stats_raw = self._stats_raw_map((season_segment or {}).get("stats", {}))
+        overview_stats_raw = self._stats_raw_map((overview_segment or {}).get("stats", {}))
+
+        season_stats = {
+            key: season_stats_raw.get(key)
+            for key in self.PROFILE_SEASON_FIELDS
+            if key in season_stats_raw
+        }
+
+        return {
+            "uuid": platform_info.get("platformUserId"),
+            "username": platform_info.get("platformUserHandle") or platform_info.get("platformUserIdentifier"),
+            "season_stats": season_stats,
+            "career_stats": overview_stats_raw,
+        }
+
+    def get_profile(self, username: str) -> Dict[str, Any]:
+        payload = self._get_json(f"{self.BASE}/profile/ubi/{username}")
+        return self.parse_profile(payload)
+
+    @staticmethod
+    def _segments_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            segments = data.get("segments", [])
+            if isinstance(segments, list):
+                return [item for item in segments if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _first_value(stats: Dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in stats:
+                return stats.get(key)
+        return None
+
+    def parse_operator_segments(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for segment in self._segments_from_payload(payload):
+            attrs = segment.get("attributes", {})
+            meta = segment.get("metadata", {})
+            raw = self._stats_raw_map(segment.get("stats", {}))
+            out.append(
+                {
+                    "operator_slug": attrs.get("operator"),
+                    "operator_name": meta.get("operatorName") or attrs.get("operator"),
+                    "side": meta.get("sideName"),
+                    "rounds": self._safe_int(self._first_value(raw, "roundsPlayed", "matchesPlayed")),
+                    "win_pct": self._safe_float(raw.get("winPercentage")),
+                    "kd": self._safe_float(self._first_value(raw, "kdRatio", "kdratio")),
+                    "hs_pct": self._safe_float(self._first_value(raw, "headshotPct", "headshotPercentage")),
+                    "kills": self._safe_int(raw.get("kills")),
+                    "deaths": self._safe_int(raw.get("deaths")),
+                    "wins": self._safe_int(self._first_value(raw, "matchesWon", "roundsWon")),
+                    "losses": self._safe_int(self._first_value(raw, "matchesLost", "roundsLost")),
+                    "assists": self._safe_int(raw.get("assists")),
+                    "aces": self._safe_int(self._first_value(raw, "aces", "kills5K")),
+                    "teamkills": self._safe_int(raw.get("teamKills")),
+                    "matches": self._safe_int(raw.get("matchesPlayed")),
+                    "abandons": self._safe_int(raw.get("matchesAbandoned")),
+                    "esr": self._safe_float(raw.get("esr")),
+                }
+            )
+        return out
+
+    def get_operator_stats(self, username: str) -> List[Dict[str, Any]]:
+        url = (
+            f"{self.BASE}/profile/ubi/{username}/segments/operator?"
+            f"{urlencode({'sessionType': 'ranked', 'season': 'all'})}"
+        )
+        return self.parse_operator_segments(self._get_json(url))
+
+    def parse_map_segments(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for item in self._parse_map_segments_with_side(payload):
+            row = dict(item)
+            row.pop("side", None)
+            out.append(row)
+        return out
+
+    def _parse_map_segments_with_side(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for segment in self._segments_from_payload(payload):
+            attrs = segment.get("attributes", {})
+            meta = segment.get("metadata", {})
+            raw = self._stats_raw_map(segment.get("stats", {}))
+            out.append(
+                {
+                    "map_slug": attrs.get("map"),
+                    "map_name": meta.get("mapName") or attrs.get("map"),
+                    "side": attrs.get("side"),
+                    "matches": self._safe_int(raw.get("matchesPlayed")),
+                    "win_pct": self._safe_float(raw.get("winPercentage")),
+                    "wins": self._safe_int(raw.get("matchesWon")),
+                    "losses": self._safe_int(raw.get("matchesLost")),
+                    "abandons": self._safe_int(raw.get("matchesAbandoned")),
+                    "kd": self._safe_float(self._first_value(raw, "kdRatio", "kdratio")),
+                    "atk_win_pct": self._safe_float(
+                        self._first_value(raw, "attackerWinPercentage", "attackWinPercentage", "atkWinPercentage")
+                    ),
+                    "def_win_pct": self._safe_float(
+                        self._first_value(raw, "defenderWinPercentage", "defenceWinPercentage", "defWinPercentage")
+                    ),
+                    "hs_pct": self._safe_float(self._first_value(raw, "headshotPct", "headshotPercentage")),
+                    "esr": self._safe_float(raw.get("esr")),
+                }
+            )
+        return out
+
+    def get_map_stats(self, username: str) -> List[Dict[str, Any]]:
+        base_url = f"{self.BASE}/profile/ubi/{username}/segments/map"
+        base_rows = self._parse_map_segments_with_side(
+            self._get_json(
+                f"{base_url}?{urlencode({'sessionType': 'ranked', 'season': 'all'})}"
+            )
+        )
+        atk_rows = self._parse_map_segments_with_side(
+            self._get_json(
+                f"{base_url}?{urlencode({'sessionType': 'ranked', 'season': 'all', 'side': 'attacker'})}"
+            )
+        )
+        def_rows = self._parse_map_segments_with_side(
+            self._get_json(
+                f"{base_url}?{urlencode({'sessionType': 'ranked', 'season': 'all', 'side': 'defender'})}"
+            )
+        )
+
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        def _ensure(slug: str, row: Dict[str, Any]) -> Dict[str, Any]:
+            if slug not in merged:
+                merged[slug] = {
+                    "map_slug": slug,
+                    "map_name": row.get("map_name") or slug,
+                    "matches": row.get("matches", 0),
+                    "win_pct": row.get("win_pct", 0.0),
+                    "wins": row.get("wins", 0),
+                    "losses": row.get("losses", 0),
+                    "abandons": row.get("abandons", 0),
+                    "kd": row.get("kd", 0.0),
+                    "atk_win_pct": 0.0,
+                    "def_win_pct": 0.0,
+                    "hs_pct": row.get("hs_pct", 0.0),
+                    "esr": row.get("esr", 0.0),
+                }
+            return merged[slug]
+
+        def _apply(rows: List[Dict[str, Any]], forced_side: Optional[str] = None) -> None:
+            for row in rows:
+                slug = row.get("map_slug")
+                if not slug:
+                    continue
+                item = _ensure(slug, row)
+                side = forced_side or row.get("side")
+
+                if forced_side is None and not side:
+                    item.update(
+                        {
+                            "map_name": row.get("map_name") or item.get("map_name"),
+                            "matches": row.get("matches", item.get("matches")),
+                            "win_pct": row.get("win_pct", item.get("win_pct")),
+                            "wins": row.get("wins", item.get("wins")),
+                            "losses": row.get("losses", item.get("losses")),
+                            "abandons": row.get("abandons", item.get("abandons")),
+                            "kd": row.get("kd", item.get("kd")),
+                            "hs_pct": row.get("hs_pct", item.get("hs_pct")),
+                            "esr": row.get("esr", item.get("esr")),
+                        }
+                    )
+
+                if side == "attacker":
+                    item["atk_win_pct"] = row.get("win_pct", item.get("atk_win_pct"))
+                elif side == "defender":
+                    item["def_win_pct"] = row.get("win_pct", item.get("def_win_pct"))
+
+        _apply(base_rows)
+        _apply(atk_rows, forced_side="attacker")
+        _apply(def_rows, forced_side="defender")
+
+        return sorted(merged.values(), key=lambda x: (x.get("map_name") or ""))
+
+    def season_stats_to_snapshot(self, season_stats: Dict[str, Any]) -> Dict[str, Any]:
+        matches = self._safe_int(season_stats.get("matchesPlayed"))
+        wins = self._safe_int(season_stats.get("matchesWon"))
+        losses = self._safe_int(season_stats.get("matchesLost"))
+        abandons = self._safe_int(season_stats.get("matchesAbandoned"))
+        rounds_played = self._safe_int(season_stats.get("roundsPlayed"))
+        rounds_won = self._safe_int(season_stats.get("roundsWon"))
+        rounds_lost = self._safe_int(season_stats.get("roundsLost"))
+        kills = self._safe_int(season_stats.get("kills"))
+        headshots = self._safe_int(season_stats.get("headshots"))
+        rank = self._safe_int(season_stats.get("rank"))
+        max_rank = self._safe_int(season_stats.get("maxRank"), rank)
+        top_rank_position = season_stats.get("topRankPosition")
+        top_rank_position = None if top_rank_position is None else self._safe_int(top_rank_position)
+        time_played_seconds = self._safe_float(season_stats.get("timePlayed"))
+
+        round_win_pct = self._safe_float(season_stats.get("roundWinPct"))
+        if round_win_pct <= 0 and rounds_played > 0:
+            round_win_pct = (rounds_won / rounds_played) * 100.0
+
+        headshots_per_round = self._safe_float(season_stats.get("headshotsPerRound"))
+        if headshots_per_round <= 0 and rounds_played > 0:
+            headshots_per_round = headshots / rounds_played
+
+        kills_per_game = self._safe_float(season_stats.get("killsPerGame"))
+        if kills_per_game <= 0 and matches > 0:
+            kills_per_game = kills / matches
+
+        return {
+            "game": {
+                "abandons": abandons,
+                "matches": matches,
+                "wins": wins,
+                "losses": losses,
+                "match_win_pct": self._safe_float(season_stats.get("winPercentage")),
+                "time_played_hours": time_played_seconds / 3600.0,
+                "score": self._safe_int(season_stats.get("score")),
+            },
+            "rounds": {
+                "disconnected": self._safe_int(season_stats.get("roundsDisconnected")),
+                "rounds_played": rounds_played,
+                "rounds_wins": rounds_won,
+                "rounds_losses": rounds_lost,
+                "win_pct": round_win_pct,
+            },
+            "combat": {
+                "kills": kills,
+                "deaths": self._safe_int(season_stats.get("deaths")),
+                "assists": self._safe_int(season_stats.get("assists")),
+                "kd": self._safe_float(season_stats.get("kdRatio")),
+                "kills_per_round": self._safe_float(season_stats.get("killsPerRound")),
+                "deaths_per_round": self._safe_float(season_stats.get("deathsPerRound")),
+                "assists_per_round": self._safe_float(season_stats.get("assistsPerRound")),
+                "kills_per_game": kills_per_game,
+                "headshots": headshots,
+                "headshots_per_round": headshots_per_round,
+                "hs_pct": self._safe_float(season_stats.get("headshotPct")),
+                "first_bloods": self._safe_int(season_stats.get("firstBloods")),
+                "first_deaths": self._safe_int(season_stats.get("firstDeaths")),
+                "teamkills": self._safe_int(season_stats.get("teamKills")),
+                "esr": self._safe_float(season_stats.get("esr")),
+            },
+            "clutches": {
+                "total": self._safe_int(season_stats.get("clutches")),
+                "1v1": self._safe_int(season_stats.get("clutches1v1")),
+                "1v2": self._safe_int(season_stats.get("clutches1v2")),
+                "1v3": self._safe_int(season_stats.get("clutches1v3")),
+                "1v4": self._safe_int(season_stats.get("clutches1v4")),
+                "1v5": self._safe_int(season_stats.get("clutches1v5")),
+                "lost_total": self._safe_int(season_stats.get("clutchesLost")),
+                "lost_1v1": self._safe_int(season_stats.get("clutchesLost1v1")),
+                "lost_1v2": self._safe_int(season_stats.get("clutchesLost1v2")),
+                "lost_1v3": self._safe_int(season_stats.get("clutchesLost1v3")),
+                "lost_1v4": self._safe_int(season_stats.get("clutchesLost1v4")),
+                "lost_1v5": self._safe_int(season_stats.get("clutchesLost1v5")),
+            },
+            "multikills": {
+                "aces": self._safe_int(season_stats.get("kills5K")),
+                "1k": self._safe_int(season_stats.get("kills1K")),
+                "2k": self._safe_int(season_stats.get("kills2K")),
+                "3k": self._safe_int(season_stats.get("kills3K")),
+                "4k": self._safe_int(season_stats.get("kills4K")),
+            },
+            "ranked": {
+                "current_rank": rank,
+                "max_rank": max_rank,
+                "top_rank_position": top_rank_position,
+            },
+            "uncategorized": {
+                "rank_points": self._safe_int(season_stats.get("rankPoints")),
+                "max_rank_points": self._safe_int(season_stats.get("maxRankPoints")),
+                "trn_elo": self._safe_int(season_stats.get("elo")),
+            },
+        }
 
     def get_match_detail(self, match_id: str) -> Dict[str, Any]:
         payload = self._get_json(f"{self.BASE}/matches/{match_id}")

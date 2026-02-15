@@ -260,3 +260,109 @@ def test_save_player_rounds(client, temp_db):
     assert len(rows) > 0
     assert "operator" in rows[0]
     assert rows[0]["side"] in {"attacker", "defender", "unknown"}
+
+
+def test_parse_profile_season_stats(client):
+    parsed = client.parse_profile(_load_json("saucedzyn_home.json"))
+    season = parsed["season_stats"]
+    assert season["matchesPlayed"] > 0
+    required = {
+        "matchesPlayed",
+        "matchesWon",
+        "matchesLost",
+        "matchesAbandoned",
+        "kills",
+        "deaths",
+        "assists",
+        "headshots",
+        "firstBloods",
+        "firstDeaths",
+        "clutches",
+        "clutchesLost",
+        "clutches1v1",
+        "clutches1v2",
+        "clutches1v3",
+        "clutches1v4",
+        "clutches1v5",
+        "clutchesLost1v1",
+        "clutchesLost1v2",
+        "clutchesLost1v3",
+        "clutchesLost1v4",
+        "clutchesLost1v5",
+        "kills1K",
+        "kills2K",
+        "kills3K",
+        "kills4K",
+        "kills5K",
+        "rankPoints",
+        "maxRankPoints",
+        "rank",
+        "kdRatio",
+        "headshotPct",
+        "esr",
+        "killsPerRound",
+        "deathsPerRound",
+        "assistsPerRound",
+        "roundsPlayed",
+        "roundsWon",
+        "roundsLost",
+        "winPercentage",
+        "elo",
+    }
+    assert required.issubset(set(season.keys()))
+
+
+def test_parse_profile_uuid(client):
+    parsed = client.parse_profile(_load_json("saucedzyn_home.json"))
+    assert parsed["uuid"] == "68cfcc8f-c91d-4d55-aa51-ddd6478932c9"
+    assert parsed["username"] == "SaucedZyn"
+
+
+def test_parse_profile_career_stats(client):
+    parsed = client.parse_profile(_load_json("saucedzyn_home.json"))
+    career = parsed["career_stats"]
+    assert career["matchesPlayed"] > 0
+    assert "kills" in career
+    assert "deaths" in career
+
+
+def test_parse_operator_stats(client):
+    parsed = client.parse_operator_segments(_load_json("saucedzyn_operators.json"))
+    assert len(parsed) == 2
+    assert parsed[0]["operator_slug"] == "gridlock"
+    assert parsed[0]["operator_name"] == "Gridlock"
+    assert parsed[0]["rounds"] == 121
+    assert parsed[1]["operator_name"] == "Kaid"
+    assert parsed[1]["kd"] == pytest.approx(1.29)
+
+
+def test_parse_map_stats(client):
+    parsed = client.parse_map_segments(_load_json("saucedzyn_maps.json"))
+    assert len(parsed) == 2
+    assert parsed[0]["map_slug"] == "emerald-plains"
+    assert parsed[0]["map_name"] == "Emerald Plains"
+    assert parsed[0]["matches"] == 42
+    assert parsed[1]["map_name"] == "Clubhouse"
+    assert parsed[1]["win_pct"] == pytest.approx(51.9)
+
+
+def test_get_map_stats_merges_side_payloads(client, monkeypatch):
+    payloads = {
+        "base": _load_json("saucedzyn_map.json"),
+        "attacker": _load_json("saucedzyn_map_atk.json"),
+        "defender": _load_json("saucedzyn_map_def.json"),
+    }
+
+    def fake_get(url, retry_429=True):
+        if "side=attacker" in url:
+            return payloads["attacker"]
+        if "side=defender" in url:
+            return payloads["defender"]
+        return payloads["base"]
+
+    monkeypatch.setattr(client, "_get_json", fake_get)
+    maps = client.get_map_stats("SaucedZyn")
+    assert len(maps) == 17
+    assert all("atk_win_pct" in m and "def_win_pct" in m for m in maps)
+    assert any((m.get("atk_win_pct") or 0) > 0 for m in maps)
+    assert any((m.get("def_win_pct") or 0) > 0 for m in maps)

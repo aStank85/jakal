@@ -159,6 +159,14 @@ class TestDatabase:
         assert player is not None
         assert player["device_tag"] == "playstation"
 
+    def test_update_player_tracker_uuid(self, db):
+        """Test persisting tracker UUID for encounters endpoint support."""
+        db.add_player("TestPlayer")
+        db.update_player_tracker_uuid("TestPlayer", "68cfcc8f-c91d-4d55-aa51-ddd6478932c9")
+        player = db.get_player("TestPlayer")
+        assert player is not None
+        assert player["tracker_uuid"] == "68cfcc8f-c91d-4d55-aa51-ddd6478932c9"
+
     def test_get_nonexistent_player(self, db):
         """Test retrieving nonexistent player returns None."""
         player = db.get_player("NonExistent")
@@ -541,6 +549,7 @@ class TestDatabase:
             migrated_db = Database(db_path)
 
             player_columns = migrated_db._get_table_columns("players")
+            assert "tracker_uuid" in player_columns
             assert "device_tag" in player_columns
             assert "tag" in player_columns
             assert "notes" in player_columns
