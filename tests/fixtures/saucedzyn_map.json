@@ -1,0 +1,259 @@
+{
+  "data": [
+    {
+      "type": "map",
+      "attributes": {"map": "emerald-plains"},
+      "metadata": {"mapName": "Emerald Plains"},
+      "stats": {
+        "matchesPlayed": {"value": 42},
+        "matchesWon": {"value": 24},
+        "matchesLost": {"value": 16},
+        "matchesAbandoned": {"value": 2},
+        "winPercentage": {"value": 57.14},
+        "kdRatio": {"value": 1.08},
+        "headshotPct": {"value": 46.9},
+        "esr": {"value": 0.61}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "clubhouse"},
+      "metadata": {"mapName": "Clubhouse"},
+      "stats": {
+        "matchesPlayed": {"value": 54},
+        "matchesWon": {"value": 28},
+        "matchesLost": {"value": 26},
+        "matchesAbandoned": {"value": 0},
+        "winPercentage": {"value": 51.9},
+        "kdRatio": {"value": 0.94},
+        "headshotPct": {"value": 44.0},
+        "esr": {"value": 0.57}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "bank"},
+      "metadata": {"mapName": "Bank"},
+      "stats": {
+        "matchesPlayed": {"value": 38},
+        "matchesWon": {"value": 20},
+        "matchesLost": {"value": 17},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 52.6},
+        "kdRatio": {"value": 1.12},
+        "headshotPct": {"value": 48.2},
+        "esr": {"value": 0.59}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "border"},
+      "metadata": {"mapName": "Border"},
+      "stats": {
+        "matchesPlayed": {"value": 31},
+        "matchesWon": {"value": 14},
+        "matchesLost": {"value": 16},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 45.2},
+        "kdRatio": {"value": 0.88},
+        "headshotPct": {"value": 41.5},
+        "esr": {"value": 0.52}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "chalet"},
+      "metadata": {"mapName": "Chalet"},
+      "stats": {
+        "matchesPlayed": {"value": 29},
+        "matchesWon": {"value": 16},
+        "matchesLost": {"value": 12},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 55.2},
+        "kdRatio": {"value": 1.15},
+        "headshotPct": {"value": 50.1},
+        "esr": {"value": 0.63}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "coastline"},
+      "metadata": {"mapName": "Coastline"},
+      "stats": {
+        "matchesPlayed": {"value": 46},
+        "matchesWon": {"value": 22},
+        "matchesLost": {"value": 23},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 47.8},
+        "kdRatio": {"value": 0.96},
+        "headshotPct": {"value": 45.3},
+        "esr": {"value": 0.55}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "consulate"},
+      "metadata": {"mapName": "Consulate"},
+      "stats": {
+        "matchesPlayed": {"value": 35},
+        "matchesWon": {"value": 19},
+        "matchesLost": {"value": 15},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 54.3},
+        "kdRatio": {"value": 1.04},
+        "headshotPct": {"value": 47.0},
+        "esr": {"value": 0.60}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "kafe-dostoyevsky"},
+      "metadata": {"mapName": "Kafe Dostoyevsky"},
+      "stats": {
+        "matchesPlayed": {"value": 27},
+        "matchesWon": {"value": 15},
+        "matchesLost": {"value": 11},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 55.6},
+        "kdRatio": {"value": 1.18},
+        "headshotPct": {"value": 49.8},
+        "esr": {"value": 0.64}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "kanal"},
+      "metadata": {"mapName": "Kanal"},
+      "stats": {
+        "matchesPlayed": {"value": 22},
+        "matchesWon": {"value": 10},
+        "matchesLost": {"value": 11},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 45.5},
+        "kdRatio": {"value": 0.91},
+        "headshotPct": {"value": 43.2},
+        "esr": {"value": 0.53}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "oregon"},
+      "metadata": {"mapName": "Oregon"},
+      "stats": {
+        "matchesPlayed": {"value": 50},
+        "matchesWon": {"value": 27},
+        "matchesLost": {"value": 22},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 54.0},
+        "kdRatio": {"value": 1.10},
+        "headshotPct": {"value": 47.5},
+        "esr": {"value": 0.62}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "outback"},
+      "metadata": {"mapName": "Outback"},
+      "stats": {
+        "matchesPlayed": {"value": 19},
+        "matchesWon": {"value": 8},
+        "matchesLost": {"value": 10},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 42.1},
+        "kdRatio": {"value": 0.82},
+        "headshotPct": {"value": 39.7},
+        "esr": {"value": 0.49}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "skyscraper"},
+      "metadata": {"mapName": "Skyscraper"},
+      "stats": {
+        "matchesPlayed": {"value": 25},
+        "matchesWon": {"value": 13},
+        "matchesLost": {"value": 11},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 52.0},
+        "kdRatio": {"value": 1.01},
+        "headshotPct": {"value": 46.1},
+        "esr": {"value": 0.58}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "theme-park"},
+      "metadata": {"mapName": "Theme Park"},
+      "stats": {
+        "matchesPlayed": {"value": 33},
+        "matchesWon": {"value": 18},
+        "matchesLost": {"value": 14},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 54.5},
+        "kdRatio": {"value": 1.06},
+        "headshotPct": {"value": 45.8},
+        "esr": {"value": 0.60}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "villa"},
+      "metadata": {"mapName": "Villa"},
+      "stats": {
+        "matchesPlayed": {"value": 40},
+        "matchesWon": {"value": 21},
+        "matchesLost": {"value": 18},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 52.5},
+        "kdRatio": {"value": 1.03},
+        "headshotPct": {"value": 44.6},
+        "esr": {"value": 0.58}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "nighthaven-labs"},
+      "metadata": {"mapName": "Nighthaven Labs"},
+      "stats": {
+        "matchesPlayed": {"value": 18},
+        "matchesWon": {"value": 9},
+        "matchesLost": {"value": 8},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 50.0},
+        "kdRatio": {"value": 0.97},
+        "headshotPct": {"value": 42.3},
+        "esr": {"value": 0.56}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "lair"},
+      "metadata": {"mapName": "Lair"},
+      "stats": {
+        "matchesPlayed": {"value": 21},
+        "matchesWon": {"value": 12},
+        "matchesLost": {"value": 8},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 57.1},
+        "kdRatio": {"value": 1.20},
+        "headshotPct": {"value": 51.4},
+        "esr": {"value": 0.65}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "close-quarter"},
+      "metadata": {"mapName": "Close Quarter"},
+      "stats": {
+        "matchesPlayed": {"value": 15},
+        "matchesWon": {"value": 7},
+        "matchesLost": {"value": 7},
+        "matchesAbandoned": {"value": 1},
+        "winPercentage": {"value": 46.7},
+        "kdRatio": {"value": 0.93},
+        "headshotPct": {"value": 40.8},
+        "esr": {"value": 0.54}
+      }
+    }
+  ]
+}

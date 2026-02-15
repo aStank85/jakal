@@ -1,0 +1,174 @@
+{
+  "data": [
+    {
+      "type": "map",
+      "attributes": {"map": "emerald-plains", "side": "defender"},
+      "metadata": {"mapName": "Emerald Plains"},
+      "stats": {
+        "matchesPlayed": {"value": 42},
+        "winPercentage": {"value": 54.1},
+        "kdRatio": {"value": 1.11}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "clubhouse", "side": "defender"},
+      "metadata": {"mapName": "Clubhouse"},
+      "stats": {
+        "matchesPlayed": {"value": 54},
+        "winPercentage": {"value": 50.8},
+        "kdRatio": {"value": 0.98}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "bank", "side": "defender"},
+      "metadata": {"mapName": "Bank"},
+      "stats": {
+        "matchesPlayed": {"value": 38},
+        "winPercentage": {"value": 55.3},
+        "kdRatio": {"value": 1.16}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "border", "side": "defender"},
+      "metadata": {"mapName": "Border"},
+      "stats": {
+        "matchesPlayed": {"value": 31},
+        "winPercentage": {"value": 46.8},
+        "kdRatio": {"value": 0.91}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "chalet", "side": "defender"},
+      "metadata": {"mapName": "Chalet"},
+      "stats": {
+        "matchesPlayed": {"value": 29},
+        "winPercentage": {"value": 57.1},
+        "kdRatio": {"value": 1.18}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "coastline", "side": "defender"},
+      "metadata": {"mapName": "Coastline"},
+      "stats": {
+        "matchesPlayed": {"value": 46},
+        "winPercentage": {"value": 48.9},
+        "kdRatio": {"value": 0.99}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "consulate", "side": "defender"},
+      "metadata": {"mapName": "Consulate"},
+      "stats": {
+        "matchesPlayed": {"value": 35},
+        "winPercentage": {"value": 57.1},
+        "kdRatio": {"value": 1.07}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "kafe-dostoyevsky", "side": "defender"},
+      "metadata": {"mapName": "Kafe Dostoyevsky"},
+      "stats": {
+        "matchesPlayed": {"value": 27},
+        "winPercentage": {"value": 57.7},
+        "kdRatio": {"value": 1.22}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "kanal", "side": "defender"},
+      "metadata": {"mapName": "Kanal"},
+      "stats": {
+        "matchesPlayed": {"value": 22},
+        "winPercentage": {"value": 47.1},
+        "kdRatio": {"value": 0.94}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "oregon", "side": "defender"},
+      "metadata": {"mapName": "Oregon"},
+      "stats": {
+        "matchesPlayed": {"value": 50},
+        "winPercentage": {"value": 56.0},
+        "kdRatio": {"value": 1.13}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "outback", "side": "defender"},
+      "metadata": {"mapName": "Outback"},
+      "stats": {
+        "matchesPlayed": {"value": 19},
+        "winPercentage": {"value": 44.4},
+        "kdRatio": {"value": 0.85}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "skyscraper", "side": "defender"},
+      "metadata": {"mapName": "Skyscraper"},
+      "stats": {
+        "matchesPlayed": {"value": 25},
+        "winPercentage": {"value": 54.2},
+        "kdRatio": {"value": 1.04}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "theme-park", "side": "defender"},
+      "metadata": {"mapName": "Theme Park"},
+      "stats": {
+        "matchesPlayed": {"value": 33},
+        "winPercentage": {"value": 56.3},
+        "kdRatio": {"value": 1.09}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "villa", "side": "defender"},
+      "metadata": {"mapName": "Villa"},
+      "stats": {
+        "matchesPlayed": {"value": 40},
+        "winPercentage": {"value": 55.0},
+        "kdRatio": {"value": 1.06}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "nighthaven-labs", "side": "defender"},
+      "metadata": {"mapName": "Nighthaven Labs"},
+      "stats": {
+        "matchesPlayed": {"value": 18},
+        "winPercentage": {"value": 52.0},
+        "kdRatio": {"value": 1.00}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "lair", "side": "defender"},
+      "metadata": {"mapName": "Lair"},
+      "stats": {
+        "matchesPlayed": {"value": 21},
+        "winPercentage": {"value": 59.1},
+        "kdRatio": {"value": 1.24}
+      }
+    },
+    {
+      "type": "map",
+      "attributes": {"map": "close-quarter", "side": "defender"},
+      "metadata": {"mapName": "Close Quarter"},
+      "stats": {
+        "matchesPlayed": {"value": 15},
+        "winPercentage": {"value": 48.3},
+        "kdRatio": {"value": 0.96}
+      }
+    }
+  ]
+}
