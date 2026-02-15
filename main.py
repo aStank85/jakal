@@ -11,6 +11,7 @@ from src.team_analyzer import TeamAnalyzer
 from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
+from src.api_client import TrackerAPIClient
 from datetime import datetime
 import time
 
@@ -37,6 +38,7 @@ def _save_scraped_profile(
     map_stats: list,
     operator_stats: list,
     match_history: list,
+    match_details: list | None = None,
     season: str = "Y10S4",
 ):
     """Persist scraped profile data and return snapshot/metrics/insights tuple."""
@@ -64,9 +66,12 @@ def _save_scraped_profile(
     db.save_map_stats(player_id, map_stats, snapshot_id=snapshot_id, season=season)
     db.save_operator_stats(player_id, operator_stats, snapshot_id=snapshot_id, season=season)
     db.save_match_history(player_id, match_history)
+    detail_summary = {"matches": 0, "round_rows": 0}
+    if match_details:
+        detail_summary = db.save_full_match_detail_history(player_id, match_details)
     insights = analyzer.generate_insights(snapshot, metrics)
 
-    return snapshot, metrics, insights
+    return snapshot, metrics, insights, detail_summary
 
 
 
@@ -82,6 +87,7 @@ def main():
     team_analyzer = TeamAnalyzer(db)
     matchup_analyzer = MatchupAnalyzer(db)
     scraper = R6Scraper(headless=True, slow_mo=500)
+    api_client = TrackerAPIClient()
 
     try:
         while True:
@@ -108,7 +114,13 @@ def main():
                     _safe_print(f"✅ Operator stats ({operator_count} operators)")
                     _safe_print(f"✅ Match history ({match_count} matches)")
 
-                    snapshot, metrics, insights = _save_scraped_profile(
+                    detail_rows = []
+                    try:
+                        detail_rows = api_client.scrape_full_match_history(username, max_matches=40)
+                    except Exception as exc:
+                        result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
+
+                    snapshot, metrics, insights, detail_summary = _save_scraped_profile(
                         db,
                         calculator,
                         analyzer,
@@ -117,8 +129,12 @@ def main():
                         map_stats=result.get("map_stats", []),
                         operator_stats=result.get("operator_stats", []),
                         match_history=result.get("match_history", []),
+                        match_details=detail_rows,
                     )
 
+                    _safe_print(
+                        f"✅ Match detail ({detail_summary['matches']} matches, {detail_summary['round_rows']} round records)"
+                    )
                     _safe_print("✅ Saved to database")
                     print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
                     if insights:
@@ -209,7 +225,13 @@ def main():
                             if result.get("season_stats") is None:
                                 raise RuntimeError("Season stats missing")
 
-                            _save_scraped_profile(
+                            detail_rows = []
+                            try:
+                                detail_rows = api_client.scrape_full_match_history(username, max_matches=40)
+                            except Exception as exc:
+                                result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
+
+                            _, _, _, detail_summary = _save_scraped_profile(
                                 db,
                                 calculator,
                                 analyzer,
@@ -218,8 +240,11 @@ def main():
                                 map_stats=result.get("map_stats", []),
                                 operator_stats=result.get("operator_stats", []),
                                 match_history=result.get("match_history", []),
+                                match_details=detail_rows,
                             )
-                            _safe_print("✅ OK")
+                            _safe_print(
+                                f"✅ OK (match detail: {detail_summary['matches']} matches, {detail_summary['round_rows']} rounds)"
+                            )
                             success += 1
                         except ScraperBlockedError:
                             _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")

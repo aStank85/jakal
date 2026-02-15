@@ -342,6 +342,94 @@ class Database:
                 )
             """)
 
+            # API match detail players table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS match_detail_players (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id           INTEGER NOT NULL,
+                    match_id            TEXT NOT NULL,
+                    player_id_tracker   TEXT,
+                    username            TEXT,
+                    team_id             INTEGER,
+                    result              TEXT,
+                    kills               INTEGER,
+                    deaths              INTEGER,
+                    assists             INTEGER,
+                    headshots           INTEGER,
+                    first_bloods        INTEGER,
+                    first_deaths        INTEGER,
+                    clutches_won        INTEGER,
+                    clutches_lost       INTEGER,
+                    clutches_1v1        INTEGER,
+                    clutches_1v2        INTEGER,
+                    clutches_1v3        INTEGER,
+                    clutches_1v4        INTEGER,
+                    clutches_1v5        INTEGER,
+                    kills_1k            INTEGER,
+                    kills_2k            INTEGER,
+                    kills_3k            INTEGER,
+                    kills_4k            INTEGER,
+                    kills_5k            INTEGER,
+                    rounds_won          INTEGER,
+                    rounds_lost         INTEGER,
+                    rank_points         INTEGER,
+                    rank_points_delta   INTEGER,
+                    rank_points_previous INTEGER,
+                    kd_ratio            REAL,
+                    hs_pct              REAL,
+                    esr                 REAL,
+                    kills_per_round     REAL,
+                    time_played_ms      INTEGER,
+                    elo                 INTEGER,
+                    elo_delta           INTEGER,
+                    scraped_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
+            # API round outcomes table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS round_outcomes (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id       INTEGER NOT NULL,
+                    match_id        TEXT NOT NULL,
+                    round_id        INTEGER NOT NULL,
+                    end_reason      TEXT,
+                    winner_side     TEXT,
+                    scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
+            # API player-round table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS player_rounds (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id           INTEGER NOT NULL,
+                    match_id            TEXT NOT NULL,
+                    round_id            INTEGER NOT NULL,
+                    player_id_tracker   TEXT,
+                    username            TEXT,
+                    team_id             INTEGER,
+                    side                TEXT,
+                    operator            TEXT,
+                    result              TEXT,
+                    is_disconnected     INTEGER DEFAULT 0,
+                    kills               INTEGER,
+                    deaths              INTEGER,
+                    assists             INTEGER,
+                    headshots           INTEGER,
+                    first_blood         INTEGER,
+                    first_death         INTEGER,
+                    clutch_won          INTEGER,
+                    clutch_lost         INTEGER,
+                    hs_pct              REAL,
+                    esr                 REAL,
+                    scraped_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id)
+                )
+            """)
+
             self.conn.commit()
             self._migrate_schema()
         except sqlite3.Error as e:
@@ -1130,6 +1218,213 @@ class Database:
             else:
                 out['team_b'].append(row)
         return out
+
+    def save_match_detail_players(self, player_id: int, match_id: str, players: List[Dict]) -> None:
+        """Persist parsed API player overviews for one match."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM match_detail_players WHERE player_id = ? AND match_id = ?",
+            (player_id, match_id),
+        )
+
+        for p in players:
+            cursor.execute("""
+                INSERT INTO match_detail_players (
+                    player_id, match_id, player_id_tracker, username, team_id, result,
+                    kills, deaths, assists, headshots, first_bloods, first_deaths,
+                    clutches_won, clutches_lost, clutches_1v1, clutches_1v2, clutches_1v3,
+                    clutches_1v4, clutches_1v5, kills_1k, kills_2k, kills_3k, kills_4k,
+                    kills_5k, rounds_won, rounds_lost, rank_points, rank_points_delta,
+                    rank_points_previous, kd_ratio, hs_pct, esr, kills_per_round,
+                    time_played_ms, elo, elo_delta
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                match_id,
+                p.get("player_id_tracker"),
+                p.get("username"),
+                p.get("team_id"),
+                p.get("result"),
+                p.get("kills"),
+                p.get("deaths"),
+                p.get("assists"),
+                p.get("headshots"),
+                p.get("first_bloods"),
+                p.get("first_deaths"),
+                p.get("clutches_won"),
+                p.get("clutches_lost"),
+                p.get("clutches_1v1"),
+                p.get("clutches_1v2"),
+                p.get("clutches_1v3"),
+                p.get("clutches_1v4"),
+                p.get("clutches_1v5"),
+                p.get("kills_1k"),
+                p.get("kills_2k"),
+                p.get("kills_3k"),
+                p.get("kills_4k"),
+                p.get("kills_5k"),
+                p.get("rounds_won"),
+                p.get("rounds_lost"),
+                p.get("rank_points"),
+                p.get("rank_points_delta"),
+                p.get("rank_points_previous"),
+                p.get("kd_ratio"),
+                p.get("hs_pct"),
+                p.get("esr"),
+                p.get("kills_per_round"),
+                p.get("time_played_ms"),
+                p.get("elo"),
+                p.get("elo_delta"),
+            ))
+        self.conn.commit()
+
+    def get_match_detail_players(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
+        """Fetch API player overviews for one player, optionally filtered by match_id."""
+        cursor = self.conn.cursor()
+        if match_id:
+            cursor.execute(
+                "SELECT * FROM match_detail_players WHERE player_id = ? AND match_id = ? ORDER BY id",
+                (player_id, match_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM match_detail_players WHERE player_id = ? ORDER BY scraped_at DESC, id",
+                (player_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_round_outcomes(self, player_id: int, match_id: str, rounds: List[Dict]) -> None:
+        """Persist parsed API round outcomes for one match."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM round_outcomes WHERE player_id = ? AND match_id = ?",
+            (player_id, match_id),
+        )
+        for r in rounds:
+            cursor.execute("""
+                INSERT INTO round_outcomes (player_id, match_id, round_id, end_reason, winner_side)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                match_id,
+                r.get("round_id"),
+                r.get("end_reason"),
+                r.get("winner_side"),
+            ))
+        self.conn.commit()
+
+    def get_round_outcomes(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
+        """Fetch stored round outcomes."""
+        cursor = self.conn.cursor()
+        if match_id:
+            cursor.execute(
+                "SELECT * FROM round_outcomes WHERE player_id = ? AND match_id = ? ORDER BY round_id",
+                (player_id, match_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM round_outcomes WHERE player_id = ? ORDER BY scraped_at DESC, id",
+                (player_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_player_rounds(
+        self,
+        player_id: int,
+        match_id: str,
+        player_rounds: List[Dict],
+        usernames_by_tracker_id: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Persist parsed API player-round rows for one match."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM player_rounds WHERE player_id = ? AND match_id = ?",
+            (player_id, match_id),
+        )
+        usernames_by_tracker_id = usernames_by_tracker_id or {}
+
+        for pr in player_rounds:
+            tracker_id = pr.get("player_id_tracker")
+            cursor.execute("""
+                INSERT INTO player_rounds (
+                    player_id, match_id, round_id, player_id_tracker, username, team_id, side,
+                    operator, result, is_disconnected, kills, deaths, assists, headshots,
+                    first_blood, first_death, clutch_won, clutch_lost, hs_pct, esr
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                match_id,
+                pr.get("round_id"),
+                tracker_id,
+                usernames_by_tracker_id.get(tracker_id),
+                pr.get("team_id"),
+                pr.get("side"),
+                pr.get("operator"),
+                pr.get("result"),
+                pr.get("is_disconnected", 0),
+                pr.get("kills"),
+                pr.get("deaths"),
+                pr.get("assists"),
+                pr.get("headshots"),
+                pr.get("first_blood"),
+                pr.get("first_death"),
+                pr.get("clutch_won"),
+                pr.get("clutch_lost"),
+                pr.get("hs_pct"),
+                pr.get("esr"),
+            ))
+        self.conn.commit()
+
+    def get_player_rounds(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
+        """Fetch stored player-round rows."""
+        cursor = self.conn.cursor()
+        if match_id:
+            cursor.execute(
+                "SELECT * FROM player_rounds WHERE player_id = ? AND match_id = ? ORDER BY round_id, id",
+                (player_id, match_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM player_rounds WHERE player_id = ? ORDER BY scraped_at DESC, id",
+                (player_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def save_full_match_detail_history(self, player_id: int, details: List[Dict]) -> Dict[str, int]:
+        """Persist a batch of API match detail payloads for one player."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM match_detail_players WHERE player_id = ?", (player_id,))
+        cursor.execute("DELETE FROM round_outcomes WHERE player_id = ?", (player_id,))
+        cursor.execute("DELETE FROM player_rounds WHERE player_id = ?", (player_id,))
+        self.conn.commit()
+
+        saved_matches = 0
+        saved_round_rows = 0
+        for detail in details:
+            match_id = detail.get("match_id")
+            if not match_id:
+                continue
+            players = detail.get("players", [])
+            rounds = detail.get("round_outcomes", [])
+            player_rounds = detail.get("player_rounds", [])
+            usernames_by_tracker_id = {
+                p.get("player_id_tracker"): p.get("username")
+                for p in players
+                if p.get("player_id_tracker")
+            }
+
+            self.save_match_detail_players(player_id, match_id, players)
+            self.save_round_outcomes(player_id, match_id, rounds)
+            self.save_player_rounds(
+                player_id,
+                match_id,
+                player_rounds,
+                usernames_by_tracker_id=usernames_by_tracker_id,
+            )
+            saved_matches += 1
+            saved_round_rows += len(player_rounds)
+
+        return {"matches": saved_matches, "round_rows": saved_round_rows}
 
     def player_has_map_stats(self, player_id: int) -> bool:
         """Return True if player has any stored map stats."""
