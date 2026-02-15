@@ -129,7 +129,9 @@ class TerminalUI:
             print(f"{stat['name']:<25} ", end='')
 
             for value in stat['values']:
-                if isinstance(value, float):
+                if value is None:
+                    print(f"{'-':<12}", end='')
+                elif isinstance(value, float):
                     print(f"{value:<12.2f}", end='')
                 else:
                     print(f"{value:<12}", end='')

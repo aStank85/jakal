@@ -1,6 +1,8 @@
 # src/database.py
 
 import sqlite3
+import os
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import json
@@ -9,13 +11,31 @@ class Database:
     """Handle all database operations."""
     
     def __init__(self, db_path: str = 'data/jakal.db'):
-        self.db_path = db_path
+        self.db_path = self._resolve_db_path(db_path)
         self.conn = None
         self.init_database()
+
+    @staticmethod
+    def _resolve_db_path(db_path: str) -> str:
+        """Return an absolute database path anchored to project root when relative."""
+        path = Path(db_path)
+        if path.is_absolute():
+            return str(path)
+
+        project_root = Path(__file__).resolve().parents[2]
+        return str(project_root / path)
     
     def init_database(self):
         """Create tables if they don't exist."""
         try:
+            # Ensure parent directory exists for the database file
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                try:
+                    os.makedirs(db_dir, exist_ok=True)
+                except OSError as e:
+                    raise RuntimeError(f"Failed to create database directory '{db_dir}': {e}")
+
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row  # Access columns by name
             self.conn.execute("PRAGMA foreign_keys = ON")
@@ -233,7 +253,7 @@ class Database:
             self.conn.commit()
             self._migrate_schema()
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to initialize database: {e}")
+            raise RuntimeError(f"Failed to initialize database at '{self.db_path}': {e}")
 
     def _migrate_schema(self) -> None:
         """

@@ -1,41 +1,37 @@
 # Changelog
 
-## v0.3.5.0 - Stack Analysis
+## v0.4.0 - Stack Analysis (In Progress)
+
+### Scope
+- Named, quick, and tagged stack workflows.
+- Team composition scoring and role distribution checks.
+- Carry dependency and clutch hierarchy detection.
+
+### Planned Follow-ups in Stage 0
+- `v0.4.1` 5v5 Matchup Analysis
+- `v0.4.2` Map Data Integration (V2 plugin line)
+- `v0.5.0` Trajectory Analysis
+- `v0.5.1` Short Term Plateau Detector
+- `v0.5.2` Player Evolution Plugins
+- `v1.0.0` Stage 0 complete
+
+## v0.3.0 - Insight Generation (Complete)
 
 ### Added
-- Stack Management - Create, manage, and organize player stacks (named, quick, tagged)
-- Team Analysis - Full 5-stack analysis with role distribution, composition scoring, carry dependency, clutch hierarchy, entry stats, and team insights
-- 5v5 Matchup Analysis - Head-to-head stack comparison with category breakdowns, role matchups, outcome prediction, strategic recommendations, and key battlegrounds
-- Player Details - View individual player stats and role classification (menu option 4)
-- New database tables: stacks, stack_members, stack_analyses, matchup_analyses
-- stack_manager.py - Stack CRUD and three stack modes (named, quick, tagged)
-- team_analyzer.py - Team-level analysis engine with insight generation
-- matchup_analyzer.py - 5v5 comparison engine with prediction and strategy
-- add_computed_metrics() method in database.py
-- Comprehensive test suite with 20+ tests per module
-- Integration tests covering full stack creation, analysis, and matchup flows
-- Updated main menu (8 options) with Stack Management submenu
+- Rule-based insight engine.
+- Thresholds module.
+- Data quality guards.
+- Analyzer + UI integration.
 
-### Changed
-- Menu expanded from 5 to 8 options with stack section
-- Exit now cleans up temporary (quick) stacks
-- UI updated with team analysis display, matchup display, role matchup tables
-
-## v0.3.0 - Insight Generation
+## v0.2.0 - Database Integration (Complete)
 
 ### Added
-- Player metrics calculator with 6-role classification system
-- Player comparison across 10 stat categories
-- Role identification: Fragger, Entry, Support, Anchor, Clutch, Carry
+- SQLite database integration.
+- Player and snapshot persistence.
+- Computed metrics storage.
 
-## v0.2.0 - Database
-
-### Added
-- SQLite database for player and snapshot storage
-- Stats snapshot persistence
-
-## v0.1.0 - Parser
+## v0.1.1 - Parser MVP (Complete)
 
 ### Added
-- R6 Tracker stats parser
-- Basic terminal UI
+- Copy/paste parser for R6 Tracker stats.
+- Validation and formatted output.

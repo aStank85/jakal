@@ -1,42 +1,31 @@
-# Jakal - Rainbow Six Siege Stats Analyzer
+# Jakal - Rainbow Six Siege Analytics Engine
 
-Jakal is a terminal-based stats analyzer for Rainbow Six Siege that parses R6 Tracker season drawer data, stores historical snapshots, computes derived metrics, and compares players over time.
+Jakal is a terminal-based analytics platform for Rainbow Six Siege. It started as a copy/paste parser and is now in Stage 0 expansion with stack analysis in progress.
 
 ## Current Status
 
-- Current release: `v0.5` (Playwright-based web scraping for automated stats fetching)
-- Previous release: `v0.3.4` (high-pressure sample guards, clean-play normalization constant, data-quality surfacing, and consistency updates)
-- Test status: full suite passing
+- Current version: `v0.4.0` (in progress)
+- Completed milestones:
+  - `v0.1.1` Parser MVP
+  - `v0.2.0` Database Integration
+  - `v0.3.0` Insight Generation
+- Stage target: `v1.0.0` Stage 0 complete (full copy/paste analytics platform)
 
-## Core Features
+## Core Features Available Now
 
-- Copy-paste import from R6 Tracker season drawer
+- Copy/paste import from R6 Tracker season drawer
 - SQLite persistence for players, snapshots, and computed metrics
-- Derived metrics (entry/clutch/teamplay/impact/win-efficiency)
-- Role classification (primary + secondary confidence)
-- Multi-player side-by-side comparison with tie-safe winner handling and live metric recalculation for consistency
-- Automated rule-based insight generation with evidence and recommended actions
-- Device classification per player (`pc`, `xbox`, `playstation`) for future scraper targeting
-- Automatic snapshot timestamp capture (`YYYY-MM-DD` + `HH:MM:SS`)
-- Automatic additive schema migration for older local databases
+- Derived metrics for combat, clutch, entry, teamplay, and impact
+- Rule-based insight generation with thresholds and quality guards
+- Stack management (named, quick, tagged)
+- Team composition analysis
+- 5v5 stack matchup analysis
 
 ## Requirements
 
 - Python 3.9+
 - No runtime dependencies outside Python standard library
 - Optional for tests: `pytest`
-- **Optional for web scraping (v0.5+):** `playwright`
-
-### Web Scraping Setup (Optional)
-
-To enable automated stats fetching from R6 Tracker:
-
-```bash
-pip install playwright
-python -m playwright install
-```
-
-See [docs/v0.5-notes.md](docs/v0.5-notes.md) for complete setup and usage guide.
 
 ## Run
 
@@ -48,100 +37,76 @@ python main.py
 
 ### Add New Stats Snapshot (Manual Paste)
 
-1. Open [R6 Tracker](https://r6.tracker.network/) and copy the season drawer stats.
+1. Open [R6 Tracker](https://r6.tracker.network/) and copy season drawer stats.
 2. In Jakal, choose `1`.
 3. Paste stats and type `END`.
-4. Enter:
+4. Enter metadata:
    - Username
-   - Device tag (`pc`, `xbox`, or `playstation`)
-   - Season (default `Y10S4`)
-5. Date/time are auto-recorded by the app.
+   - Device tag (`pc`, `xbox`, `playstation`)
+   - Season (default shown by app)
+5. Snapshot date/time are auto-recorded.
 
-### Add New Stats Snapshot (Web Scraping - v0.5+)
+### View and Analyze
 
-Automatically fetch stats from R6 Tracker:
-
-```bash
-python scripts/scrape_drawer.py --username SaucedZyn
-```
-
-See [docs/v0.5-notes.md](docs/v0.5-notes.md) for all options and troubleshooting.
-
-### View / Compare
-
-- Option `2`: list all players (includes device + tag)
-- Option `3`: compare selected players
-- Option `4`: detailed snapshot + metric breakdown + generated insights for latest snapshot
+- Option `2`: list all players
+- Option `3`: compare players
+- Option `4`: view detailed player snapshot + metrics + insights
+- Option `5`: stack management
+- Option `6`: stack analysis
+- Option `7`: 5v5 stack matchup analysis
 
 ## Project Structure
 
 ```text
-jakal-mvp/
+jakal/
 ├── src/
 │   ├── parser.py
 │   ├── database.py
 │   ├── calculator.py
 │   ├── comparator.py
-│   ├── ui.py
 │   ├── analyzer.py
-│   └── scraper/          # v0.5+
-│       ├── drawer.py
-│       ├── session.py
-│       └── validation.py
-├── scripts/               # v0.5+
-│   └── scrape_drawer.py
+│   ├── stack_manager.py
+│   ├── team_analyzer.py
+│   ├── matchup_analyzer.py
+│   └── ui.py
 ├── tests/
-│   ├── test_parser.py
-│   ├── test_calculator.py
-│   ├── test_database.py
-│   ├── test_integration.py
-│   ├── test_analyzer.py
-│   └── test_scraper.py   # v0.5+
 ├── docs/
-│   ├── v0.1-notes.md
-│   ├── v0.2-notes.md
-│   ├── v0.3-notes.md
-│   └── v0.5-notes.md     # v0.5+
 ├── data/
-│   └── jakal.db
 ├── main.py
 └── CHANGELOG.md
 ```
 
-## Database Overview
-
-### `players`
-
-- `player_id`, `username`
-- `device_tag` (`pc`/`xbox`/`playstation`)
-- `tag`, `notes`, `created_at`
-
-### `stats_snapshots`
-
-- Snapshot metadata (`snapshot_date`, `snapshot_time`, `season`)
-- Raw parsed stat fields
-- `clutches_data` JSON payload
-
-### `computed_metrics`
-
-- Derived metrics for each snapshot
-- Role outputs (`primary_role`, `secondary_role`, confidence scores)
-
-## Testing
-
-```bash
-pytest -q -p no:cacheprovider
-```
-
-## Formula Reference
-
-- Full variable and formula index: `docs/metrics-reference.md`
-
 ## Roadmap Snapshot
 
-- `v0.5`: ✅ Playwright-based web scraping (complete)
-- `v0.6+`: export/reporting features, saved insight reports, advanced scraping features
+### Stage 0 - Foundation
 
-## License
+- `v0.1.1` Parser MVP (complete)
+- `v0.2.0` Database Integration (complete)
+- `v0.3.0` Insight Generation (complete)
+- `v0.4.0` Stack Analysis (in progress)
+- `v0.4.1` 5v5 Matchup Analysis
+- `v0.4.2` Map Data Integration (V2 plugins)
+- `v0.5.0` Trajectory Analysis
+- `v0.5.1` Short Term Plateau Detector
+- `v0.5.2` Player Evolution Plugins
+- `v1.0.0` Stage 0 complete
 
-This project is for personal use. Rainbow Six Siege and R6 Tracker are properties of their respective owners.
+### Stage 1 - Automation
+
+- `v1.1.0` Web Scraper
+- `v1.2.0` Match Overview Integration (V3 plugins)
+- `v1.3.0` Auto-Update System
+- `v1.4.0` Profile Routing
+- `v2.0.0` Stage 1 complete
+
+### Stage 2+
+
+- `v2.x` Individual match depth (V4 plugins)
+- `v3.x` Round-level analysis (V5 plugins + replay)
+- `v4.x` AI engine and first ML models
+- `v5.x` Platformization (desktop/web/API)
+- `v6.0.0` Full platform stage complete
+
+## One-Sentence Direction
+
+JAKAL starts as a copy/paste stats parser, evolves into an automated analytics platform, and then becomes an AI-powered coaching engine for R6 players.
