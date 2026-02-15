@@ -130,6 +130,7 @@ def main():
                             username,
                             max_matches=DEFAULT_MATCH_HISTORY_CAP,
                             since_date=CURRENT_SEASON_START,
+                            show_progress=True,
                         )
                     except Exception as exc:
                         result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")
@@ -246,6 +247,7 @@ def main():
                                     username,
                                     max_matches=DEFAULT_MATCH_HISTORY_CAP,
                                     since_date=CURRENT_SEASON_START,
+                                    show_progress=True,
                                 )
                             except Exception as exc:
                                 result.setdefault("errors", []).append(f"Match detail sync failed: {exc}")

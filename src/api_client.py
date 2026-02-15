@@ -34,6 +34,14 @@ class TrackerAPIClient:
         self.timeout_seconds = timeout_seconds
         self.sleep_seconds = sleep_seconds
 
+    @staticmethod
+    def _progress_print(message: str, end: str = "\n") -> None:
+        try:
+            print(message, end=end, flush=True)
+        except UnicodeEncodeError:
+            fallback = message.replace("📄", "[PAGE]").replace("⚔️", "[MATCH]")
+            print(fallback, end=end, flush=True)
+
     def _get_json(self, url: str, retry_429: bool = True) -> Dict[str, Any]:
         req = Request(url, headers=self.HEADERS, method="GET")
         try:
@@ -259,6 +267,7 @@ class TrackerAPIClient:
         username: str,
         max_pages: Optional[int] = None,
         since_date: Optional[Any] = None,
+        show_progress: bool = False,
     ) -> List[Dict[str, Any]]:
         matches: List[Dict[str, Any]] = []
         next_token: Optional[int] = None
@@ -284,6 +293,8 @@ class TrackerAPIClient:
             matches.extend(page_matches)
             next_token = page.get("next")
             pages_fetched += 1
+            if show_progress:
+                self._progress_print(f"  📄 Page {pages_fetched} ({len(matches)} matches)")
 
             if stop_for_cutoff:
                 break
@@ -298,18 +309,35 @@ class TrackerAPIClient:
         username: str,
         max_matches: Optional[int] = None,
         since_date: Optional[Any] = None,
+        show_progress: bool = False,
     ) -> List[Dict[str, Any]]:
         pages = None
         if max_matches is not None:
             pages = max(1, (max_matches + 19) // 20)
-        all_matches = self.get_all_matches(username, max_pages=pages, since_date=since_date)
+        all_matches = self.get_all_matches(
+            username,
+            max_pages=pages,
+            since_date=since_date,
+            show_progress=show_progress,
+        )
         selected = all_matches[:max_matches] if max_matches is not None else all_matches
+        total = len(selected)
+
+        if show_progress:
+            self._progress_print(f"✅ Match history ({total} matches found)")
 
         out: List[Dict[str, Any]] = []
-        for match in selected:
+        for i, match in enumerate(selected, 1):
             match_id = match.get("match_id")
             if not match_id:
                 continue
+
+            map_name = match.get("map") or "Unknown Map"
+            if show_progress:
+                self._progress_print(
+                    f"\r  ⚔️  Match {i}/{total}  {map_name:<20}",
+                    end="",
+                )
 
             try:
                 detail = self.get_match_detail(match_id)
@@ -332,5 +360,8 @@ class TrackerAPIClient:
             detail["match_meta"] = match
             out.append(detail)
             time.sleep(self.sleep_seconds)
+
+        if show_progress and total > 0:
+            self._progress_print("")
 
         return out
