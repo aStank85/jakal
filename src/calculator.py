@@ -248,6 +248,8 @@ class MetricsCalculator:
         
         secondary = sorted_roles[1][0] if len(sorted_roles) > 1 else None
         secondary_conf = sorted_roles[1][1] if len(sorted_roles) > 1 else 0
+        primary_conf = min(primary_conf, 100.0)
+        secondary_conf = min(secondary_conf, 100.0)
         
         return {
             'primary': primary,
