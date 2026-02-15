@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -37,11 +38,17 @@ class TrackerAPIClient:
         self,
         timeout_seconds: int = 20,
         sleep_seconds: float = 0.5,
-        detail_sleep_seconds: float = 1.0,
+        detail_sleep_min_seconds: float = 2.5,
+        detail_sleep_max_seconds: float = 4.0,
+        detail_batch_size: int = 10,
+        detail_batch_pause_seconds: float = 15.0,
     ):
         self.timeout_seconds = timeout_seconds
         self.sleep_seconds = sleep_seconds
-        self.detail_sleep_seconds = detail_sleep_seconds
+        self.detail_sleep_min_seconds = detail_sleep_min_seconds
+        self.detail_sleep_max_seconds = detail_sleep_max_seconds
+        self.detail_batch_size = detail_batch_size
+        self.detail_batch_pause_seconds = detail_batch_pause_seconds
 
     @staticmethod
     def _progress_print(message: str, end: str = "\n") -> None:
@@ -318,6 +325,7 @@ class TrackerAPIClient:
         username: str,
         max_matches: Optional[int] = None,
         since_date: Optional[Any] = None,
+        skip_match_ids: Optional[set[str]] = None,
         show_progress: bool = False,
     ) -> List[Dict[str, Any]]:
         pages = None
@@ -331,14 +339,18 @@ class TrackerAPIClient:
         )
         selected = all_matches[:max_matches] if max_matches is not None else all_matches
         total = len(selected)
+        skip_match_ids = skip_match_ids or set()
 
         if show_progress:
             self._progress_print(f"✅ Match history ({total} matches found)")
 
         out: List[Dict[str, Any]] = []
+        detail_calls = 0
         for i, match in enumerate(selected, 1):
             match_id = match.get("match_id")
             if not match_id:
+                continue
+            if match_id in skip_match_ids:
                 continue
 
             map_name = match.get("map") or "Unknown Map"
@@ -349,6 +361,7 @@ class TrackerAPIClient:
                 )
 
             try:
+                detail_calls += 1
                 detail = self.get_match_detail(match_id)
             except HTTPError as exc:
                 if exc.code == 404:
@@ -368,7 +381,9 @@ class TrackerAPIClient:
 
             detail["match_meta"] = match
             out.append(detail)
-            time.sleep(self.detail_sleep_seconds)
+            time.sleep(random.uniform(self.detail_sleep_min_seconds, self.detail_sleep_max_seconds))
+            if detail_calls % self.detail_batch_size == 0:
+                time.sleep(self.detail_batch_pause_seconds)
 
         if show_progress and total > 0:
             self._progress_print("")

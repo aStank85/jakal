@@ -185,6 +185,50 @@ def test_rate_limit_retry(monkeypatch):
     assert calls["count"] == 2
 
 
+def test_skip_existing_match_ids(monkeypatch):
+    client = TrackerAPIClient(sleep_seconds=0)
+    monkeypatch.setattr(
+        client,
+        "get_all_matches",
+        lambda username, max_pages=None, since_date=None, show_progress=False: [
+            {"match_id": "m1", "map": "Oregon", "timestamp": "2026-02-01T00:00:00+00:00"},
+            {"match_id": "m2", "map": "Bank", "timestamp": "2026-02-02T00:00:00+00:00"},
+        ],
+    )
+    called_ids = []
+    monkeypatch.setattr(client, "get_match_detail", lambda match_id: called_ids.append(match_id) or {"match_id": match_id, "players": [], "round_outcomes": [], "player_rounds": []})
+    monkeypatch.setattr("src.api_client.time.sleep", lambda *_: None)
+    monkeypatch.setattr("src.api_client.random.uniform", lambda a, b: 0.0)
+
+    rows = client.scrape_full_match_history("SaucedZyn", skip_match_ids={"m1"})
+    assert [r["match_id"] for r in rows] == ["m2"]
+    assert called_ids == ["m2"]
+
+
+def test_batch_pause_every_10_details(monkeypatch):
+    client = TrackerAPIClient(sleep_seconds=0, detail_batch_size=10, detail_batch_pause_seconds=15.0)
+    monkeypatch.setattr(
+        client,
+        "get_all_matches",
+        lambda username, max_pages=None, since_date=None, show_progress=False: [
+            {"match_id": f"m{i}", "map": "Oregon", "timestamp": "2026-02-01T00:00:00+00:00"}
+            for i in range(1, 12)
+        ],
+    )
+    monkeypatch.setattr(
+        client,
+        "get_match_detail",
+        lambda match_id: {"match_id": match_id, "players": [], "round_outcomes": [], "player_rounds": []},
+    )
+    sleep_calls = []
+    monkeypatch.setattr("src.api_client.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr("src.api_client.random.uniform", lambda a, b: 3.0)
+
+    rows = client.scrape_full_match_history("SaucedZyn")
+    assert len(rows) == 11
+    assert 15.0 in sleep_calls
+
+
 def test_save_match_detail_players(client, temp_db):
     temp_db.add_player("SaucedZyn")
     player_id = temp_db.get_player("SaucedZyn")["player_id"]

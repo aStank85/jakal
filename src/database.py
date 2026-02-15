@@ -49,6 +49,7 @@ class Database:
                     username TEXT UNIQUE NOT NULL,
                     device_tag TEXT DEFAULT 'pc',
                     tag TEXT DEFAULT 'untagged',
+                    last_match_synced_at TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     notes TEXT
                 )
@@ -462,6 +463,7 @@ class Database:
     def _migrate_players_table(self) -> None:
         self._add_column_if_missing("players", "device_tag TEXT DEFAULT 'pc'", "device_tag")
         self._add_column_if_missing("players", "tag TEXT DEFAULT 'untagged'", "tag")
+        self._add_column_if_missing("players", "last_match_synced_at TEXT", "last_match_synced_at")
         self._add_column_if_missing("players", "notes TEXT", "notes")
 
         cursor = self.conn.cursor()
@@ -727,6 +729,26 @@ class Database:
             return dict(row) if row else None
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to get player '{username}': {e}")
+
+    def get_player_last_match_synced_at(self, username: str) -> Optional[str]:
+        """Get incremental sync watermark timestamp for a player."""
+        player = self.get_player(username)
+        if not player:
+            return None
+        return player.get("last_match_synced_at")
+
+    def update_player_last_match_synced_at(self, username: str, ts: str) -> None:
+        """Update incremental sync watermark timestamp for a player."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE players SET last_match_synced_at = ? WHERE username = ?",
+                (ts, username),
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to update last_match_synced_at for '{username}': {e}")
 
     def get_player_id(self, username: str) -> Optional[int]:
         """Get player_id for username, or None if not found."""
@@ -1293,6 +1315,15 @@ class Database:
             )
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_existing_match_detail_ids(self, player_id: int) -> set[str]:
+        """Return match IDs already stored in match_detail_players for a player."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT match_id FROM match_detail_players WHERE player_id = ?",
+            (player_id,),
+        )
+        return {row["match_id"] for row in cursor.fetchall() if row["match_id"]}
+
     def save_round_outcomes(self, player_id: int, match_id: str, rounds: List[Dict]) -> None:
         """Persist parsed API round outcomes for one match."""
         cursor = self.conn.cursor()
@@ -1392,12 +1423,6 @@ class Database:
 
     def save_full_match_detail_history(self, player_id: int, details: List[Dict]) -> Dict[str, int]:
         """Persist a batch of API match detail payloads for one player."""
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM match_detail_players WHERE player_id = ?", (player_id,))
-        cursor.execute("DELETE FROM round_outcomes WHERE player_id = ?", (player_id,))
-        cursor.execute("DELETE FROM player_rounds WHERE player_id = ?", (player_id,))
-        self.conn.commit()
-
         saved_matches = 0
         saved_round_rows = 0
         for detail in details:

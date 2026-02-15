@@ -83,14 +83,7 @@ class R6Scraper:
             except Exception as exc:
                 errors.append(f"Operator stats failed: {exc}")
 
-            try:
-                self._click_nav_link(self.page, "Matches")
-                self.page.wait_for_timeout(3000)
-                self._dismiss_modals(self.page)
-                self._load_match_history_rows(self.page, target_rows=40)
-                match_history = self._parse_match_history_html(self.page.content())
-            except Exception as exc:
-                errors.append(f"Match history failed: {exc}")
+            # Match history is now sourced from Tracker API in sync flow.
 
             return {
                 "username": username,
@@ -149,7 +142,7 @@ class R6Scraper:
             self._close_browser()
 
     def scrape_match_history(self, username: str) -> List[Dict]:
-        """Scrape match history rows from /matches."""
+        """Deprecated: match history should be fetched via Tracker API client."""
         self._launch_browser()
         try:
             overview_url = self.BASE_URL.format(username=username, section="overview")

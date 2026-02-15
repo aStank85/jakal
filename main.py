@@ -12,11 +12,11 @@ from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 from src.scraper import R6Scraper, ScraperBlockedError, PlayerNotFoundError
 from src.api_client import TrackerAPIClient
-from datetime import datetime, timezone
+from datetime import datetime
 import time
 
-CURRENT_SEASON_START = datetime(2025, 11, 1, tzinfo=timezone.utc)
 DEFAULT_MATCH_HISTORY_CAP = None
+INITIAL_MATCH_SYNC_CAP = 20
 
 
 def _safe_print(message: str) -> None:
@@ -38,6 +38,23 @@ def _match_scope_label(max_matches: int | None) -> str:
     return f"last {max_matches} matches"
 
 
+def _latest_detail_timestamp(detail_rows: list[dict]) -> str | None:
+    latest = None
+    for row in detail_rows:
+        ts = ((row.get("match_meta") or {}).get("timestamp"))
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if latest is None or dt > latest:
+            latest = dt
+    if latest is None:
+        return None
+    return latest.isoformat()
+
+
 def _save_scraped_profile(
     db: Database,
     calculator: MetricsCalculator,
@@ -46,7 +63,6 @@ def _save_scraped_profile(
     season_stats: dict,
     map_stats: list,
     operator_stats: list,
-    match_history: list,
     match_details: list | None = None,
     season: str = "Y10S4",
 ):
@@ -74,7 +90,6 @@ def _save_scraped_profile(
     db.add_computed_metrics(snapshot_id, player_id, metrics)
     db.save_map_stats(player_id, map_stats, snapshot_id=snapshot_id, season=season)
     db.save_operator_stats(player_id, operator_stats, snapshot_id=snapshot_id, season=season)
-    db.save_match_history(player_id, match_history)
     detail_summary = {"matches": 0, "round_rows": 0}
     if match_details:
         detail_summary = db.save_full_match_detail_history(player_id, match_details)
@@ -110,7 +125,13 @@ def main():
                         ui.show_error("Username is required")
                         continue
 
-                    scope_label = _match_scope_label(DEFAULT_MATCH_HISTORY_CAP)
+                    existing_player = db.get_player(username)
+                    existing_player_id = existing_player["player_id"] if existing_player else db.add_player(username)
+                    last_synced_at = db.get_player_last_match_synced_at(username)
+                    is_initial_sync = last_synced_at is None
+                    match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
+                    since_date = None if is_initial_sync else last_synced_at
+                    scope_label = "last 20 matches (initial)" if is_initial_sync else "incremental"
                     print(f"Syncing {username} ({scope_label})...")
                     result = scraper.scrape_full_profile(username)
                     if result.get("season_stats") is None:
@@ -119,17 +140,17 @@ def main():
                     _safe_print("✅ Season stats")
                     map_count = len(result.get("map_stats", []))
                     operator_count = len(result.get("operator_stats", []))
-                    match_count = len(result.get("match_history", []))
                     _safe_print(f"✅ Map stats ({map_count} maps)")
                     _safe_print(f"✅ Operator stats ({operator_count} operators)")
-                    _safe_print(f"✅ Match page scraped ({match_count} rows)")
 
                     detail_rows = []
                     try:
+                        existing_ids = db.get_existing_match_detail_ids(existing_player_id)
                         detail_rows = api_client.scrape_full_match_history(
                             username,
-                            max_matches=DEFAULT_MATCH_HISTORY_CAP,
-                            since_date=CURRENT_SEASON_START,
+                            max_matches=match_cap,
+                            since_date=since_date,
+                            skip_match_ids=existing_ids,
                             show_progress=True,
                         )
                     except Exception as exc:
@@ -143,13 +164,15 @@ def main():
                         season_stats=result["season_stats"],
                         map_stats=result.get("map_stats", []),
                         operator_stats=result.get("operator_stats", []),
-                        match_history=result.get("match_history", []),
                         match_details=detail_rows,
                     )
 
                     _safe_print(
                         f"✅ Match detail ({detail_summary['matches']} matches, {detail_summary['round_rows']} round records)"
                     )
+                    latest_synced_at = _latest_detail_timestamp(detail_rows)
+                    if latest_synced_at:
+                        db.update_player_last_match_synced_at(username, latest_synced_at)
                     _safe_print("✅ Saved to database")
                     print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
                     if insights:
@@ -234,7 +257,11 @@ def main():
 
                     for idx, player in enumerate(players, 1):
                         username = player.get("username")
-                        scope_label = _match_scope_label(DEFAULT_MATCH_HISTORY_CAP)
+                        last_synced_at = db.get_player_last_match_synced_at(username)
+                        is_initial_sync = last_synced_at is None
+                        match_cap = INITIAL_MATCH_SYNC_CAP if is_initial_sync else DEFAULT_MATCH_HISTORY_CAP
+                        since_date = None if is_initial_sync else last_synced_at
+                        scope_label = "last 20 matches (initial)" if is_initial_sync else "incremental"
                         print(f"Syncing {idx}/{total}: {username} ({scope_label})...")
                         try:
                             result = scraper.scrape_full_profile(username)
@@ -243,10 +270,12 @@ def main():
 
                             detail_rows = []
                             try:
+                                existing_ids = db.get_existing_match_detail_ids(player["player_id"])
                                 detail_rows = api_client.scrape_full_match_history(
                                     username,
-                                    max_matches=DEFAULT_MATCH_HISTORY_CAP,
-                                    since_date=CURRENT_SEASON_START,
+                                    max_matches=match_cap,
+                                    since_date=since_date,
+                                    skip_match_ids=existing_ids,
                                     show_progress=True,
                                 )
                             except Exception as exc:
@@ -260,12 +289,14 @@ def main():
                                 season_stats=result["season_stats"],
                                 map_stats=result.get("map_stats", []),
                                 operator_stats=result.get("operator_stats", []),
-                                match_history=result.get("match_history", []),
                                 match_details=detail_rows,
                             )
                             _safe_print(
                                 f"✅ OK (match detail: {detail_summary['matches']} matches, {detail_summary['round_rows']} rounds)"
                             )
+                            latest_synced_at = _latest_detail_timestamp(detail_rows)
+                            if latest_synced_at:
+                                db.update_player_last_match_synced_at(username, latest_synced_at)
                             success += 1
                         except ScraperBlockedError:
                             _safe_print("⚠️  Cloudflare blocked request. Try again in 30 seconds.")
