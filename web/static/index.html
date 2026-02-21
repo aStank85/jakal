@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>JAKAL - R6 Network Scanner</title>
+    <script src="/static/vis-network.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>JAKAL - R6 Network Scanner</h1>
+            <p>Visualize player connections in real time</p>
+        </header>
+        <div class="tabs">
+            <button class="tab-btn active" id="tab-scanner" data-tab="scanner">Network Scanner</button>
+            <button class="tab-btn" id="tab-matches" data-tab="matches">Match Scraper</button>
+        </div>
+
+        <section id="panel-scanner" class="tab-panel active">
+            <div class="controls">
+                <input type="text" id="username" placeholder="Enter R6 username" value="SaucedZyn">
+                <select id="depth">
+                    <option value="1">1 Level Deep</option>
+                    <option value="2" selected>2 Levels Deep</option>
+                    <option value="3">3 Levels Deep</option>
+                </select>
+                <label>
+                    <input type="checkbox" id="debug-browser">
+                    Show Browser (Debug)
+                </label>
+                <button id="start-scan">Start Scan</button>
+                <button id="stop-scan" disabled>Stop Scan</button>
+            </div>
+
+            <div class="stats">
+                <div class="stat">
+                    <label>Scanning:</label>
+                    <span id="current-scan">-</span>
+                </div>
+                <div class="stat">
+                    <label>Nodes:</label>
+                    <span id="node-count">0</span>
+                </div>
+                <div class="stat">
+                    <label>Connections:</label>
+                    <span id="edge-count">0</span>
+                </div>
+                <div class="stat">
+                    <label>Status:</label>
+                    <span id="scan-status">Idle</span>
+                </div>
+            </div>
+
+            <div id="network"></div>
+            <div class="log" id="log"></div>
+        </section>
+
+        <section id="panel-matches" class="tab-panel">
+            <div class="controls">
+                <input type="text" id="matches-username" placeholder="Enter R6 username" value="SaucedZyn">
+                <select id="max-matches">
+                    <option value="3">Last 3 Matches</option>
+                    <option value="5" selected>Last 5 Matches</option>
+                    <option value="10">Last 10 Matches</option>
+                </select>
+                <label>
+                    <input type="checkbox" id="matches-debug-browser">
+                    Show Browser (Debug)
+                </label>
+                <button id="start-match-scrape">Scrape Matches</button>
+                <button id="stop-match-scrape" disabled>Stop Scrape</button>
+            </div>
+
+            <div class="stats">
+                <div class="stat">
+                    <label>Scraping:</label>
+                    <span id="current-match">-</span>
+                </div>
+                <div class="stat">
+                    <label>Matches:</label>
+                    <span id="match-count">0</span>
+                </div>
+                <div class="stat">
+                    <label>Status:</label>
+                    <span id="match-status">Idle</span>
+                </div>
+            </div>
+
+            <div class="log" id="match-log"></div>
+            <div class="log" id="match-results"></div>
+        </section>
+    </div>
+
+    <script src="/static/network.js"></script>
+</body>
+</html>

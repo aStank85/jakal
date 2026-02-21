@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -94,6 +94,8 @@ class TrackerAPIClient:
         detail_sleep_max_seconds: float = 4.0,
         detail_batch_size: int = 10,
         detail_batch_pause_seconds: float = 15.0,
+        min_request_interval_seconds: float = 1.0,
+        max_429_wait_seconds: float = 120.0,
     ):
         self.timeout_seconds = timeout_seconds
         self.sleep_seconds = sleep_seconds
@@ -101,6 +103,9 @@ class TrackerAPIClient:
         self.detail_sleep_max_seconds = detail_sleep_max_seconds
         self.detail_batch_size = detail_batch_size
         self.detail_batch_pause_seconds = detail_batch_pause_seconds
+        self.min_request_interval_seconds = max(0.0, float(min_request_interval_seconds))
+        self.max_429_wait_seconds = max(1.0, float(max_429_wait_seconds))
+        self._next_request_not_before = 0.0
 
     @staticmethod
     def _progress_print(message: str, end: str = "\n") -> None:
@@ -110,14 +115,42 @@ class TrackerAPIClient:
             fallback = message.replace("📄", "[PAGE]").replace("⚔️", "[MATCH]")
             print(fallback, end=end, flush=True)
 
+    @staticmethod
+    def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            pass
+        try:
+            dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+            return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+        except ValueError:
+            return None
+
+    def _respect_global_throttle(self) -> None:
+        if self.min_request_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        if now < self._next_request_not_before:
+            time.sleep(self._next_request_not_before - now)
+        self._next_request_not_before = time.monotonic() + self.min_request_interval_seconds
+
     def _get_json(self, url: str, retry_429: bool = True) -> Dict[str, Any]:
+        self._respect_global_throttle()
         req = Request(url, headers=self.HEADERS, method="GET")
         try:
             with urlopen(req, timeout=self.timeout_seconds) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except HTTPError as exc:
             if exc.code == 429 and retry_429:
-                time.sleep(10)
+                retry_after_header = exc.headers.get("Retry-After") if exc.headers else None
+                wait_seconds = self._retry_after_seconds(retry_after_header)
+                if wait_seconds is None:
+                    wait_seconds = 10.0
+                wait_seconds = min(wait_seconds, self.max_429_wait_seconds)
+                time.sleep(wait_seconds)
                 return self._get_json(url, retry_429=False)
             raise
         except URLError:
@@ -392,6 +425,92 @@ class TrackerAPIClient:
     def get_profile(self, username: str) -> Dict[str, Any]:
         payload = self._get_json(f"{self.BASE}/profile/ubi/{username}")
         return self.parse_profile(payload)
+
+    def _parse_encounters_payload(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = payload.get("data", [])
+        if isinstance(data, dict):
+            players = data.get("items") or data.get("players") or []
+        else:
+            players = data
+
+        encounters: List[Dict[str, Any]] = []
+        for player in players if isinstance(players, list) else []:
+            if not isinstance(player, dict):
+                continue
+            name = player.get("name") or player.get("platformUserHandle") or player.get("displayName")
+            if not name:
+                continue
+            encounters.append(
+                {
+                    "name": name,
+                    "profileId": player.get("profileId") or player.get("platformUserId"),
+                    "count": self._safe_int(player.get("count"), 1),
+                    "latestMatch": player.get("latestMatch", ""),
+                    "stats": player.get("stats", {}),
+                }
+            )
+        return encounters
+
+    def _get_encounters_from_recent_matches(self, username: str, max_matches: int = 8) -> List[Dict[str, Any]]:
+        match_list = self.get_all_matches(username, max_pages=1, show_progress=False)[:max_matches]
+        if not match_list:
+            return []
+
+        by_name: Dict[str, Dict[str, Any]] = {}
+        owner = username.lower()
+        for match in match_list:
+            match_id = match.get("match_id")
+            if not match_id:
+                continue
+            try:
+                detail = self.get_match_detail(match_id)
+            except Exception:
+                continue
+
+            timestamp = (match.get("timestamp") or "")
+            for player in detail.get("players", []):
+                if not isinstance(player, dict):
+                    continue
+                name = player.get("username")
+                if not name or name.lower() == owner:
+                    continue
+                row = by_name.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "profileId": player.get("player_id_tracker"),
+                        "count": 0,
+                        "latestMatch": "",
+                        "stats": {},
+                    },
+                )
+                row["count"] += 1
+                if timestamp and (not row["latestMatch"] or timestamp > row["latestMatch"]):
+                    row["latestMatch"] = timestamp
+        return sorted(by_name.values(), key=lambda r: int(r.get("count", 0)), reverse=True)
+
+    def get_encounters(self, uuid: Optional[str] = None, username: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get players encountered by a user, with fallback if endpoint is unavailable."""
+        candidates: List[str] = []
+        if uuid:
+            candidates.append(f"{self.BASE}/stats/played-with/ubi/{quote(str(uuid), safe='')}")
+        if username:
+            candidates.append(f"{self.BASE}/stats/played-with/ubi/{quote(str(username), safe='')}")
+
+        for url in candidates:
+            try:
+                encounters = self._parse_encounters_payload(self._get_json(url))
+                if encounters:
+                    return encounters
+            except HTTPError as exc:
+                if exc.code not in (403, 404):
+                    raise
+            except URLError:
+                raise
+
+        if username:
+            return self._get_encounters_from_recent_matches(username)
+        return []
 
     @staticmethod
     def _segments_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
