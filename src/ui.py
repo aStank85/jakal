@@ -38,10 +38,12 @@ class TerminalUI:
         print("8. Analyze Stack")
         print("9. 5v5 Matchup Analysis")
         print("-" * 30)
+        print("A. Player Analytics")
+        print("-" * 30)
         print("0. Exit")
         print("=" * 50)
 
-        choice = input("Choose an option (0-9): ").strip()
+        choice = input("Choose an option (0-9, A): ").strip()
         return choice
 
     def get_paste_input(self) -> str:

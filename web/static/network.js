@@ -5,6 +5,10 @@ let nodes = null;
 let edges = null;
 let scanning = false;
 let matchScraping = false;
+let matchProgressTarget = 0;
+let continuousScrapeEnabled = false;
+let continuousStopRequested = false;
+let continuousRestartTimer = null;
 let visLib = null;
 let layoutTick = null;
 let currentMatchUsername = "";
@@ -19,6 +23,15 @@ let operatorImageFileByKey = {};
 let operatorImageIndexLoaded = false;
 let operatorImageIndexEnabled = false;
 let operatorImageIndexCount = 0;
+let computeReportState = {
+    mode: "overall",
+    stats: null,
+    round: null,
+    chemistry: null,
+    lobby: null,
+    trade: null,
+    selectedEvidenceKey: "",
+};
 const MAP_IMAGE_FILE_BY_KEY = {
     "outback": "r6-maps-outback.avif",
     "oregon": "r6-maps-oregon.avif",
@@ -378,23 +391,123 @@ function stopScan() {
     document.getElementById("scan-status").textContent = "Stopped";
 }
 
-function startMatchScrape() {
+function setGlobalScrapeRunning(isRunning) {
+    const indicator = document.getElementById("global-scrape-indicator");
+    if (!indicator) return;
+    indicator.classList.toggle("hidden", !isRunning);
+}
+
+function setMatchProgress(processed, total) {
+    const bar = document.getElementById("match-progress-bar");
+    const text = document.getElementById("match-progress-text");
+    const wrap = document.getElementById("match-progress-wrap");
+    if (!bar || !text) return;
+    const safeProcessed = Math.max(0, toNumber(processed, 0));
+    const rawTotal = toNumber(total, 0);
+    const isOpenEnded = continuousScrapeEnabled || rawTotal <= 0;
+    if (isOpenEnded) {
+        wrap?.classList.add("indeterminate");
+        bar.style.width = "35%";
+        text.textContent = `${safeProcessed} scanned`;
+        return;
+    }
+    wrap?.classList.remove("indeterminate");
+    bar.style.transform = "";
+    const safeTotal = Math.max(1, rawTotal);
+    const pct = Math.min(100, (safeProcessed / safeTotal) * 100);
+    bar.style.width = `${pct.toFixed(1)}%`;
+    text.textContent = `${safeProcessed}/${safeTotal} (${pct.toFixed(1)}%)`;
+}
+
+function syncContinuousControls() {
+    const runForeverEl = document.getElementById("matches-run-forever");
+    const newestOnlyEl = document.getElementById("matches-newest-only");
+    const fullBackfillEl = document.getElementById("matches-full-backfill");
+    const maxMatchesEl = document.getElementById("max-matches");
+    if (!runForeverEl || !maxMatchesEl || !newestOnlyEl || !fullBackfillEl) return;
+    const isContinuous = runForeverEl.checked;
+    const isNewest = newestOnlyEl.checked;
+    const isFullBackfill = fullBackfillEl.checked;
+    maxMatchesEl.disabled = isContinuous || isNewest || isFullBackfill;
+    if (isContinuous) {
+        maxMatchesEl.title = "Disabled in continuous mode";
+    } else if (isNewest) {
+        maxMatchesEl.title = "Disabled in newest mode (open-ended scan)";
+    } else if (isFullBackfill) {
+        maxMatchesEl.title = "Disabled in full backfill mode (open-ended scan)";
+    } else {
+        maxMatchesEl.title = "";
+    }
+}
+
+function syncScrapeModeControls() {
+    const newestOnlyEl = document.getElementById("matches-newest-only");
+    const fullBackfillEl = document.getElementById("matches-full-backfill");
+    const runForeverEl = document.getElementById("matches-run-forever");
+    if (!newestOnlyEl || !fullBackfillEl || !runForeverEl) return;
+    if (fullBackfillEl.checked) {
+        newestOnlyEl.checked = false;
+        newestOnlyEl.disabled = true;
+        runForeverEl.checked = false;
+        runForeverEl.disabled = true;
+    } else {
+        newestOnlyEl.disabled = false;
+        runForeverEl.disabled = false;
+    }
+    if (newestOnlyEl.checked) {
+        fullBackfillEl.checked = false;
+    }
+    syncContinuousControls();
+}
+
+function startMatchScrape(autoRestart = false) {
     const username = document.getElementById("matches-username").value.trim();
     const maxMatches = parseInt(document.getElementById("max-matches").value, 10);
     const debugBrowser = document.getElementById("matches-debug-browser").checked;
+    const newestOnly = document.getElementById("matches-newest-only").checked;
+    const fullBackfill = document.getElementById("matches-full-backfill").checked;
+    const runForever = document.getElementById("matches-run-forever").checked;
+    const allowedMatchTypes = Array.from(document.querySelectorAll(".matches-type-filter"))
+        .filter((el) => el.checked)
+        .map((el) => String(el.value || "").trim().toLowerCase())
+        .filter(Boolean);
     if (!username) {
         alert("Please enter a username");
         return;
     }
+    if ((newestOnly || fullBackfill) && !allowedMatchTypes.length) {
+        alert("Select at least one allowed match type for newest or full backfill mode.");
+        return;
+    }
+    if (!autoRestart) {
+        continuousScrapeEnabled = runForever;
+        continuousStopRequested = false;
+        if (continuousRestartTimer) {
+            clearTimeout(continuousRestartTimer);
+            continuousRestartTimer = null;
+        }
+    }
+    const openEndedNewest = newestOnly;
+    const openEndedBackfill = fullBackfill;
+    if (continuousScrapeEnabled && !newestOnly) {
+        logMatch("Continuous mode works best with Get Newest Matches enabled.", "info");
+    }
+    const effectiveMaxMatches = (continuousScrapeEnabled || openEndedNewest || openEndedBackfill) ? 1000000 : maxMatches;
 
-    document.getElementById("match-log").innerHTML = "";
-    document.getElementById("match-results").innerHTML = "";
-    document.getElementById("match-count").textContent = "0";
-    document.getElementById("current-match").textContent = "-";
-    document.getElementById("match-status").textContent = "Starting";
+    if (!autoRestart) {
+        document.getElementById("match-log").innerHTML = "";
+        document.getElementById("match-count").textContent = "0";
+        document.getElementById("current-match").textContent = "-";
+        document.getElementById("match-status").textContent = "Starting";
+    } else {
+        document.getElementById("match-status").textContent = "Restarting";
+    }
+    matchProgressTarget = (continuousScrapeEnabled || openEndedNewest || openEndedBackfill) ? 0 : Math.max(1, toNumber(maxMatches, 1));
+    setMatchProgress(0, matchProgressTarget);
     document.getElementById("start-match-scrape").disabled = true;
     document.getElementById("stop-match-scrape").disabled = false;
     matchScraping = true;
+    setGlobalScrapeRunning(true);
     currentMatchUsername = username;
 
     wsMatches = new WebSocket("ws://localhost:5000/ws/scrape-matches");
@@ -403,7 +516,31 @@ function startMatchScrape() {
         if (debugBrowser) {
             logMatch("Debug browser mode enabled (headful Playwright window).");
         }
-        wsMatches.send(JSON.stringify({ username, max_matches: maxMatches, debug_browser: debugBrowser }));
+        if (continuousScrapeEnabled) {
+            logMatch("Continuous scrape mode active. Press Stop to end loop.", "info");
+        }
+        if (openEndedNewest && !continuousScrapeEnabled) {
+            logMatch("Newest mode is open-ended: scanning until already-stored boundary is found.", "info");
+        }
+        if (fullBackfill) {
+            logMatch("Full backfill mode: collecting all available matches until Load More is exhausted.", "info");
+        }
+        if (newestOnly) {
+            logMatch(
+                `Newest mode enabled. Allowed types: ${allowedMatchTypes.join(", ")}`,
+                "info"
+            );
+        }
+        wsMatches.send(
+            JSON.stringify({
+                username,
+                max_matches: effectiveMaxMatches,
+                debug_browser: debugBrowser,
+                newest_only: newestOnly && !fullBackfill,
+                full_backfill: fullBackfill,
+                allowed_match_types: allowedMatchTypes,
+            })
+        );
     };
 
     wsMatches.onmessage = (event) => {
@@ -414,10 +551,26 @@ function startMatchScrape() {
     wsMatches.onclose = () => {
         logMatch("Match scraper disconnected");
         matchScraping = false;
-        document.getElementById("start-match-scrape").disabled = false;
-        document.getElementById("stop-match-scrape").disabled = true;
-        if (document.getElementById("match-status").textContent !== "Complete") {
-            document.getElementById("match-status").textContent = "Idle";
+        if (
+            continuousScrapeEnabled &&
+            !continuousStopRequested &&
+            !document.getElementById("stop-match-scrape").disabled
+        ) {
+            document.getElementById("match-status").textContent = "Waiting";
+            logMatch("Continuous mode: next cycle in 10s...", "info");
+            continuousRestartTimer = setTimeout(() => {
+                continuousRestartTimer = null;
+                if (!continuousStopRequested && continuousScrapeEnabled) {
+                    startMatchScrape(true);
+                }
+            }, 10000);
+        } else {
+            setGlobalScrapeRunning(false);
+            document.getElementById("start-match-scrape").disabled = false;
+            document.getElementById("stop-match-scrape").disabled = true;
+            if (document.getElementById("match-status").textContent !== "Complete") {
+                document.getElementById("match-status").textContent = "Idle";
+            }
         }
     };
 
@@ -427,10 +580,24 @@ function startMatchScrape() {
 }
 
 function stopMatchScrape() {
+    continuousStopRequested = true;
+    continuousScrapeEnabled = false;
+    if (continuousRestartTimer) {
+        clearTimeout(continuousRestartTimer);
+        continuousRestartTimer = null;
+    }
+    if (wsMatches && wsMatches.readyState === WebSocket.OPEN) {
+        wsMatches.send(JSON.stringify({ action: "stop" }));
+        document.getElementById("match-status").textContent = "Stopping...";
+        document.getElementById("stop-match-scrape").disabled = true;
+        logMatch("Stop requested. Waiting for current match to finish...", "info");
+        return;
+    }
     if (wsMatches) {
         wsMatches.close();
     }
     matchScraping = false;
+    setGlobalScrapeRunning(false);
     document.getElementById("start-match-scrape").disabled = false;
     document.getElementById("stop-match-scrape").disabled = true;
     document.getElementById("match-status").textContent = "Stopped";
@@ -493,12 +660,24 @@ function handleMessage(data) {
 function handleMatchMessage(data) {
     switch (data.type) {
         case "scraping_match":
-            document.getElementById("current-match").textContent = `${data.match_number}/${data.total}`;
+            const newestOnly = document.getElementById("matches-newest-only")?.checked === true;
+            const fullBackfill = document.getElementById("matches-full-backfill")?.checked === true;
+            const openEnded = continuousScrapeEnabled || newestOnly || fullBackfill;
+            if (openEnded) {
+                document.getElementById("current-match").textContent = `${data.match_number}`;
+            } else {
+                document.getElementById("current-match").textContent = `${data.match_number}/${data.total}`;
+            }
             document.getElementById("match-status").textContent = "Running";
-            logMatch(`Scraping match ${data.match_number} of ${data.total}...`);
+            setMatchProgress(data.match_number, openEnded ? 0 : data.total);
+            if (openEnded) {
+                logMatch(`Scraping match ${data.match_number}...`);
+            } else {
+                logMatch(`Scraping match ${data.match_number} of ${data.total}...`);
+            }
             break;
         case "match_scraped":
-            appendMatchResult(data.match_data);
+            appendMatchResult(data.match_data, "captured");
             document.getElementById("match-count").textContent = `${toNumber(
                 document.getElementById("match-count").textContent,
                 0
@@ -510,16 +689,52 @@ function handleMatchMessage(data) {
                 logMatch("Match details captured", "success");
             }
             break;
+        case "match_seen":
+            appendMatchResult(data.match_data, data.status || "captured");
+            document.getElementById("match-count").textContent = `${toNumber(
+                document.getElementById("match-count").textContent,
+                0
+            ) + 1}`;
+            if (data.status === "filtered") {
+                logMatch("Match seen during scan (filtered by allowed types).", "info");
+            } else if (data.status === "skipped_complete") {
+                logMatch("Match seen during scan (already complete in DB).", "info");
+            }
+            break;
+        case "match_filtered":
+            logMatch(
+                `Skipped match (${data.mode || "Unknown"}) due to allowed-types filter.`,
+                "info"
+            );
+            break;
         case "match_scraping_complete":
-            document.getElementById("match-status").textContent = "Complete";
+            document.getElementById("match-status").textContent = continuousScrapeEnabled ? "Cycle Complete" : "Complete";
+            const newestOnlyDone = document.getElementById("matches-newest-only")?.checked === true;
+            const fullBackfillDone = document.getElementById("matches-full-backfill")?.checked === true;
+            const openEndedDone = continuousScrapeEnabled || newestOnlyDone || fullBackfillDone;
+            const completedScanned = toNumber(data.rows_scanned, toNumber(data.total_matches, 0));
+            setMatchProgress(
+                completedScanned,
+                openEndedDone ? 0 : (matchProgressTarget || toNumber(data.total_matches, 1))
+            );
             logMatch(`Match scraping complete (${data.total_matches} matches)`, "success");
             break;
         case "matches_saved":
             logMatch(`Saved ${toNumber(data.saved_matches, 0)} matches for ${data.username}`, "success");
-            loadSavedMatches(data.username, true);
+            break;
+        case "matches_unpacked":
+            const u = data?.stats || {};
+            logMatch(
+                `Unpack pass complete for ${data.username}: unpacked=${toNumber(u.unpacked_matches, 0)}, ` +
+                `scanned=${toNumber(u.scanned, 0)}, skipped=${toNumber(u.skipped, 0)}, errors=${toNumber(u.errors, 0)}`,
+                "success"
+            );
             break;
         case "warning":
             logMatch(`Warning: ${data.message}`, "info");
+            break;
+        case "stop_ack":
+            logMatch(`Server: ${data.message}`, "info");
             break;
         case "debug":
             logMatch(`Debug: ${data.message}`, "info");
@@ -664,15 +879,38 @@ function logMatch(message, type = "info") {
     logDiv.scrollTop = logDiv.scrollHeight;
 }
 
-function appendMatchResult(matchData) {
-    appendMatchResultRow(matchData, "live");
+function appendMatchResult(matchData, status = "captured") {
+    appendMatchResultRow(matchData, status);
 }
 
-function appendMatchResultRow(matchData, source = "live") {
+function appendMatchResultRow(matchData, status = "captured") {
     const resultsDiv = document.getElementById("match-results");
-    const entry = document.createElement("div");
-    entry.className = "stored-match-card";
     const matchId = String(matchData?.match_id || "unknown-id");
+    const existing = resultsDiv.querySelector(`[data-match-id="${matchId}"]`);
+    const statusClass =
+        status === "filtered" ? "match-results-filtered" :
+        status === "skipped_complete" ? "match-results-skipped" :
+        "match-results-captured";
+    const statusLabel =
+        status === "filtered" ? "filtered" :
+        status === "skipped_complete" ? "skipped" :
+        "captured";
+    if (existing) {
+        existing.classList.remove("match-results-captured", "match-results-skipped", "match-results-filtered");
+        existing.classList.add(statusClass);
+        const meta = existing.querySelector(".stored-match-meta");
+        if (meta) {
+            const shortExistingId =
+                matchId.length > 14
+                    ? `${matchId.slice(0, 8)}...${matchId.slice(-4)}`
+                    : matchId;
+            meta.textContent = `${matchData?.date || "No date"} | ${shortExistingId} | ${statusLabel}`;
+        }
+        return;
+    }
+    const entry = document.createElement("div");
+    entry.className = `stored-match-card match-results-card ${statusClass}`;
+    entry.dataset.matchId = matchId;
     const shortMatchId =
         matchId.length > 14
             ? `${matchId.slice(0, 8)}...${matchId.slice(-4)}`
@@ -686,7 +924,6 @@ function appendMatchResultRow(matchData, source = "live") {
         result === "Win" ? "stored-result-win" :
         result === "Loss" ? "stored-result-loss" :
         "stored-result-unknown";
-    const sourceLabel = source === "saved" ? "saved" : "live";
     const bgUrl = resolveMapImageUrl(map);
     if (bgUrl) {
         entry.style.backgroundImage = `linear-gradient(rgba(8,8,8,0.72), rgba(8,8,8,0.82)), url('${bgUrl}')`;
@@ -711,58 +948,26 @@ function appendMatchResultRow(matchData, source = "live") {
             </div>
         </div>
         <div class="stored-match-meta">
-            ${matchData?.date || "No date"} | ${shortMatchId} | ${sourceLabel}
+            ${matchData?.date || "No date"} | ${shortMatchId} | ${statusLabel}
         </div>
     `;
     resultsDiv.appendChild(entry);
     resultsDiv.scrollTop = resultsDiv.scrollHeight;
 }
 
-async function loadSavedMatches(explicitUsername = "", replaceResults = true) {
-    const username = (explicitUsername || document.getElementById("matches-username").value || "").trim();
-    if (!username) {
-        logMatch("Enter a username before loading saved matches.", "error");
-        return;
-    }
-
-    try {
-        const res = await fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=50`);
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-        const payload = await res.json();
-        const matches = Array.isArray(payload.matches) ? payload.matches : [];
-
-        if (replaceResults) {
-            document.getElementById("match-results").innerHTML = "";
-        }
-
-        for (const match of matches) {
-            appendMatchResultRow(match, "saved");
-        }
-
-        document.getElementById("match-count").textContent = `${matches.length}`;
-        document.getElementById("current-match").textContent = "-";
-        currentMatchUsername = username;
-        logMatch(`Loaded ${matches.length} saved matches for ${username}`, "success");
-    } catch (err) {
-        logMatch(`Failed to load saved matches: ${err}`, "error");
-    }
-}
-
 function setActiveTab(tabName) {
     const isScanner = tabName === "scanner";
     const isMatches = tabName === "matches";
     const isStored = tabName === "stored";
-    const isCompute = tabName === "compute";
+    const isDashboard = tabName === "dashboard";
     document.getElementById("tab-scanner").classList.toggle("active", isScanner);
     document.getElementById("tab-matches").classList.toggle("active", isMatches);
     document.getElementById("tab-stored").classList.toggle("active", isStored);
-    document.getElementById("tab-compute").classList.toggle("active", isCompute);
+    document.getElementById("tab-dashboard").classList.toggle("active", isDashboard);
     document.getElementById("panel-scanner").classList.toggle("active", isScanner);
     document.getElementById("panel-matches").classList.toggle("active", isMatches);
     document.getElementById("panel-stored").classList.toggle("active", isStored);
-    document.getElementById("panel-compute").classList.toggle("active", isCompute);
+    document.getElementById("panel-dashboard").classList.toggle("active", isDashboard);
     if (isScanner && network) {
         setTimeout(() => network.redraw(), 10);
     }
@@ -965,6 +1170,7 @@ function renderStoredMatches(matches, username) {
 
     let wins = 0;
     let losses = 0;
+    let missingRoundDataCount = 0;
 
     if (!visibleMatches.length) {
         const empty = document.createElement("div");
@@ -985,6 +1191,8 @@ function renderStoredMatches(matches, username) {
                 ? `${fullMatchId.slice(0, 8)}...${fullMatchId.slice(-4)}`
                 : fullMatchId;
         const result = perspective.result;
+        const missingRoundData = match?.round_data_missing === true;
+        if (missingRoundData) missingRoundDataCount += 1;
 
         if (result === "Win") wins += 1;
         if (result === "Loss") losses += 1;
@@ -996,6 +1204,9 @@ function renderStoredMatches(matches, username) {
 
         const card = document.createElement("div");
         card.className = "stored-match-card";
+        if (missingRoundData) {
+            card.classList.add("stored-match-missing-rounds");
+        }
         card.dataset.matchIndex = String(idx);
         const bgUrl = resolveMapImageUrl(map);
         if (bgUrl) {
@@ -1022,6 +1233,7 @@ function renderStoredMatches(matches, username) {
             </div>
             <div class="stored-match-meta">
                 ${match?.date || "No date"} | ${shortMatchId}
+                ${missingRoundData ? '<span class="stored-warning-badge">Round Data Missing</span>' : ""}
             </div>
         `;
         card.addEventListener("click", () => selectStoredMatch(idx, username));
@@ -1031,6 +1243,9 @@ function renderStoredMatches(matches, username) {
     document.getElementById("stored-total").textContent = String(visibleMatches.length);
     document.getElementById("stored-wins").textContent = String(wins);
     document.getElementById("stored-losses").textContent = String(losses);
+    if (missingRoundDataCount > 0) {
+        logMatch(`Flagged ${missingRoundDataCount} stored matches with missing round data.`, "info");
+    }
 
     // Do not auto-open insights on tab load/filter changes.
     // Insights should open only when the user clicks a match card.
@@ -1578,6 +1793,73 @@ function closeStoredDetail() {
     document.getElementById("stored-detail").classList.add("hidden");
 }
 
+async function unpackStoredMatches(explicitUsername = "") {
+    const username = (explicitUsername || document.getElementById("stored-username").value || "").trim();
+    if (!username) {
+        logMatch("Enter a username before unpacking stored matches.", "error");
+        return;
+    }
+    const btn = document.getElementById("unpack-stored-matches");
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/unpack-scraped-matches/${encodeURIComponent(username)}?limit=5000`, {
+            method: "POST",
+        });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        const stats = payload?.stats || {};
+        logMatch(
+            `Unpack complete for ${username}: scanned=${toNumber(stats.scanned, 0)}, ` +
+            `unpacked=${toNumber(stats.unpacked_matches, 0)}, skipped=${toNumber(stats.skipped, 0)}, ` +
+            `errors=${toNumber(stats.errors, 0)}`,
+            "success"
+        );
+        await loadStoredMatchesView(username, true);
+    } catch (err) {
+        logMatch(`Failed to unpack stored matches: ${err}`, "error");
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function deleteBadStoredMatches(explicitUsername = "") {
+    const username = (explicitUsername || document.getElementById("stored-username").value || "").trim();
+    if (!username) {
+        logMatch("Enter a username before deleting bad stored matches.", "error");
+        return;
+    }
+    const confirmed = window.confirm(
+        `Delete all flagged bad matches for ${username}? This removes those cards and normalized rows.`
+    );
+    if (!confirmed) return;
+
+    const btn = document.getElementById("delete-bad-stored-matches");
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/delete-bad-scraped-matches/${encodeURIComponent(username)}`, {
+            method: "POST",
+        });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        const stats = payload?.stats || {};
+        logMatch(
+            `Deleted bad matches for ${username}: cards=${toNumber(stats.deleted_cards, 0)}, ` +
+            `match_ids=${toNumber(stats.deleted_match_ids, 0)}, detail_rows=${toNumber(stats.deleted_detail_rows, 0)}, ` +
+            `round_rows=${toNumber(stats.deleted_round_rows, 0)}, player_round_rows=${toNumber(stats.deleted_player_round_rows, 0)}`,
+            "success"
+        );
+        await loadStoredMatchesView(username, true);
+    } catch (err) {
+        logMatch(`Failed to delete bad stored matches: ${err}`, "error");
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 async function loadStoredMatchesView(explicitUsername = "", silent = false) {
     const username = (explicitUsername || document.getElementById("stored-username").value || "").trim();
     if (!username) {
@@ -1617,24 +1899,786 @@ function logCompute(message, level = "info") {
 }
 
 function renderComputeCards(stats) {
-    const el = document.getElementById("compute-results");
-    if (!el) return;
-    const section = (label, s) => `
-        <div class="compute-card">
-            <div class="compute-label">${label}</div>
-            <div class="compute-metric-row"><span>Matches</span><strong>${s.matches}</strong></div>
-            <div class="compute-metric-row"><span>Record</span><strong>${s.wins}-${s.losses}</strong></div>
-            <div class="compute-metric-row"><span>Win Rate</span><strong>${s.winRate}%</strong></div>
-            <div class="compute-metric-row"><span>Avg K/D</span><strong>${s.avgKd}</strong></div>
-            <div class="compute-metric-row"><span>Avg K / D / A</span><strong>${s.avgKills} / ${s.avgDeaths} / ${s.avgAssists}</strong></div>
-            <div class="compute-metric-row"><span>Tracked Rows</span><strong>${s.trackedRows}/${s.matches}</strong></div>
+    computeReportState.stats = stats;
+    renderComputeReport();
+}
+
+function formatFixed(value, digits = 1) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : Number(0).toFixed(digits);
+}
+
+function modeSummaryCard(label, key, s, isActive) {
+    return `
+        <button class="compute-mode-card ${isActive ? "active" : ""}" data-mode="${key}">
+            <div class="compute-mode-card-label">${label}</div>
+            <div class="compute-mode-card-value">${formatFixed(s.winRate, 1)}%</div>
+            <div class="compute-mode-card-sub">${toNumber(s.wins, 0)}-${toNumber(s.losses, 0)} • ${toNumber(s.matches, 0)} matches</div>
+            <div class="compute-mode-card-sub">Avg K/D ${formatFixed(s.avgKd, 2)}</div>
+            <div class="compute-mode-card-sub">Avg K/D/A ${formatFixed(s.avgKills, 1)} / ${formatFixed(s.avgDeaths, 1)} / ${formatFixed(s.avgAssists, 1)}</div>
+            <div class="compute-mode-card-sub">Tracked ${toNumber(s.trackedRows, 0)}/${toNumber(s.matches, 0)}</div>
+        </button>
+    `;
+}
+
+function tooltipIcon(text) {
+    return `<span class="compute-info" tabindex="0" title="${escapeHtml(text)}" aria-label="${escapeHtml(text)}">ⓘ</span>`;
+}
+
+function statTile(label, value, sample, tooltip = "") {
+    return `
+        <div class="compute-tile">
+            <div class="compute-tile-label">${escapeHtml(label)} ${tooltip ? tooltipIcon(tooltip) : ""}</div>
+            <div class="compute-tile-value">${value}</div>
+            <div class="compute-tile-sub">${escapeHtml(sample)}</div>
         </div>
     `;
-    el.innerHTML = `
-        ${section("Overall", stats.overall)}
-        ${section("Ranked", stats.ranked)}
-        ${section("Unranked", stats.unranked)}
+}
+
+function findingPriority(sev) {
+    if (sev === "critical") return 0;
+    if (sev === "warning") return 1;
+    return 2;
+}
+
+function splitFindingMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) return { headline: "No finding text", impact: "" };
+    const sentences = text.split(".").map((s) => s.trim()).filter(Boolean);
+    return {
+        headline: sentences[0] || text,
+        impact: sentences.length > 1 ? (sentences[1] || "").trim() : "",
+    };
+}
+
+function flattenSortedFindings() {
+    const sources = [
+        { label: "Round Analysis", data: computeReportState.round },
+        { label: "Teammate Chemistry", data: computeReportState.chemistry },
+        { label: "Lobby Quality", data: computeReportState.lobby },
+        { label: "Trade Analysis", data: computeReportState.trade },
+    ];
+    const combined = [];
+    for (const src of sources) {
+        const findings = Array.isArray(src.data?.findings) ? src.data.findings : [];
+        for (const finding of findings) {
+            const severity = normalizeFindingSeverity(finding?.severity);
+            combined.push({
+                ...finding,
+                severity,
+                source: src.label,
+            });
+        }
+    }
+    return combined.sort((a, b) => findingPriority(a.severity) - findingPriority(b.severity));
+}
+
+function renderEvidencePanel(key, html) {
+    const panel = document.getElementById("dashboard-evidence");
+    if (!panel) return;
+    computeReportState.selectedEvidenceKey = key;
+    panel.innerHTML = html;
+}
+
+function renderPlaybook() {
+    const container = document.getElementById("compute-playbook");
+    if (!container) return;
+    const findings = flattenSortedFindings();
+    if (!findings.length) {
+        container.innerHTML = `<div class="compute-value">No findings generated for this player.</div>`;
+        return;
+    }
+    container.innerHTML = findings
+        .map((f, idx) => {
+            const sev = normalizeFindingSeverity(f?.severity);
+            const parts = splitFindingMessage(f?.message || "");
+            const sevLabel = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
+            const citations = Array.isArray(f?.citations) ? f.citations : [];
+            const evidenceText = citations.length ? citations.join(" | ") : "No citation provided.";
+            return `
+                <article class="playbook-card playbook-${sev}" data-playbook-index="${idx}">
+                    <div class="playbook-top">
+                        <span class="severity-pill sev-${sev}">${sevLabel}</span>
+                        <span class="playbook-source">${escapeHtml(f.source || "Insight")}</span>
+                    </div>
+                    <h4 class="playbook-headline">${escapeHtml(parts.headline)}</h4>
+                    ${parts.impact ? `<div class="playbook-line"><strong>Impact:</strong> ${escapeHtml(parts.impact)}</div>` : ""}
+                    <button
+                        type="button"
+                        class="playbook-evidence"
+                        data-evidence-key="playbook-${idx}"
+                        data-evidence-title="${escapeHtml(parts.headline)}"
+                        data-evidence-source="${escapeHtml(f.source || "Insight")}"
+                        data-evidence-text="${escapeHtml(evidenceText)}"
+                    >
+                        Evidence
+                    </button>
+                </article>
+            `;
+        })
+        .join("");
+
+    container.querySelectorAll(".playbook-evidence").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const title = btn.dataset.evidenceTitle || "Finding";
+            const source = btn.dataset.evidenceSource || "Insight";
+            const text = btn.dataset.evidenceText || "No citation provided.";
+            const key = btn.dataset.evidenceKey || "";
+            renderEvidencePanel(
+                key,
+                `<div class="dashboard-evidence-title">${escapeHtml(title)}</div>` +
+                `<div class="dashboard-evidence-meta">${escapeHtml(source)}</div>` +
+                `<div class="dashboard-evidence-body">${escapeHtml(text)}</div>`
+            );
+        });
+    });
+}
+
+function renderDeepStats(round) {
+    const wrap = document.getElementById("dashboard-deep-stats");
+    const panel = document.getElementById("dashboard-evidence");
+    if (!wrap || !panel) return;
+    const data = round || {};
+    const fb = toNumber(data.fb_impact_delta, 0);
+    const fd = toNumber(data.fd_rate, 0);
+    const atk = toNumber(data.atk_win_rate, 0);
+    const def = toNumber(data.def_win_rate, 0);
+    const clutch = toNumber(data.clutch_win_rate, 0);
+    const roundWr = toNumber(data.overall_round_win_rate, 0);
+    const totalRounds = toNumber(data.total_rounds, 0);
+    const clutchAttempts = toNumber(data.clutch_attempts, 0);
+    wrap.innerHTML = [
+        `<button class="dashboard-stat-chip" type="button" data-stat-key="fb_delta">FB Delta ${fb >= 0 ? "+" : ""}${formatFixed(fb, 1)}%</button>`,
+        `<button class="dashboard-stat-chip" type="button" data-stat-key="fd_rate">FD Rate ${formatFixed(fd, 1)}%</button>`,
+        `<button class="dashboard-stat-chip" type="button" data-stat-key="atk_def">ATK ${formatFixed(atk, 1)}% / DEF ${formatFixed(def, 1)}%</button>`,
+        `<button class="dashboard-stat-chip" type="button" data-stat-key="clutch">Clutch ${formatFixed(clutch, 1)}%</button>`,
+        `<button class="dashboard-stat-chip" type="button" data-stat-key="round_wr">Round WR ${formatFixed(roundWr, 1)}%</button>`,
+    ].join('<span class="dashboard-stat-sep">·</span>');
+
+    const evidenceByKey = {
+        fb_delta: `Round sample ${totalRounds}. This is the win-rate delta between rounds where you secured first blood and rounds where you did not.`,
+        fd_rate: `Round sample ${totalRounds}. Use this to track opening-risk consistency, not just final round outcomes.`,
+        atk_def: `ATK ${toNumber(data.atk_rounds, 0)} rounds at ${formatFixed(atk, 1)}%; DEF ${toNumber(data.def_rounds, 0)} rounds at ${formatFixed(def, 1)}%. Weak side: ${String(data.weak_side || "even")}.`,
+        clutch: `Clutch attempts: ${clutchAttempts}. Primary win condition from plugin: ${String(data.primary_win_condition || "mixed")}.`,
+        round_wr: `Overall: ${formatFixed(roundWr, 1)}% over ${totalRounds} rounds. Data quality status: ${String(data.data_quality || "unknown")}.`,
+    };
+    wrap.querySelectorAll(".dashboard-stat-chip").forEach((chip) => {
+        chip.addEventListener("click", () => {
+            const key = chip.dataset.statKey || "";
+            const body = evidenceByKey[key] || "No evidence available.";
+            wrap.querySelectorAll(".dashboard-stat-chip").forEach((el) => el.classList.remove("active"));
+            chip.classList.add("active");
+            renderEvidencePanel(
+                `stat-${key}`,
+                `<div class="dashboard-evidence-title">${escapeHtml(chip.textContent || "Stat")}</div>` +
+                `<div class="dashboard-evidence-meta">Round Analysis Evidence</div>` +
+                `<div class="dashboard-evidence-body">${body}</div>`
+            );
+        });
+    });
+}
+
+function renderComputeReport() {
+    const stats = computeReportState.stats;
+    if (!stats) return;
+    const mode = computeReportState.mode || "overall";
+    const current = stats[mode] || stats.overall;
+    const modeCardsEl = document.getElementById("compute-mode-cards");
+    if (modeCardsEl) {
+        modeCardsEl.innerHTML = [
+            modeSummaryCard("Overall", "overall", stats.overall, mode === "overall"),
+            modeSummaryCard("Ranked", "ranked", stats.ranked, mode === "ranked"),
+            modeSummaryCard("Unranked", "unranked", stats.unranked, mode === "unranked"),
+        ].join("");
+        modeCardsEl.querySelectorAll(".compute-mode-card").forEach((el) => {
+            el.addEventListener("click", () => {
+                computeReportState.mode = el.dataset.mode || "overall";
+                renderComputeReport();
+            });
+        });
+    }
+
+    const winRateEl = document.getElementById("compute-kpi-winrate");
+    const recordEl = document.getElementById("compute-kpi-record");
+    if (winRateEl) winRateEl.textContent = `${formatFixed(current.winRate, 1)}%`;
+    if (recordEl) {
+        recordEl.textContent = `Record ${toNumber(current.wins, 0)}-${toNumber(current.losses, 0)} • ${toNumber(current.matches, 0)} matches`;
+    }
+
+    document.querySelectorAll(".compute-mode-toggle .compute-chip").forEach((chip) => {
+        chip.classList.toggle("active", chip.dataset.mode === mode);
+    });
+
+    const round = computeReportState.round || {};
+    const atk = toNumber(round.atk_win_rate, 0);
+    const def = toNumber(round.def_win_rate, 0);
+    const fd = toNumber(round.fd_rate, 0);
+    const fb = toNumber(round.fb_impact_delta, 0);
+    const atkEl = document.getElementById("compute-kpi-atk");
+    const defEl = document.getElementById("compute-kpi-def");
+    const fdEl = document.getElementById("compute-kpi-fd");
+    const fbEl = document.getElementById("compute-kpi-fb");
+    if (atkEl) atkEl.style.width = `${Math.max(0, Math.min(100, atk))}%`;
+    if (defEl) defEl.style.width = `${Math.max(0, Math.min(100, def))}%`;
+    if (fdEl) fdEl.style.width = `${Math.max(0, Math.min(100, fd))}%`;
+    if (fbEl) fbEl.style.width = `${Math.max(0, Math.min(100, Math.abs(fb)))}%`;
+    const atkDefText = document.getElementById("compute-kpi-atkdef-text");
+    const fdText = document.getElementById("compute-kpi-fd-text");
+    const fbText = document.getElementById("compute-kpi-fb-text");
+    if (atkDefText) atkDefText.textContent = `${formatFixed(atk, 1)}% / ${formatFixed(def, 1)}%`;
+    if (fdText) fdText.textContent = `${formatFixed(fd, 1)}%`;
+    if (fbText) fbText.textContent = `${fb >= 0 ? "+" : ""}${formatFixed(fb, 1)}%`;
+
+    renderPlaybook();
+    renderDeepStats(round);
+}
+
+function formatPct(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? `${n.toFixed(1)}%` : "0.0%";
+}
+
+function renderRoundAnalysisCard(analysis) {
+    if (!analysis || analysis.error) {
+        const reason = analysis?.error || "No round analysis data available.";
+        return `
+            <div class="compute-card compute-round-card">
+                <div class="compute-label">Round Analysis (V3)</div>
+                <div class="compute-value">${escapeHtml(reason)}</div>
+            </div>
+        `;
+    }
+
+    const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+    const findingsHtml = findings.length
+        ? findings
+              .map((f) => {
+                  const sev = String(f?.severity || "info").toLowerCase();
+                  const sevClass = sev === "critical" ? "compute-sev-critical" : sev === "warning" ? "compute-sev-warning" : "compute-sev-info";
+                  const label = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
+                  return `<li class="compute-finding ${sevClass}"><strong>${label}:</strong> ${escapeHtml(f?.message || "")}</li>`;
+              })
+              .join("")
+        : '<li class="compute-finding compute-sev-info"><strong>Info:</strong> No findings generated.</li>';
+
+    return `
+        <div class="compute-card compute-round-card">
+            <div class="compute-label">Round Analysis (V3)</div>
+            <div class="compute-metric-row"><span>Total Rounds</span><strong>${toNumber(analysis.total_rounds, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Data Quality</span><strong>${escapeHtml(String(analysis.data_quality || "unknown"))}</strong></div>
+            <div class="compute-metric-row"><span>FB Impact Delta</span><strong>${formatPct(analysis.fb_impact_delta)}</strong></div>
+            <div class="compute-metric-row"><span>First Death Rate</span><strong>${formatPct(analysis.fd_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Attack Win Rate</span><strong>${formatPct(analysis.atk_win_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Defense Win Rate</span><strong>${formatPct(analysis.def_win_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Clutch Win Rate</span><strong>${formatPct(analysis.clutch_win_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Primary Win Condition</span><strong>${escapeHtml(String(analysis.primary_win_condition || "mixed"))}</strong></div>
+            <div class="compute-findings-wrap">
+                <div class="compute-findings-title">Findings</div>
+                <ul class="compute-findings-list">${findingsHtml}</ul>
+            </div>
+        </div>
     `;
+}
+
+function renderRoundAnalysisCardInCompute(analysis) {
+    const el = document.getElementById("compute-results");
+    if (!el) return;
+    const existing = el.querySelector(".compute-round-card");
+    if (existing) existing.remove();
+    el.insertAdjacentHTML("beforeend", renderRoundAnalysisCard(analysis));
+}
+
+function formatSignedPct(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "0.0%";
+    return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function renderTeammateChemistryCard(analysis) {
+    if (!analysis || analysis.error) {
+        const reason = analysis?.error || "No teammate chemistry data available.";
+        return `
+            <div class="compute-card compute-chem-card">
+                <div class="compute-label">Teammate Chemistry (V3)</div>
+                <div class="compute-value">${escapeHtml(reason)}</div>
+            </div>
+        `;
+    }
+
+    const best = analysis.best_teammate || null;
+    const worst = analysis.worst_teammate || null;
+    const mostPlayed = analysis.most_played_with || null;
+    const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+    const findingsHtml = findings.length
+        ? findings
+              .map((f) => {
+                  const sev = String(f?.severity || "info").toLowerCase();
+                  const sevClass = sev === "critical" ? "compute-sev-critical" : sev === "warning" ? "compute-sev-warning" : "compute-sev-info";
+                  const label = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
+                  return `<li class="compute-finding ${sevClass}"><strong>${label}:</strong> ${escapeHtml(f?.message || "")}</li>`;
+              })
+              .join("")
+        : '<li class="compute-finding compute-sev-info"><strong>Info:</strong> No findings generated.</li>';
+
+    const teammateLine = (label, row, deltaSigned = true) => {
+        if (!row) {
+            return `<div class="compute-metric-row"><span>${label}</span><strong>N/A</strong></div>`;
+        }
+        const delta = deltaSigned ? formatSignedPct(row.chemistry_delta) : formatPct(row.chemistry_delta);
+        return `<div class="compute-metric-row"><span>${label}</span><strong>${escapeHtml(row.teammate)} (${toNumber(row.shared_matches, 0)} | ${delta})</strong></div>`;
+    };
+
+    return `
+        <div class="compute-card compute-chem-card">
+            <div class="compute-label">Teammate Chemistry (V3)</div>
+            <div class="compute-metric-row"><span>Baseline Win Rate</span><strong>${formatPct(analysis.baseline_win_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Matches Analyzed</span><strong>${toNumber(analysis.total_matches_analyzed, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Unique Teammates</span><strong>${toNumber(analysis.unique_teammates_seen, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Reliable Teammates</span><strong>${toNumber(analysis.reliable_teammate_count, 0)}</strong></div>
+            ${teammateLine("Best Teammate", best)}
+            ${teammateLine("Toughest Queue", worst)}
+            ${teammateLine("Most Played With", mostPlayed)}
+            <div class="compute-findings-wrap">
+                <div class="compute-findings-title">Findings</div>
+                <ul class="compute-findings-list">${findingsHtml}</ul>
+            </div>
+        </div>
+    `;
+}
+
+function renderTeammateChemistryCardInCompute(analysis) {
+    const el = document.getElementById("compute-results");
+    if (!el) return;
+    const existing = el.querySelector(".compute-chem-card");
+    if (existing) existing.remove();
+    el.insertAdjacentHTML("beforeend", renderTeammateChemistryCard(analysis));
+}
+
+function renderLobbyQualityCard(analysis) {
+    if (!analysis || analysis.error) {
+        const reason = analysis?.error || "No lobby quality data available.";
+        return `
+            <div class="compute-card compute-lobby-card">
+                <div class="compute-label">Lobby Quality (V3)</div>
+                <div class="compute-value">${escapeHtml(reason)}</div>
+            </div>
+        `;
+    }
+
+    const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+    const findingsHtml = findings.length
+        ? findings
+              .map((f) => {
+                  const sev = String(f?.severity || "info").toLowerCase();
+                  const sevClass = sev === "critical" ? "compute-sev-critical" : sev === "warning" ? "compute-sev-warning" : "compute-sev-info";
+                  const label = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
+                  return `<li class="compute-finding ${sevClass}"><strong>${label}:</strong> ${escapeHtml(f?.message || "")}</li>`;
+              })
+              .join("")
+        : '<li class="compute-finding compute-sev-info"><strong>Info:</strong> No findings generated.</li>';
+
+    return `
+        <div class="compute-card compute-lobby-card">
+            <div class="compute-label">Lobby Quality (V3)</div>
+            <div class="compute-metric-row"><span>Matches Analyzed</span><strong>${toNumber(analysis.matches_analyzed, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Your Avg RP</span><strong>${toNumber(analysis.avg_my_rp, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Enemy Avg RP</span><strong>${toNumber(analysis.avg_enemy_rp, 0)}</strong></div>
+            <div class="compute-metric-row"><span>RP Diff (You-Enemy)</span><strong>${toNumber(analysis.avg_rp_diff, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Overall Win Rate</span><strong>${formatPct(analysis.overall_win_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Vs Higher RP</span><strong>${formatPct(analysis.win_rate_vs_higher)}</strong></div>
+            <div class="compute-metric-row"><span>Vs Even RP</span><strong>${formatPct(analysis.win_rate_vs_even)}</strong></div>
+            <div class="compute-metric-row"><span>Vs Lower RP</span><strong>${formatPct(analysis.win_rate_vs_lower)}</strong></div>
+            <div class="compute-findings-wrap">
+                <div class="compute-findings-title">Findings</div>
+                <ul class="compute-findings-list">${findingsHtml}</ul>
+            </div>
+        </div>
+    `;
+}
+
+function renderTradeAnalysisCard(analysis) {
+    if (!analysis || analysis.error) {
+        const reason = analysis?.error || "No trade analysis data available.";
+        return `
+            <div class="compute-card compute-trade-card">
+                <div class="compute-label">Trade Analysis (V3)</div>
+                <div class="compute-value">${escapeHtml(reason)}</div>
+            </div>
+        `;
+    }
+
+    const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+    const findingsHtml = findings.length
+        ? findings
+              .map((f) => {
+                  const sev = String(f?.severity || "info").toLowerCase();
+                  const sevClass = sev === "critical" ? "compute-sev-critical" : sev === "warning" ? "compute-sev-warning" : "compute-sev-info";
+                  const label = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
+                  return `<li class="compute-finding ${sevClass}"><strong>${label}:</strong> ${escapeHtml(f?.message || "")}</li>`;
+              })
+              .join("")
+        : '<li class="compute-finding compute-sev-info"><strong>Info:</strong> No findings generated.</li>';
+
+    const citations = Array.isArray(analysis.citations) ? analysis.citations : [];
+    const citationHtml = citations.length
+        ? `<div class="compute-findings-wrap"><div class="compute-findings-title">Examples</div><ul class="compute-findings-list">${citations.map((c) => `<li class=\"compute-finding compute-sev-info\">${escapeHtml(c)}</li>`).join("")}</ul></div>`
+        : "";
+
+    return `
+        <div class="compute-card compute-trade-card">
+            <div class="compute-label">Trade Analysis (V3)</div>
+            <div class="compute-metric-row"><span>Window</span><strong>${toNumber(analysis.window_seconds, 5)}s</strong></div>
+            <div class="compute-metric-row"><span>Matches Analyzed</span><strong>${toNumber(analysis.matches_analyzed, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Total Deaths</span><strong>${toNumber(analysis.total_deaths, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Traded Deaths</span><strong>${toNumber(analysis.traded_deaths, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Trade Rate</span><strong>${formatPct(analysis.trade_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Direct Refrags</span><strong>${toNumber(analysis.direct_refrags, 0)}</strong></div>
+            <div class="compute-metric-row"><span>Direct Refrag Rate</span><strong>${formatPct(analysis.direct_refrag_rate)}</strong></div>
+            <div class="compute-metric-row"><span>Avg Trade Time</span><strong>${toNumber(analysis.avg_trade_time_seconds, 0).toFixed(2)}s</strong></div>
+            <div class="compute-findings-wrap">
+                <div class="compute-findings-title">Findings</div>
+                <ul class="compute-findings-list">${findingsHtml}</ul>
+            </div>
+            ${citationHtml}
+        </div>
+    `;
+}
+
+function logInsights(message, level = "info") {
+    const logEl = document.getElementById("insights-log");
+    if (!logEl) return;
+    const entry = document.createElement("div");
+    entry.className = `log-entry log-${level}`;
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    logEl.appendChild(entry);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function normalizeFindingSeverity(value) {
+    const sev = String(value || "info").toLowerCase();
+    if (sev === "critical" || sev === "warning" || sev === "info") return sev;
+    return "info";
+}
+
+function findingSeverityIcon(severity) {
+    if (severity === "critical") return "✗";
+    if (severity === "warning") return "⚠";
+    return "✓";
+}
+
+function toPctValue(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, n));
+}
+
+function renderInsightsFindings(findings) {
+    const list = Array.isArray(findings) ? findings : [];
+    if (!list.length) {
+        return `
+            <div class="insights-finding-chip insights-sev-info">
+                <div class="insights-finding-main">
+                    <span class="insights-finding-icon">✓</span>
+                    <span class="insights-finding-message">No findings generated.</span>
+                </div>
+            </div>
+        `;
+    }
+    return list
+        .map((finding) => {
+            const severity = normalizeFindingSeverity(finding?.severity);
+            const citations = Array.isArray(finding?.citations) ? finding.citations : [];
+            const citesHtml = citations.length
+                ? `<div class="insights-finding-cites">${citations.map((c) => `<div class="insights-finding-cite">${escapeHtml(String(c))}</div>`).join("")}</div>`
+                : "";
+            return `
+                <div class="insights-finding-chip insights-sev-${severity}">
+                    <div class="insights-finding-main">
+                        <span class="insights-finding-icon">${findingSeverityIcon(severity)}</span>
+                        <span class="insights-finding-message">${escapeHtml(String(finding?.message || ""))}</span>
+                    </div>
+                    ${citesHtml}
+                </div>
+            `;
+        })
+        .join("");
+}
+
+function renderRoundReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Round Analysis</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No round analysis data available.")}</div>
+            </section>
+        `;
+    }
+    const atk = toPctValue(analysis.atk_win_rate);
+    const def = toPctValue(analysis.def_win_rate);
+    const fbDelta = Number(analysis.fb_impact_delta) || 0;
+    const fbDeltaClass = fbDelta < 0 ? "insights-negative" : "insights-positive";
+    const roundWin = toPctValue(analysis.overall_round_win_rate);
+    const clutchWin = toPctValue(analysis.clutch_win_rate);
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Round Analysis</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Total rounds <strong>${toNumber(analysis.total_rounds, 0)}</strong></span>
+                    <span>Data quality <strong>${escapeHtml(String(analysis.data_quality || "unknown"))}</strong></span>
+                </div>
+            </header>
+            <div class="insights-side-bars">
+                <div class="insights-side-col">
+                    <div class="insights-side-label">ATK ${formatPct(atk)}</div>
+                    <div class="insights-bar-track"><div class="insights-bar-fill insights-bar-atk" style="width:${atk.toFixed(1)}%"></div></div>
+                </div>
+                <div class="insights-side-col">
+                    <div class="insights-side-label">DEF ${formatPct(def)}</div>
+                    <div class="insights-bar-track"><div class="insights-bar-fill insights-bar-def" style="width:${def.toFixed(1)}%"></div></div>
+                </div>
+            </div>
+            <div class="insights-callout ${fbDeltaClass}">
+                <span class="insights-callout-label">FB Impact Delta</span>
+                <strong>${formatSignedPct(fbDelta)}</strong>
+            </div>
+            <div class="insights-gauges">
+                <div class="insights-gauge">
+                    <div class="insights-gauge-ring" style="--pct:${roundWin.toFixed(1)}"><span>${formatPct(roundWin)}</span></div>
+                    <div class="insights-gauge-label">Round Win Rate</div>
+                </div>
+                <div class="insights-gauge">
+                    <div class="insights-gauge-ring" style="--pct:${clutchWin.toFixed(1)}"><span>${formatPct(clutchWin)}</span></div>
+                    <div class="insights-gauge-label">Clutch Win Rate</div>
+                </div>
+            </div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderChemistryReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Teammate Chemistry</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No teammate chemistry data available.")}</div>
+            </section>
+        `;
+    }
+    const all = Array.isArray(analysis.all_teammates) ? analysis.all_teammates : [];
+    const ranked = all.slice(0, 8);
+    const best = analysis.best_teammate?.teammate || "";
+    const worst = analysis.worst_teammate?.teammate || "";
+    const reliable = all.filter((t) => t && t.reliable).sort((a, b) => toNumber(b.win_rate, 0) - toNumber(a.win_rate, 0));
+    const spread = reliable.length >= 2 ? Math.max(0, toNumber(reliable[0]?.win_rate, 0) - toNumber(reliable[reliable.length - 1]?.win_rate, 0)) : 0;
+    const listHtml = ranked.length
+        ? ranked
+              .map((row) => {
+                  const name = String(row?.teammate || "Unknown");
+                  const delta = toNumber(row?.chemistry_delta, 0);
+                  const tag = name === best ? "insights-teammate-best" : (name === worst ? "insights-teammate-worst" : "");
+                  const deltaClass = delta >= 0 ? "insights-delta-pos" : "insights-delta-neg";
+                  return `
+                      <div class="insights-teammate-row ${tag}">
+                          <div class="insights-teammate-name">${escapeHtml(name)}</div>
+                          <div class="insights-teammate-matches">${toNumber(row?.shared_matches, 0)} matches</div>
+                          <div class="insights-teammate-win">${formatPct(row?.win_rate)}</div>
+                          <div class="insights-teammate-delta ${deltaClass}">${formatSignedPct(delta)}</div>
+                      </div>
+                  `;
+              })
+              .join("")
+        : `<div class="insights-empty">No teammate ranking data available.</div>`;
+
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Teammate Chemistry</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Baseline <strong>${formatPct(analysis.baseline_win_rate)}</strong></span>
+                    <span>Reliable teammates <strong>${toNumber(analysis.reliable_teammate_count, 0)}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout ${spread >= 25 ? "insights-negative" : "insights-neutral"}">
+                <span class="insights-callout-label">Queue Impact Swing</span>
+                <strong>${formatPct(spread)} depending on who you queue with</strong>
+            </div>
+            <div class="insights-teammate-table">${listHtml}</div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderLobbyReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Lobby Quality</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No lobby quality data available.")}</div>
+            </section>
+        `;
+    }
+    const brackets = Array.isArray(analysis.bracket_data) ? analysis.bracket_data : [];
+    const bars = brackets.length
+        ? brackets
+              .map((b) => {
+                  const wr = toPctValue(b?.win_rate);
+                  return `
+                      <div class="insights-bracket-row">
+                          <div class="insights-bracket-label">${escapeHtml(String(b?.label || "Unknown"))}</div>
+                          <div class="insights-bar-track"><div class="insights-bar-fill insights-bar-lobby" style="width:${wr.toFixed(1)}%"></div></div>
+                          <div class="insights-bracket-value">${formatPct(wr)}</div>
+                      </div>
+                  `;
+              })
+              .join("")
+        : `<div class="insights-empty">No bracket breakdown data available.</div>`;
+    const evenWr = toNumber(analysis.win_rate_vs_even, 0);
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Lobby Quality</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Matches analyzed <strong>${toNumber(analysis.matches_analyzed, 0)}</strong></span>
+                    <span>RP diff <strong>${toNumber(analysis.avg_rp_diff, 0)}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout ${evenWr <= 20 ? "insights-critical" : "insights-neutral"}">
+                <span class="insights-callout-label">You vs Even RP</span>
+                <strong>${formatPct(evenWr)}</strong>
+            </div>
+            <div class="insights-brackets">${bars}</div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderTradeReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Trade Analysis</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No trade analysis data available.")}</div>
+            </section>
+        `;
+    }
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Trade Analysis</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Trade rate <strong>${formatPct(analysis.trade_rate)}</strong></span>
+                    <span>Avg trade time <strong>${toNumber(analysis.avg_trade_time_seconds, 0).toFixed(2)}s</strong></span>
+                </div>
+            </header>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis) {
+    const el = document.getElementById("insights-results");
+    if (!el) return;
+    const lastUpdated = new Date().toLocaleString();
+    const allFindings = [
+        ...(Array.isArray(roundAnalysis?.findings) ? roundAnalysis.findings : []),
+        ...(Array.isArray(teammateChemistry?.findings) ? teammateChemistry.findings : []),
+        ...(Array.isArray(lobbyQuality?.findings) ? lobbyQuality.findings : []),
+        ...(Array.isArray(tradeAnalysis?.findings) ? tradeAnalysis.findings : []),
+    ];
+    const severityCounts = { critical: 0, warning: 0, info: 0 };
+    for (const finding of allFindings) {
+        const sev = normalizeFindingSeverity(finding?.severity);
+        severityCounts[sev] += 1;
+    }
+    el.innerHTML = `
+        <div class="insights-summary-banner">
+            <span><strong>${severityCounts.warning}</strong> warnings</span>
+            <span><strong>${severityCounts.critical}</strong> critical</span>
+            <span><strong>${severityCounts.info}</strong> info</span>
+        </div>
+        <div class="insights-grid">
+            ${renderRoundReportCard(roundAnalysis, lastUpdated)}
+            ${renderChemistryReportCard(teammateChemistry, lastUpdated)}
+            ${renderLobbyReportCard(lobbyQuality, lastUpdated)}
+            ${renderTradeReportCard(tradeAnalysis, lastUpdated)}
+        </div>
+    `;
+}
+
+async function runInsights(explicitUsername = "") {
+    const username = (explicitUsername || document.getElementById("insights-username")?.value || "").trim();
+    if (!username) {
+        logInsights("Enter a username before running insights.", "error");
+        return;
+    }
+    try {
+        const [roundRes, chemistryRes, lobbyRes, tradeRes] = await Promise.all([
+            fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
+            fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
+            fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
+        ]);
+
+        let roundAnalysis = null;
+        let teammateChemistry = null;
+        let lobbyQuality = null;
+        let tradeAnalysis = null;
+        if (roundRes.ok) {
+            roundAnalysis = (await roundRes.json())?.analysis || null;
+        }
+        if (chemistryRes.ok) {
+            teammateChemistry = (await chemistryRes.json())?.analysis || null;
+        }
+        if (lobbyRes.ok) {
+            lobbyQuality = (await lobbyRes.json())?.analysis || null;
+        }
+        if (tradeRes.ok) {
+            tradeAnalysis = (await tradeRes.json())?.analysis || null;
+        }
+
+        renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis);
+        logInsights(`Ran insight plugins for ${username}.`, "success");
+        if (!roundRes.ok) logInsights(`Round analysis unavailable (HTTP ${roundRes.status}).`, "error");
+        if (!chemistryRes.ok) logInsights(`Teammate chemistry unavailable (HTTP ${chemistryRes.status}).`, "error");
+        if (!lobbyRes.ok) logInsights(`Lobby quality unavailable (HTTP ${lobbyRes.status}).`, "error");
+        if (!tradeRes.ok) logInsights(`Trade analysis unavailable (HTTP ${tradeRes.status}).`, "error");
+    } catch (err) {
+        logInsights(`Failed to run insights: ${err}`, "error");
+    }
 }
 
 async function runStatComputation(explicitUsername = "") {
@@ -1644,11 +2688,35 @@ async function runStatComputation(explicitUsername = "") {
         return;
     }
     try {
-        const res = await fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=100`);
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
+        const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes] = await Promise.all([
+            fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=100`),
+            fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
+            fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
+            fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
+        ]);
+        if (!matchesRes.ok) {
+            throw new Error(`HTTP ${matchesRes.status}`);
         }
-        const payload = await res.json();
+        const payload = await matchesRes.json();
+        let roundAnalysis = null;
+        if (roundRes.ok) {
+            const roundPayload = await roundRes.json();
+            roundAnalysis = roundPayload?.analysis || null;
+        }
+        let teammateChemistry = null;
+        if (chemistryRes.ok) {
+            const chemistryPayload = await chemistryRes.json();
+            teammateChemistry = chemistryPayload?.analysis || null;
+        }
+        let lobbyQuality = null;
+        if (lobbyRes.ok) {
+            lobbyQuality = (await lobbyRes.json())?.analysis || null;
+        }
+        let tradeAnalysis = null;
+        if (tradeRes.ok) {
+            tradeAnalysis = (await tradeRes.json())?.analysis || null;
+        }
         const matches = Array.isArray(payload.matches) ? payload.matches : [];
         const emptyBucket = () => ({
             matches: 0,
@@ -1680,11 +2748,20 @@ async function runStatComputation(explicitUsername = "") {
             };
         };
         if (!matches.length) {
-            renderComputeCards({
+            const stats = {
                 overall: finalize(buckets.overall),
                 ranked: finalize(buckets.ranked),
                 unranked: finalize(buckets.unranked),
-            });
+            };
+            computeReportState = {
+                ...computeReportState,
+                stats,
+                round: roundAnalysis,
+                chemistry: teammateChemistry,
+                lobby: lobbyQuality,
+                trade: tradeAnalysis,
+            };
+            renderComputeCards(stats);
             logCompute(`No stored matches found for ${username}.`, "info");
             return;
         }
@@ -1733,16 +2810,37 @@ async function runStatComputation(explicitUsername = "") {
             }
         }
 
-        renderComputeCards({
+        const stats = {
             overall: finalize(buckets.overall),
             ranked: finalize(buckets.ranked),
             unranked: finalize(buckets.unranked),
-        });
+        };
+        computeReportState = {
+            ...computeReportState,
+            stats,
+            round: roundAnalysis,
+            chemistry: teammateChemistry,
+            lobby: lobbyQuality,
+            trade: tradeAnalysis,
+        };
+        renderComputeCards(stats);
         logCompute(
             `Computed stats for ${username}: overall ${buckets.overall.matches}, ` +
             `ranked ${buckets.ranked.matches}, unranked ${buckets.unranked.matches}.`,
             "success"
         );
+        if (!roundRes.ok) {
+            logCompute(`Round analysis unavailable (HTTP ${roundRes.status}).`, "error");
+        }
+        if (!chemistryRes.ok) {
+            logCompute(`Teammate chemistry unavailable (HTTP ${chemistryRes.status}).`, "error");
+        }
+        if (!lobbyRes.ok) {
+            logCompute(`Lobby quality unavailable (HTTP ${lobbyRes.status}).`, "error");
+        }
+        if (!tradeRes.ok) {
+            logCompute(`Trade analysis unavailable (HTTP ${tradeRes.status}).`, "error");
+        }
     } catch (err) {
         logCompute(`Failed stat computation: ${err}`, "error");
     }
@@ -1752,8 +2850,9 @@ document.getElementById("start-scan").addEventListener("click", startScan);
 document.getElementById("stop-scan").addEventListener("click", stopScan);
 document.getElementById("start-match-scrape").addEventListener("click", startMatchScrape);
 document.getElementById("stop-match-scrape").addEventListener("click", stopMatchScrape);
-document.getElementById("load-saved-matches").addEventListener("click", () => loadSavedMatches("", true));
 document.getElementById("load-stored-matches").addEventListener("click", () => loadStoredMatchesView("", false));
+document.getElementById("unpack-stored-matches").addEventListener("click", () => unpackStoredMatches(""));
+document.getElementById("delete-bad-stored-matches").addEventListener("click", () => deleteBadStoredMatches(""));
 document.getElementById("stored-detail-close").addEventListener("click", closeStoredDetail);
 document.getElementById("stored-show-ranked").addEventListener("change", () => {
     renderStoredMatches(storedMatchesSource, currentStoredUsername);
@@ -1764,8 +2863,17 @@ document.getElementById("stored-show-unranked").addEventListener("change", () =>
 document.getElementById("tab-scanner").addEventListener("click", () => setActiveTab("scanner"));
 document.getElementById("tab-matches").addEventListener("click", () => setActiveTab("matches"));
 document.getElementById("tab-stored").addEventListener("click", () => setActiveTab("stored"));
-document.getElementById("tab-compute").addEventListener("click", () => setActiveTab("compute"));
+document.getElementById("tab-dashboard").addEventListener("click", () => setActiveTab("dashboard"));
 document.getElementById("run-stat-compute").addEventListener("click", () => runStatComputation(""));
+document.getElementById("matches-run-forever").addEventListener("change", syncContinuousControls);
+document.getElementById("matches-newest-only").addEventListener("change", syncScrapeModeControls);
+document.getElementById("matches-full-backfill").addEventListener("change", syncScrapeModeControls);
+document.querySelectorAll(".compute-mode-toggle .compute-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+        computeReportState.mode = chip.dataset.mode || "overall";
+        renderComputeReport();
+    });
+});
 
 window.addEventListener("error", (event) => {
     log(`JS error: ${event.message}`, "error");
@@ -1776,6 +2884,7 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 loadOperatorImageIndex();
+syncScrapeModeControls();
 initNetwork();
 log("Ready to scan. Enter a username and click Start Scan.");
 logMatch("Ready to scrape matches. Enter a username and click Scrape Matches.");

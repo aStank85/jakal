@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
 from collections import deque
+import json
 import os
 import random
 import re
@@ -16,6 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.api_client import TrackerAPIClient
 from src.database import Database
+from src.plugins.v3_round_analysis import RoundAnalysisPlugin
+from src.plugins.v3_teammate_chemistry import TeammateChemistryPlugin
+from src.plugins.v3_lobby_quality import LobbyQualityPlugin
+from src.plugins.v3_trade_analysis import TradeAnalysisPlugin
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
@@ -194,6 +199,61 @@ async def scraped_matches(username: str, limit: int = 50) -> dict:
         return {"username": username, "matches": matches, "count": len(matches)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load saved matches: {str(e)}")
+
+
+@app.post("/api/unpack-scraped-matches/{username}")
+async def unpack_scraped_matches(username: str, limit: int = 2000) -> dict:
+    safe_limit = max(1, min(limit, 5000))
+    try:
+        stats = db.unpack_pending_scraped_match_cards(username=username, limit=safe_limit)
+        return {"username": username, "limit": safe_limit, "stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unpack scraped matches: {str(e)}")
+
+
+@app.post("/api/delete-bad-scraped-matches/{username}")
+async def delete_bad_scraped_matches(username: str) -> dict:
+    try:
+        stats = db.delete_bad_scraped_matches(username)
+        return {"username": username, "stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete bad scraped matches: {str(e)}")
+
+
+@app.get("/api/round-analysis/{username}")
+async def round_analysis(username: str) -> dict:
+    try:
+        analysis = RoundAnalysisPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run round analysis: {str(e)}")
+
+
+@app.get("/api/teammate-chemistry/{username}")
+async def teammate_chemistry(username: str) -> dict:
+    try:
+        analysis = TeammateChemistryPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run teammate chemistry: {str(e)}")
+
+
+@app.get("/api/lobby-quality/{username}")
+async def lobby_quality(username: str) -> dict:
+    try:
+        analysis = LobbyQualityPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run lobby quality: {str(e)}")
+
+
+@app.get("/api/trade-analysis/{username}")
+async def trade_analysis(username: str, window_seconds: float = 5.0) -> dict:
+    try:
+        analysis = TradeAnalysisPlugin(db, username, window_seconds=window_seconds).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run trade analysis: {str(e)}")
 
 
 @app.websocket("/ws/scan")
@@ -814,11 +874,35 @@ async def scrape_match_history(
     username: str,
     max_matches: int = 10,
     debug_browser: bool = False,
+    newest_only: bool = False,
+    full_backfill: bool = False,
+    allowed_match_types: list[str] | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     """
     Scrape detailed match history for a player.
     """
     browser = None
+
+    allowed_types_norm = {
+        str(t or "").strip().lower() for t in (allowed_match_types or []) if str(t or "").strip()
+    }
+    if full_backfill and newest_only:
+        newest_only = False
+
+    def _normalize_match_type(raw_mode: object) -> str:
+        text = str(raw_mode or "").strip().lower()
+        if "unranked" in text:
+            return "unranked"
+        if "ranked" in text:
+            return "ranked"
+        if "quick" in text:
+            return "quick"
+        if "standard" in text:
+            return "standard"
+        if "event" in text:
+            return "event"
+        return "other"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=not debug_browser)
@@ -926,6 +1010,20 @@ async def scrape_match_history(
                     return m.group(1)
                 m = re.search(r"([0-9a-fA-F-]{36})", text)
                 return m.group(1) if m else ""
+
+            async def _extract_row_match_id_from_dom(row) -> str:
+                try:
+                    href = await row.get_attribute("href")
+                    mid = _extract_match_id(href or "")
+                    if mid:
+                        return mid
+                except Exception:
+                    pass
+                try:
+                    html = await row.inner_html()
+                    return _extract_match_id(html or "")
+                except Exception:
+                    return ""
 
             def _extract_operator_name(raw: object) -> str:
                 if isinstance(raw, str):
@@ -1192,12 +1290,17 @@ async def scrape_match_history(
 
             matches_data = []
             existing_match_ids = set()
+            fully_scraped_match_ids = set()
             try:
                 existing_match_ids = db.get_existing_scraped_match_ids(username)
+                fully_scraped_match_ids = db.get_fully_scraped_match_ids(username)
                 await websocket.send_json(
                     {
                         "type": "debug",
-                        "message": f"Loaded {len(existing_match_ids)} existing stored match IDs for {username}",
+                        "message": (
+                            f"Loaded {len(existing_match_ids)} existing stored match IDs and "
+                            f"{len(fully_scraped_match_ids)} fully scraped match IDs for {username}"
+                        ),
                     }
                 )
             except Exception as e:
@@ -1213,12 +1316,6 @@ async def scrape_match_history(
                 cls = await row.get_attribute("class") or ""
                 if "v3-match-row--unavailable" in cls:
                     continue
-                try:
-                    row_text = await row.inner_text()
-                    if "Quick Match" in row_text or "Event" in row_text:
-                        continue
-                except Exception:
-                    pass
                 available_match_indexes.append(idx)
 
             await websocket.send_json(
@@ -1231,46 +1328,436 @@ async def scrape_match_history(
                 }
             )
 
-            # Fast path: newest rows are usually already scraped.
-            # Skip an initial window equal to known stored IDs to avoid needless clicks.
-            skip_count = min(len(existing_match_ids), len(available_match_indexes))
-            candidate_match_indexes = available_match_indexes[skip_count:]
-            if not candidate_match_indexes:
+            if full_backfill:
                 candidate_match_indexes = available_match_indexes
-            if skip_count > 0:
+                checkpoint_mode_key = "full_backfill"
+                checkpoint_filter_key = ",".join(sorted(allowed_types_norm)) if allowed_types_norm else "*"
+                resume_skip_remaining = 0
+                try:
+                    checkpoint_seed = db.get_scrape_checkpoint_skip_count(
+                        username,
+                        checkpoint_mode_key,
+                        checkpoint_filter_key,
+                    )
+                    if checkpoint_seed > 0:
+                        resume_skip_remaining = checkpoint_seed
+                    else:
+                        resume_skip_remaining = db.count_fully_scraped_match_ids(username, allowed_types_norm)
+                except Exception:
+                    resume_skip_remaining = 0
+                resume_skip_checkpoint = resume_skip_remaining
                 await websocket.send_json(
                     {
                         "type": "debug",
                         "message": (
-                            f"Fast-skip enabled: skipping first {skip_count} rows based on "
-                            f"{len(existing_match_ids)} stored IDs"
+                            "Full backfill mode enabled: scanning all available rows and "
+                            "loading until Load More is exhausted."
                         ),
                     }
                 )
+                if resume_skip_remaining > 0:
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": (
+                                "Full backfill resume optimization: skipping first "
+                                f"{resume_skip_remaining} previously validated rows for this filter."
+                            ),
+                        }
+                    )
+            elif newest_only:
+                candidate_match_indexes = available_match_indexes
+                await websocket.send_json(
+                    {
+                        "type": "debug",
+                        "message": (
+                            "Newest-only mode enabled: scanning from newest to oldest and "
+                            "stopping at first already-stored match ID."
+                        ),
+                    }
+                )
+            else:
+                # Fast path: newest rows are usually already scraped.
+                # Skip an initial window equal to known stored IDs to avoid needless clicks.
+                skip_count = min(len(existing_match_ids), len(available_match_indexes))
+                candidate_match_indexes = available_match_indexes[skip_count:]
+                if not candidate_match_indexes:
+                    candidate_match_indexes = available_match_indexes
+                if skip_count > 0:
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": (
+                                f"Fast-skip enabled: skipping first {skip_count} rows based on "
+                                f"{len(existing_match_ids)} stored IDs"
+                            ),
+                        }
+                    )
 
-            target_new_matches = max_matches
+            target_new_matches = max(1, int(max_matches))
             newly_captured = 0
             consecutive_dupes = 0
+            rows_scanned = 0
             discovered_ids = set()
+            matches_backfill = []
+            seen_row_indexes = set()
+            row_match_id_cache = {}
+
+            async def _click_load_more_if_available(previous_count: int) -> bool:
+                await _ensure_match_list_state()
+                selectors = [
+                    page.get_by_role("button", name=re.compile(r"load more", re.I)).first,
+                    page.locator("button:has-text('Load More')").first,
+                    page.locator(".v3-button:has-text('Load More')").first,
+                ]
+                for attempt in range(1, 4):
+                    try:
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(random.randint(300, 700))
+
+                    clicked = False
+                    click_error = ""
+                    for locator in selectors:
+                        try:
+                            if await locator.count() == 0:
+                                continue
+                            await locator.scroll_into_view_if_needed()
+                            await page.wait_for_timeout(random.randint(120, 260))
+                            await locator.click(timeout=3500)
+                            clicked = True
+                            break
+                        except Exception as e:
+                            click_error = str(e)
+                            continue
+
+                    if not clicked:
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    f"Load More attempt {attempt}/3: button not clickable"
+                                    + (f" ({click_error})" if click_error else "")
+                                ),
+                            }
+                        )
+                        continue
+
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": f"Clicked Load More (attempt {attempt}/3)",
+                        }
+                    )
+                    for _ in range(24):
+                        await page.wait_for_timeout(300)
+                        try:
+                            current_rows = await page.query_selector_all(".v3-match-row")
+                        except Exception:
+                            current_rows = []
+                        if len(current_rows) > previous_count:
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": (
+                                        f"Load More succeeded: rows {previous_count} -> "
+                                        f"{len(current_rows)}"
+                                    ),
+                                }
+                            )
+                            return True
+
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": (
+                                f"Load More attempt {attempt}/3 clicked but row count stayed at "
+                                f"{previous_count}"
+                            ),
+                        }
+                    )
+                await websocket.send_json(
+                    {
+                        "type": "debug",
+                        "message": "Load More unavailable or exhausted; no additional rows loaded",
+                    }
+                )
+                return False
+
+            async def _ensure_match_list_state() -> None:
+                # If detail view navigated to a dedicated page, go back first.
+                if page.url != url:
+                    try:
+                        await page.go_back(wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(random.randint(500, 900))
+                    except Exception:
+                        pass
+
+                # If details are inline, close/dismiss them so row clicks and Load More are not blocked.
+                close_selectors = [
+                    page.get_by_role("button", name=re.compile(r"close|back", re.I)).first,
+                    page.locator("button:has-text('Close')").first,
+                    page.locator("button:has-text('Back')").first,
+                    page.locator("[aria-label*='Close']").first,
+                    page.locator("[class*='close']").first,
+                ]
+                for _ in range(2):
+                    closed = False
+                    for locator in close_selectors:
+                        try:
+                            if await locator.count() == 0:
+                                continue
+                            if not await locator.is_visible():
+                                continue
+                            await locator.click(timeout=2000)
+                            await page.wait_for_timeout(random.randint(250, 450))
+                            closed = True
+                            break
+                        except Exception:
+                            continue
+                    if closed:
+                        continue
+                    try:
+                        await page.keyboard.press("Escape")
+                        await page.wait_for_timeout(random.randint(220, 420))
+                    except Exception:
+                        pass
+
+                # Re-anchor on match list surface.
+                try:
+                    matches_link = page.get_by_role("link", name="Matches", exact=True)
+                    if await matches_link.count() > 0:
+                        await matches_link.click(timeout=2000)
+                        await page.wait_for_timeout(random.randint(350, 700))
+                except Exception:
+                    pass
+                try:
+                    await page.wait_for_selector(".v3-match-row", timeout=8000, state="visible")
+                except Exception:
+                    pass
+
+            async def _probe_row_match_id(row_index: int) -> str:
+                """
+                Open a row briefly and capture only the match ID from API traffic.
+                Used for chunk-boundary checks when IDs are not present in DOM.
+                """
+                await _ensure_match_list_state()
+                match_elements = await page.query_selector_all(".v3-match-row")
+                if row_index < 0 or row_index >= len(match_elements):
+                    return ""
+
+                captured_mid = ""
+
+                async def _capture_probe_response(response):
+                    nonlocal captured_mid
+                    if captured_mid:
+                        return
+                    response_url = response.url
+                    if "/api/v2/r6siege/standard/matches/" not in response_url:
+                        return
+                    m = re.search(r"/matches/([0-9a-fA-F-]{36})", response_url)
+                    if m:
+                        captured_mid = m.group(1)
+
+                page.on("response", _capture_probe_response)
+                try:
+                    row = match_elements[row_index]
+                    await row.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(random.randint(200, 420))
+                    await row.evaluate("element => element.click()")
+                    for _ in range(16):
+                        if captured_mid:
+                            break
+                        await asyncio.sleep(0.35)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        page.remove_listener("response", _capture_probe_response)
+                    except Exception:
+                        pass
+                    await _ensure_match_list_state()
+
+                return captured_mid
+
             await websocket.send_json(
                 {
                     "type": "debug",
                     "message": (
-                        f"Targeting {target_new_matches} new matches "
-                        f"(early-stop after 5 consecutive stored/duplicate IDs)"
+                        f"Targeting up to {target_new_matches} new matches "
+                        f"(mode={'full_backfill' if full_backfill else ('newest' if newest_only else 'standard')})"
                     ),
                 }
             )
 
-            for i, row_index in enumerate(candidate_match_indexes):
-                if newly_captured >= target_new_matches:
+            cursor = 0
+            chunk_size = 24
+            if not full_backfill:
+                resume_skip_remaining = 0
+                resume_skip_checkpoint = 0
+                checkpoint_mode_key = ""
+                checkpoint_filter_key = ""
+            while True:
+                if stop_event and stop_event.is_set():
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": "Graceful stop: current match completed, exiting before next match.",
+                        }
+                    )
                     break
+                if not full_backfill and newly_captured >= target_new_matches:
+                    break
+                await _ensure_match_list_state()
+                if cursor >= len(candidate_match_indexes):
+                    previous_count = len(match_targets)
+                    did_expand = await _click_load_more_if_available(previous_count)
+                    if not did_expand:
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": "No more rows to scan; stopping match scrape loop.",
+                            }
+                        )
+                        break
+                    match_targets = await page.query_selector_all(".v3-match-row")
+                    available_match_indexes = []
+                    new_available_match_indexes = []
+                    for idx, row in enumerate(match_targets):
+                        cls = await row.get_attribute("class") or ""
+                        if "v3-match-row--unavailable" in cls:
+                            continue
+                        available_match_indexes.append(idx)
+                        if idx not in seen_row_indexes:
+                            new_available_match_indexes.append(idx)
+                    candidate_match_indexes = new_available_match_indexes
+                    cursor = 0
+                    continue
+                if full_backfill and resume_skip_remaining > 0 and cursor < len(candidate_match_indexes):
+                    skip_now = min(resume_skip_remaining, len(candidate_match_indexes) - cursor)
+                    skipped_slice = candidate_match_indexes[cursor : cursor + skip_now]
+                    if skipped_slice:
+                        seen_row_indexes.update(skipped_slice)
+                    cursor += skip_now
+                    resume_skip_remaining -= skip_now
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": (
+                                f"Full backfill resume: fast-skipped {skip_now} already-complete rows "
+                                f"(remaining skip={resume_skip_remaining})."
+                            ),
+                        }
+                    )
+                    continue
+
+                # Startup fast path: click row 1 immediately, then boundary-check row 24
+                # so users don't wait on probes before the first visible action.
+                if newest_only and cursor == 1:
+                    probe_rows = await page.query_selector_all(".v3-match-row")
+                    card_start = 0
+                    card_end = chunk_size - 1
+                    if card_end < len(probe_rows):
+                        first_id = row_match_id_cache.get(card_start, "")
+                        if not first_id:
+                            first_id = await _extract_row_match_id_from_dom(probe_rows[card_start])
+                        last_id = await _extract_row_match_id_from_dom(probe_rows[card_end])
+                        used_api_probe = False
+                        if not last_id:
+                            last_id = await _probe_row_match_id(card_end)
+                            used_api_probe = used_api_probe or bool(last_id)
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    "Chunk boundary probe: "
+                                    f"cards {card_start + 1}-{card_end + 1}, "
+                                    f"first_id={'yes' if first_id else 'no'}, "
+                                    f"last_id={'yes' if last_id else 'no'}, "
+                                    f"source={'api' if used_api_probe else 'dom'}"
+                                ),
+                            }
+                        )
+                        if (
+                            first_id
+                            and last_id
+                            and first_id in fully_scraped_match_ids
+                            and last_id in fully_scraped_match_ids
+                        ):
+                            # Row 1 already processed; skip directly to next page boundary.
+                            seen_row_indexes.update(range(card_start + 1, card_end + 1))
+                            cursor = chunk_size
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": (
+                                        "Chunk skip optimization: first and 24th card are fully stored; "
+                                        "jumping to Load More."
+                                    ),
+                                }
+                            )
+                            continue
+
+                # Chunk skip is based on rendered cards (24 cards per page), not "available match" count.
+                if newest_only and rows_scanned > 0 and (cursor % chunk_size == 0):
+                    probe_rows = await page.query_selector_all(".v3-match-row")
+                    card_start = cursor
+                    card_end = cursor + chunk_size - 1
+                    if card_end < len(probe_rows):
+                        first_id = await _extract_row_match_id_from_dom(probe_rows[card_start])
+                        last_id = await _extract_row_match_id_from_dom(probe_rows[card_end])
+                        used_api_probe = False
+                        if not first_id:
+                            first_id = await _probe_row_match_id(card_start)
+                            used_api_probe = used_api_probe or bool(first_id)
+                        if not last_id:
+                            last_id = await _probe_row_match_id(card_end)
+                            used_api_probe = used_api_probe or bool(last_id)
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    "Chunk boundary probe: "
+                                    f"cards {card_start + 1}-{card_end + 1}, "
+                                    f"first_id={'yes' if first_id else 'no'}, "
+                                    f"last_id={'yes' if last_id else 'no'}, "
+                                    f"source={'api' if used_api_probe else 'dom'}"
+                                ),
+                            }
+                        )
+                        if (
+                            first_id
+                            and last_id
+                            and first_id in fully_scraped_match_ids
+                            and last_id in fully_scraped_match_ids
+                        ):
+                            seen_row_indexes.update(range(card_start, card_end + 1))
+                            cursor += chunk_size
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": (
+                                        "Chunk skip optimization: 24 rendered cards in this block appear fully stored; "
+                                        f"skipping cards {card_start + 1}-{card_end + 1}."
+                                    ),
+                                }
+                            )
+                            continue
+
+                row_index = candidate_match_indexes[cursor]
+                cursor += 1
+                if row_index in seen_row_indexes:
+                    continue
+                seen_row_indexes.add(row_index)
+                rows_scanned += 1
                 opened_detail = False
                 try:
                     await websocket.send_json(
                         {
                             "type": "scraping_match",
-                            "match_number": len(matches_data) + 1,
+                            "match_number": rows_scanned,
+                            "new_matches": len(matches_data),
                             "total": target_new_matches,
                         }
                     )
@@ -1311,13 +1798,46 @@ async def scrape_match_history(
                     # Re-query rows each iteration (page reloads between matches)
                     match_elements = await page.query_selector_all(".v3-match-row")
                     if row_index >= len(match_elements):
-                        await websocket.send_json(
-                            {
-                                "type": "warning",
-                                "message": f"Match row index {row_index + 1} no longer available on page.",
-                            }
-                        )
-                        continue
+                        did_expand = await _click_load_more_if_available(len(match_elements))
+                        if did_expand:
+                            match_elements = await page.query_selector_all(".v3-match-row")
+                        if row_index >= len(match_elements):
+                            await websocket.send_json(
+                                {
+                                    "type": "warning",
+                                    "message": f"Match row index {row_index + 1} no longer available on page.",
+                                }
+                            )
+                            continue
+
+                    if full_backfill:
+                        quick_row_match_id = row_match_id_cache.get(row_index, "")
+                        if not quick_row_match_id:
+                            try:
+                                quick_row_match_id = await _extract_row_match_id_from_dom(match_elements[row_index])
+                            except Exception:
+                                quick_row_match_id = ""
+                            if quick_row_match_id:
+                                row_match_id_cache[row_index] = quick_row_match_id
+                        if quick_row_match_id and quick_row_match_id in fully_scraped_match_ids:
+                            if resume_skip_remaining == 0:
+                                resume_skip_checkpoint += 1
+                            await websocket.send_json(
+                                {
+                                    "type": "match_seen",
+                                    "status": "skipped_complete",
+                                    "match_data": {
+                                        "match_id": quick_row_match_id,
+                                        "map": "",
+                                        "mode": "",
+                                        "score_team_a": 0,
+                                        "score_team_b": 0,
+                                        "duration": "",
+                                        "date": "",
+                                    },
+                                }
+                            )
+                            continue
 
                     # Match ID is unknown until the API fires — start empty
                     current_match_id = ""
@@ -1347,24 +1867,6 @@ async def scrape_match_history(
                                         "message": f"Failed to parse match_summary API: {str(e)}",
                                     }
                                 )
-                        elif "/api/v1/r6siege/ow-ingest/match/get/" in response_url:
-                            if "round_data" in captured_api:
-                                return
-                            try:
-                                captured_api["round_data"] = await response.json()
-                                await websocket.send_json(
-                                    {
-                                        "type": "debug",
-                                        "message": f"Captured round_data API ({response.status})",
-                                    }
-                                )
-                            except Exception as e:
-                                await websocket.send_json(
-                                    {
-                                        "type": "warning",
-                                        "message": f"Failed to parse round_data API: {str(e)}",
-                                    }
-                                )
 
                     page.on("response", _capture_response)
                     try:
@@ -1377,7 +1879,7 @@ async def scrape_match_history(
                         await websocket.send_json(
                             {
                                 "type": "debug",
-                                "message": f"Clicked match row {i + 1}",
+                                "message": f"Clicked match row {rows_scanned}",
                             }
                         )
                         # Wait for the detail panel to open
@@ -1390,18 +1892,18 @@ async def scrape_match_history(
                             opened_detail = True  # Panel may be inline; proceed anyway
 
                         await page.wait_for_timeout(800)
-                        # Allow internal tracker API requests to fire and be intercepted.
-                        for _ in range(20):
-                            if "match_summary" in captured_api and "round_data" in captured_api:
+                        # Only summary capture is required for this pipeline.
+                        for _ in range(8):
+                            if "match_summary" in captured_api:
                                 break
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.25)
                         await websocket.send_json(
                             {
                                 "type": "debug",
                                 "message": (
-                                    f"API capture status for match {i + 1}: "
+                                    f"API capture status for match {rows_scanned}: "
                                     f"summary={'yes' if 'match_summary' in captured_api else 'no'}, "
-                                    f"rounds={'yes' if 'round_data' in captured_api else 'no'}"
+                                    "rounds=skipped (summary-first mode)"
                                 ),
                             }
                         )
@@ -1409,7 +1911,7 @@ async def scrape_match_history(
                         await websocket.send_json(
                             {
                                 "type": "warning",
-                                "message": f"Error while opening/capturing match {i + 1}: {str(e)}",
+                                "message": f"Error while opening/capturing match {rows_scanned}: {str(e)}",
                             }
                         )
                         continue
@@ -1429,8 +1931,8 @@ async def scrape_match_history(
                         "date": "",
                         "players": [],
                         "match_summary": captured_api.get("match_summary"),
-                        "round_data": captured_api.get("round_data"),
-                        "rounds": _parse_rounds(captured_api.get("round_data", {})),
+                        "round_data": {},
+                        "rounds": [],
                         "partial_capture": False,
                         "partial_reason": "",
                     }
@@ -1496,27 +1998,101 @@ async def scrape_match_history(
                             match_data["score_team_b"] = user_lost
 
                     match_id = (match_data.get("match_id") or "").strip()
-                    if match_id and (match_id in existing_match_ids or match_id in discovered_ids):
+                    if match_id:
+                        row_match_id_cache[row_index] = match_id
+
+                    is_known_pre = bool(match_id and (match_id in existing_match_ids or match_id in discovered_ids))
+                    is_complete_pre = bool(match_id and match_id in fully_scraped_match_ids)
+                    if full_backfill and is_known_pre and is_complete_pre:
+                        if resume_skip_remaining == 0:
+                            resume_skip_checkpoint += 1
+                        if match_id:
+                            discovered_ids.add(match_id)
+                        discovered_ids.update(variant_match_ids)
+                        await websocket.send_json(
+                            {
+                                "type": "match_seen",
+                                "status": "skipped_complete",
+                                "match_data": match_data,
+                            }
+                        )
+                        continue
+
+                    summary_present = bool(match_data.get("match_summary"))
+                    rounds_present = False
+
+                    is_known = bool(match_id and (match_id in existing_match_ids or match_id in discovered_ids))
+                    is_complete = bool(match_id and match_id in fully_scraped_match_ids)
+                    if full_backfill and is_known and is_complete:
+                        discovered_ids.update(variant_match_ids)
+                        await websocket.send_json(
+                            {
+                                "type": "match_seen",
+                                "status": "skipped_complete",
+                                "match_data": match_data,
+                            }
+                        )
+                        continue
+                    if is_known and is_complete:
                         consecutive_dupes += 1
                         discovered_ids.update(variant_match_ids)
+                        if summary_present or rounds_present:
+                            matches_backfill.append(match_data)
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": f"Queued duplicate {match_id} for metadata/round backfill.",
+                                }
+                            )
                         await websocket.send_json(
                             {
                                 "type": "debug",
                                 "message": (
-                                    f"Skipping already-stored/seen match {match_id} "
+                                    f"Skipping already-stored/seen fully-scraped match {match_id} "
                                     f"(dupe streak={consecutive_dupes})"
                                 ),
                             }
                         )
-                        if consecutive_dupes >= 5:
+                        if newest_only:
                             await websocket.send_json(
                                 {
                                     "type": "debug",
-                                    "message": "5 consecutive already-stored matches, stopping early",
+                                    "message": (
+                                        f"Newest-only: encountered fully-scraped stored match {match_id}; "
+                                        "continuing scan for additional unseen rows."
+                                    ),
                                 }
                             )
-                            break
+                        if consecutive_dupes >= 5:
+                            if newest_only:
+                                await websocket.send_json(
+                                    {
+                                        "type": "debug",
+                                        "message": (
+                                            "5 consecutive already-stored matches in newest-only mode; "
+                                            "boundary found, stopping."
+                                        ),
+                                    }
+                                )
+                                break
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": "5 consecutive already-stored matches, continuing to next rows",
+                                }
+                            )
+                            consecutive_dupes = 0
                         continue
+                    if is_known and not is_complete:
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    f"Known match {match_id} has partial/missing stored data; "
+                                    "re-scraping to fill gaps."
+                                ),
+                            }
+                        )
 
                     consecutive_dupes = 0
                     if match_id:
@@ -1529,6 +2105,24 @@ async def scrape_match_history(
                             match_data["map"] = (await map_elem.inner_text()).strip()
                     except Exception:
                         pass
+
+                    mode_key = _normalize_match_type(match_data.get("mode"))
+                    if (newest_only or full_backfill) and allowed_types_norm and mode_key not in allowed_types_norm:
+                        await websocket.send_json(
+                            {
+                                "type": "match_seen",
+                                "status": "filtered",
+                                "match_data": match_data,
+                            }
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "match_filtered",
+                                "mode": match_data.get("mode") or "Unknown",
+                                "match_id": match_id,
+                            }
+                        )
+                        continue
 
                     try:
                         # Only use DOM score as fallback when API score parsing failed.
@@ -1543,12 +2137,8 @@ async def scrape_match_history(
                     except Exception:
                         pass
 
-                    summary_present = bool(match_data.get("match_summary"))
-                    rounds_present = bool(match_data.get("round_data"))
-                    if summary_present and not rounds_present:
-                        reasons = ["round_data_missing"]
-                        if isinstance(metadata, dict) and metadata.get("extendedDataAvailable") is False:
-                            reasons.append("extendedDataAvailable=false")
+                    if not summary_present:
+                        reasons = ["summary_missing"]
                         match_data["partial_capture"] = True
                         match_data["partial_reason"] = ", ".join(reasons)
 
@@ -1655,10 +2245,10 @@ async def scrape_match_history(
                     if match_data.get("partial_capture"):
                         await websocket.send_json(
                             {
-                                "type": "warning",
+                                "type": "debug",
                                 "message": (
-                                    f"Partial capture for match {match_data.get('match_id') or i + 1}: "
-                                    f"{match_data.get('partial_reason')}"
+                                    f"Partial capture queued for unpack/recovery for match "
+                                    f"{match_data.get('match_id') or rows_scanned}: {match_data.get('partial_reason')}"
                                 ),
                             }
                         )
@@ -1667,20 +2257,19 @@ async def scrape_match_history(
                     await websocket.send_json(
                         {
                             "type": "error",
-                            "message": f"Error scraping match {i + 1}: {str(e)}",
+                            "message": f"Error scraping match {rows_scanned}: {str(e)}",
                         }
                     )
                     continue
                 finally:
-                    if opened_detail and page.url != url:
+                    if opened_detail:
                         try:
-                            await page.go_back(wait_until="domcontentloaded", timeout=20000)
-                            await page.wait_for_timeout(random.randint(800, 1200))
+                            await _ensure_match_list_state()
                         except Exception as nav_err:
                             await websocket.send_json(
                                 {
                                     "type": "warning",
-                                    "message": f"Failed to navigate back to matches list: {str(nav_err)}",
+                                    "message": f"Failed to reset matches list state: {str(nav_err)}",
                                 }
                             )
 
@@ -1688,18 +2277,55 @@ async def scrape_match_history(
                 {
                     "type": "match_scraping_complete",
                     "total_matches": len(matches_data),
+                    "rows_scanned": rows_scanned,
                 }
             )
 
             try:
-                db.save_scraped_match_cards(username, matches_data)
+                save_payload = list(matches_data)
+                save_payload.extend(matches_backfill)
+                db.save_scraped_match_cards(username, save_payload)
+                unpack_stats = db.unpack_pending_scraped_match_cards(username=username, limit=5000)
                 await websocket.send_json(
                     {
                         "type": "matches_saved",
                         "username": username,
                         "saved_matches": len(matches_data),
+                        "backfilled_matches": len(matches_backfill),
                     }
                 )
+                await websocket.send_json(
+                    {
+                        "type": "matches_unpacked",
+                        "username": username,
+                        "stats": unpack_stats,
+                    }
+                )
+                if full_backfill:
+                    try:
+                        db.set_scrape_checkpoint_skip_count(
+                            username,
+                            checkpoint_mode_key,
+                            checkpoint_filter_key,
+                            resume_skip_checkpoint,
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    "Full backfill checkpoint updated: "
+                                    f"skip_count={resume_skip_checkpoint} "
+                                    f"(filter={checkpoint_filter_key})"
+                                ),
+                            }
+                        )
+                    except Exception as checkpoint_err:
+                        await websocket.send_json(
+                            {
+                                "type": "warning",
+                                "message": f"Failed to persist full backfill checkpoint: {checkpoint_err}",
+                            }
+                        )
             except Exception as e:
                 await websocket.send_json(
                     {
@@ -1716,13 +2342,44 @@ async def scrape_match_history(
 @app.websocket("/ws/scrape-matches")
 async def scrape_matches(websocket: WebSocket) -> None:
     await websocket.accept()
+    stop_event = asyncio.Event()
+    control_task = None
 
     try:
         data = await websocket.receive_json()
         username = data.get("username")
         max_matches = data.get("max_matches", 10)
         debug_browser = bool(data.get("debug_browser", False))
-        await scrape_match_history(websocket, username, max_matches, debug_browser)
+        newest_only = bool(data.get("newest_only", False))
+        full_backfill = bool(data.get("full_backfill", False))
+        allowed_match_types = data.get("allowed_match_types", [])
+        if not isinstance(allowed_match_types, list):
+            allowed_match_types = []
+
+        async def _control_loop() -> None:
+            while True:
+                msg = await websocket.receive_json()
+                action = str((msg or {}).get("action") or "").strip().lower()
+                if action == "stop":
+                    stop_event.set()
+                    await websocket.send_json(
+                        {
+                            "type": "stop_ack",
+                            "message": "Stop requested. Finishing current match before stopping.",
+                        }
+                    )
+
+        control_task = asyncio.create_task(_control_loop())
+        await scrape_match_history(
+            websocket,
+            username,
+            max_matches,
+            debug_browser,
+            newest_only=newest_only,
+            full_backfill=full_backfill,
+            allowed_match_types=allowed_match_types,
+            stop_event=stop_event,
+        )
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:
@@ -1732,6 +2389,9 @@ async def scrape_matches(websocket: WebSocket) -> None:
                 "message": str(e),
             }
         )
+    finally:
+        if control_task:
+            control_task.cancel()
 
 
 if __name__ == "__main__":

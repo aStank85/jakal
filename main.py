@@ -11,6 +11,10 @@ from src.team_analyzer import TeamAnalyzer
 from src.matchup_analyzer import MatchupAnalyzer
 from src.thresholds import MIN_RELIABLE_ROUNDS_PER_HOUR
 from src.api_client import TrackerAPIClient
+from src.plugins.v3_round_analysis import RoundAnalysisPlugin
+from src.plugins.v3_teammate_chemistry import TeammateChemistryPlugin
+from src.plugins.v3_lobby_quality import LobbyQualityPlugin
+from src.plugins.v3_trade_analysis import TradeAnalysisPlugin
 from datetime import datetime
 import time
 
@@ -538,6 +542,48 @@ def main():
 
                     matchup = matchup_analyzer.analyze_matchup(stack_a_id, stack_b_id)
                     ui.show_matchup_analysis(matchup)
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice.upper() == 'A':
+                # Player Analytics
+                try:
+                    all_players = db.get_all_players()
+                    if not all_players:
+                        ui.show_error("No players in database yet")
+                        continue
+
+                    ui.show_players(all_players)
+                    username_input = input("\nEnter player username: ").strip()
+
+                    if not db.player_exists(username_input):
+                        ui.show_error(f"Player '{username_input}' not found")
+                        continue
+
+                    # Ensure normalized tables are populated
+                    db.unpack_pending_scraped_match_cards(username=username_input)
+
+                    print("\n--- Analytics Menu ---")
+                    print("1. Round Analysis (FB impact, side balance, clutch, win conditions)")
+                    print("2. Teammate Chemistry (who boosts vs tanks your win rate)")
+                    print("3. Lobby Quality (enemy RP brackets, punching up/down)")
+                    print("4. Trade Analysis (deaths traded within 5 seconds)")
+                    print("0. Back")
+                    sub = input("Choose: ").strip()
+
+                    if sub == '1':
+                        plugin = RoundAnalysisPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '2':
+                        plugin = TeammateChemistryPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '3':
+                        plugin = LobbyQualityPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '4':
+                        plugin = TradeAnalysisPlugin(db, username_input, window_seconds=5.0)
+                        plugin.summary()
 
                 except Exception as e:
                     ui.show_error(str(e))

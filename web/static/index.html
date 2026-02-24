@@ -3,9 +3,13 @@
 <head>
     <title>JAKAL - R6 Network Scanner</title>
     <script src="/static/vis-network.min.js?v=20260223k"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260224n">
+    <link rel="stylesheet" href="/static/styles.css?v=20260224w">
 </head>
 <body>
+    <div id="global-scrape-indicator" class="global-scrape-indicator hidden">
+        <span class="global-scrape-dot"></span>
+        <span>Match scrape running...</span>
+    </div>
     <div class="container">
         <header>
             <h1>JAKAL - R6 Network Scanner</h1>
@@ -15,7 +19,7 @@
             <button class="tab-btn active" id="tab-scanner" data-tab="scanner">Network Scanner</button>
             <button class="tab-btn" id="tab-matches" data-tab="matches">Match Scraper</button>
             <button class="tab-btn" id="tab-stored" data-tab="stored">Stored Matches</button>
-            <button class="tab-btn" id="tab-compute" data-tab="compute">Stat Computation</button>
+            <button class="tab-btn" id="tab-dashboard" data-tab="dashboard">Dashboard</button>
         </div>
 
         <section id="panel-scanner" class="tab-panel active">
@@ -69,9 +73,28 @@
                     <input type="checkbox" id="matches-debug-browser">
                     Show Browser (Debug)
                 </label>
+                <label>
+                    <input type="checkbox" id="matches-newest-only">
+                    Get Newest Matches
+                </label>
+                <label>
+                    <input type="checkbox" id="matches-full-backfill">
+                    Full Backfill
+                </label>
+                <label>
+                    <input type="checkbox" id="matches-run-forever">
+                    Run Continuously
+                </label>
                 <button id="start-match-scrape">Scrape Matches</button>
                 <button id="stop-match-scrape" disabled>Stop Scrape</button>
-                <button id="load-saved-matches">Load Saved</button>
+            </div>
+            <div class="controls matches-type-controls">
+                <span class="matches-type-label">Allowed Types (Newest/Backfill):</span>
+                <label><input type="checkbox" class="matches-type-filter" value="ranked" checked> Ranked</label>
+                <label><input type="checkbox" class="matches-type-filter" value="unranked" checked> Unranked</label>
+                <label><input type="checkbox" class="matches-type-filter" value="standard" checked> Standard</label>
+                <label><input type="checkbox" class="matches-type-filter" value="quick" checked> Quick</label>
+                <label><input type="checkbox" class="matches-type-filter" value="event" checked> Event</label>
             </div>
 
             <div class="stats">
@@ -87,6 +110,10 @@
                     <label>Status:</label>
                     <span id="match-status">Idle</span>
                 </div>
+            </div>
+            <div id="match-progress-wrap" class="match-progress-wrap">
+                <div id="match-progress-bar" class="match-progress-bar"></div>
+                <div id="match-progress-text" class="match-progress-text">0%</div>
             </div>
 
             <div class="log" id="match-log"></div>
@@ -105,6 +132,8 @@
                     Unranked
                 </label>
                 <button id="load-stored-matches">Load Stored Matches</button>
+                <button id="unpack-stored-matches">Unpack Matches</button>
+                <button id="delete-bad-stored-matches">Delete Bad Matches</button>
             </div>
 
             <div class="stats">
@@ -140,21 +169,77 @@
             </div>
         </section>
 
-        <section id="panel-compute" class="tab-panel">
+        <section id="panel-dashboard" class="tab-panel">
             <div class="controls">
                 <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
-                <button id="run-stat-compute">Compute Stats</button>
+                <button id="run-stat-compute">Run Dashboard</button>
             </div>
-            <div id="compute-results" class="compute-results">
-                <div class="compute-card">
-                    <div class="compute-label">Status</div>
-                    <div class="compute-value">Enter a username and click Compute Stats.</div>
+            <div id="compute-results" class="compute-report">
+                <div class="compute-kpi-strip">
+                    <div class="compute-kpi-main">
+                        <div class="compute-label">KPI Strip</div>
+                        <div class="compute-kpi-head">
+                            <div class="compute-kpi-title">Win Rate</div>
+                            <div class="compute-mode-toggle" role="tablist" aria-label="Win Rate Mode">
+                                <button id="compute-mode-overall" class="compute-chip active" data-mode="overall">Overall</button>
+                                <button id="compute-mode-ranked" class="compute-chip" data-mode="ranked">Ranked</button>
+                                <button id="compute-mode-unranked" class="compute-chip" data-mode="unranked">Unranked</button>
+                            </div>
+                        </div>
+                        <div id="compute-kpi-winrate" class="compute-kpi-value">0.0%</div>
+                        <div id="compute-kpi-record" class="compute-kpi-sub">Record 0-0 • 0 matches</div>
+                        <div class="compute-kpi-bars">
+                            <div class="compute-kpi-bar-row">
+                                <div class="compute-kpi-bar-label">ATK vs DEF</div>
+                                <div class="compute-kpi-bar-track">
+                                    <div id="compute-kpi-atk" class="compute-kpi-bar atk"></div>
+                                    <div id="compute-kpi-def" class="compute-kpi-bar def"></div>
+                                </div>
+                                <div id="compute-kpi-atkdef-text" class="compute-kpi-bar-value">0.0 / 0.0</div>
+                            </div>
+                            <div class="compute-kpi-bar-row">
+                                <div class="compute-kpi-bar-label">First Death Rate</div>
+                                <div class="compute-kpi-bar-track"><div id="compute-kpi-fd" class="compute-kpi-bar fd"></div></div>
+                                <div id="compute-kpi-fd-text" class="compute-kpi-bar-value">0.0%</div>
+                            </div>
+                            <div class="compute-kpi-bar-row">
+                                <div class="compute-kpi-bar-label">FB Impact Delta</div>
+                                <div class="compute-kpi-bar-track"><div id="compute-kpi-fb" class="compute-kpi-bar fb"></div></div>
+                                <div id="compute-kpi-fb-text" class="compute-kpi-bar-value">0.0%</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="compute-mode-cards" class="compute-mode-cards"></div>
+                </div>
+
+                <div class="compute-card compute-report-card">
+                    <div class="compute-label">Playbook</div>
+                    <div id="compute-playbook" class="compute-playbook">
+                        <div class="compute-value">Enter a username and click Run Dashboard.</div>
+                    </div>
+                </div>
+
+                <div class="compute-card compute-report-card">
+                    <div class="compute-label">Deep Stats</div>
+                    <div id="dashboard-deep-stats" class="dashboard-deep-stats">
+                        <button class="dashboard-stat-chip" type="button" data-stat-key="fb_delta">FB Delta 0.0%</button>
+                        <button class="dashboard-stat-chip" type="button" data-stat-key="fd_rate">FD Rate 0.0%</button>
+                        <button class="dashboard-stat-chip" type="button" data-stat-key="atk_def">ATK 0.0% / DEF 0.0%</button>
+                        <button class="dashboard-stat-chip" type="button" data-stat-key="clutch">Clutch 0.0%</button>
+                        <button class="dashboard-stat-chip" type="button" data-stat-key="round_wr">Round WR 0.0%</button>
+                    </div>
+                    <div id="dashboard-evidence" class="dashboard-evidence">
+                        Click a stat for inline evidence.
+                    </div>
                 </div>
             </div>
-            <div class="log" id="compute-log"></div>
+            <details id="compute-console" class="compute-console">
+                <summary>Console</summary>
+                <div class="log" id="compute-log"></div>
+            </details>
         </section>
     </div>
 
-    <script src="/static/network.js?v=20260224o"></script>
+    <script src="/static/network.js?v=20260224aa"></script>
 </body>
 </html>

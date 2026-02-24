@@ -355,6 +355,7 @@ class Database:
                     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                     player_id           INTEGER NOT NULL,
                     match_id            TEXT NOT NULL,
+                    match_type          TEXT,
                     player_id_tracker   TEXT,
                     username            TEXT,
                     team_id             INTEGER,
@@ -400,6 +401,7 @@ class Database:
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     player_id       INTEGER NOT NULL,
                     match_id        TEXT NOT NULL,
+                    match_type      TEXT,
                     round_id        INTEGER NOT NULL,
                     end_reason      TEXT,
                     winner_side     TEXT,
@@ -414,6 +416,7 @@ class Database:
                     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                     player_id           INTEGER NOT NULL,
                     match_id            TEXT NOT NULL,
+                    match_type          TEXT,
                     round_id            INTEGER NOT NULL,
                     player_id_tracker   TEXT,
                     username            TEXT,
@@ -453,6 +456,7 @@ class Database:
                     rounds_json     TEXT,
                     summary_json    TEXT,
                     round_data_json TEXT,
+                    round_data_source TEXT,
                     scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -460,6 +464,17 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_scraped_at
                 ON scraped_match_cards (username, scraped_at DESC)
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scrape_checkpoints (
+                    username        TEXT NOT NULL,
+                    mode_key        TEXT NOT NULL,
+                    filter_key      TEXT NOT NULL,
+                    skip_count      INTEGER NOT NULL DEFAULT 0,
+                    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (username, mode_key, filter_key)
+                )
             """)
 
             self._commit_with_retry(context="init schema commit")
@@ -475,6 +490,7 @@ class Database:
             self._migrate_players_table()
             self._migrate_stats_snapshots_table()
             self._migrate_computed_metrics_table()
+            self._migrate_match_analysis_tables()
             self._commit_with_retry(context="migrate schema commit")
         except sqlite3.Error as e:
             self.conn.rollback()
@@ -565,6 +581,88 @@ class Database:
             )
             WHERE player_id IS NULL
         """)
+
+    def _migrate_match_analysis_tables(self) -> None:
+        self._add_column_if_missing("match_detail_players", "match_type TEXT", "match_type")
+        self._add_column_if_missing("round_outcomes", "match_type TEXT", "match_type")
+        self._add_column_if_missing("player_rounds", "match_type TEXT", "match_type")
+        self._add_column_if_missing("scraped_match_cards", "round_data_source TEXT", "round_data_source")
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            UPDATE scraped_match_cards
+            SET round_data_source = 'ow-ingest'
+            WHERE (round_data_source IS NULL OR TRIM(round_data_source) = '')
+              AND round_data_json IS NOT NULL
+              AND TRIM(round_data_json) NOT IN ('', '{}', 'null')
+            """
+        )
+
+        # Backfill match_type from scraped cards using username+match_id when available.
+        cursor.execute(
+            """
+            UPDATE match_detail_players
+            SET match_type = (
+                SELECT smc.mode
+                FROM scraped_match_cards smc
+                WHERE smc.match_id = match_detail_players.match_id
+                  AND LOWER(TRIM(smc.username)) = LOWER(TRIM(match_detail_players.username))
+                ORDER BY smc.id DESC
+                LIMIT 1
+            )
+            WHERE (match_type IS NULL OR TRIM(match_type) = '')
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE player_rounds
+            SET match_type = (
+                SELECT smc.mode
+                FROM scraped_match_cards smc
+                WHERE smc.match_id = player_rounds.match_id
+                  AND LOWER(TRIM(smc.username)) = LOWER(TRIM(player_rounds.username))
+                ORDER BY smc.id DESC
+                LIMIT 1
+            )
+            WHERE (match_type IS NULL OR TRIM(match_type) = '')
+            """
+        )
+
+        # round_outcomes has no username; map via player_rounds first.
+        cursor.execute(
+            """
+            UPDATE round_outcomes
+            SET match_type = (
+                SELECT smc.mode
+                FROM player_rounds pr
+                JOIN scraped_match_cards smc
+                  ON smc.match_id = pr.match_id
+                 AND LOWER(TRIM(smc.username)) = LOWER(TRIM(pr.username))
+                WHERE pr.player_id = round_outcomes.player_id
+                  AND pr.match_id = round_outcomes.match_id
+                ORDER BY smc.id DESC
+                LIMIT 1
+            )
+            WHERE (match_type IS NULL OR TRIM(match_type) = '')
+            """
+        )
+
+        # Fallback: any card with same match_id.
+        for table_name in ("match_detail_players", "round_outcomes", "player_rounds"):
+            cursor.execute(
+                f"""
+                UPDATE {table_name}
+                SET match_type = (
+                    SELECT smc.mode
+                    FROM scraped_match_cards smc
+                    WHERE smc.match_id = {table_name}.match_id
+                    ORDER BY smc.id DESC
+                    LIMIT 1
+                )
+                WHERE (match_type IS NULL OR TRIM(match_type) = '')
+                """
+            )
     
     def add_player(self, username: str, device_tag: str = "pc") -> int:
         """Add a player or return existing player_id."""
@@ -1163,6 +1261,138 @@ class Database:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _round_payload_has_rounds(value: Any) -> bool:
+        if not isinstance(value, dict) or not value:
+            return False
+        data = value.get("data", {}) if isinstance(value.get("data"), dict) else {}
+        rounds = value.get("rounds") or data.get("rounds")
+        return isinstance(rounds, list) and len(rounds) > 0
+
+    def _parse_rounds_from_summary(self, summary_json: Any) -> Dict[str, Any]:
+        """
+        Build an ow-ingest-like round payload directly from summary segments.
+
+        Returns a dict with keys:
+        - players: [{id, nickname}]
+        - killfeed: [{roundId, attackerId, victimId, attackerOperatorName, victimOperatorName}]
+        - rounds: [{id, winner, roundOutcome, players, killEvents}]
+        """
+        payload = summary_json
+        if isinstance(summary_json, str):
+            try:
+                payload = json.loads(summary_json)
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        segments = data.get("segments", []) if isinstance(data.get("segments"), list) else []
+
+        usernames_by_tracker_id: Dict[str, str] = {}
+        operator_by_round_and_player: Dict[int, Dict[str, str]] = {}
+        round_meta_by_id: Dict[int, Dict[str, Any]] = {}
+        player_rows_by_round: Dict[int, List[Dict[str, Any]]] = {}
+
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_type = seg.get("type")
+            attrs = seg.get("attributes", {}) if isinstance(seg.get("attributes"), dict) else {}
+            meta = seg.get("metadata", {}) if isinstance(seg.get("metadata"), dict) else {}
+
+            if seg_type == "overview":
+                tracker_id = str(attrs.get("playerId") or meta.get("platformUserId") or "").strip()
+                username = str(meta.get("platformUserHandle") or meta.get("displayName") or "").strip()
+                if tracker_id and username:
+                    usernames_by_tracker_id[tracker_id] = username
+                continue
+
+            round_id_raw = attrs.get("roundId")
+            try:
+                round_id = int(round_id_raw)
+            except (TypeError, ValueError):
+                continue
+
+            if seg_type == "round-overview":
+                killfeed = meta.get("killfeed", [])
+                round_meta_by_id[round_id] = {
+                    "winner_side": str(attrs.get("winnerSideId") or "").strip(),
+                    "end_reason": str(attrs.get("roundEndReasonId") or "").strip(),
+                    "killfeed": killfeed if isinstance(killfeed, list) else [],
+                }
+                continue
+
+            if seg_type == "player-round":
+                tracker_id = str(attrs.get("playerId") or "").strip()
+                username = str(meta.get("platformUserHandle") or "").strip()
+                if tracker_id and username:
+                    usernames_by_tracker_id[tracker_id] = username
+                operator_name = str(meta.get("operatorName") or attrs.get("operatorId") or "").strip()
+                if tracker_id and operator_name:
+                    operator_by_round_and_player.setdefault(round_id, {})[tracker_id] = operator_name
+                player_rows_by_round.setdefault(round_id, []).append(
+                    {
+                        "id": tracker_id,
+                        "nickname": usernames_by_tracker_id.get(tracker_id, tracker_id),
+                        "teamId": attrs.get("teamId"),
+                        "sideId": attrs.get("sideId"),
+                        "operatorName": operator_name,
+                        "resultId": attrs.get("resultId"),
+                    }
+                )
+
+        players = [{"id": pid, "nickname": name} for pid, name in usernames_by_tracker_id.items()]
+        killfeed_rows: List[Dict[str, Any]] = []
+        rounds: List[Dict[str, Any]] = []
+
+        round_ids = sorted(set(round_meta_by_id.keys()) | set(player_rows_by_round.keys()))
+        for round_id in round_ids:
+            overview = round_meta_by_id.get(round_id, {})
+            per_round_ops = operator_by_round_and_player.get(round_id, {})
+            per_round_events: List[Dict[str, Any]] = []
+
+            for ev in overview.get("killfeed", []):
+                if not isinstance(ev, dict):
+                    continue
+                attacker_id = str(ev.get("killerId") or ev.get("attackerId") or "").strip()
+                victim_id = str(ev.get("victimId") or "").strip()
+                attacker_op = per_round_ops.get(attacker_id, "")
+                victim_op = per_round_ops.get(victim_id, "")
+                killfeed_rows.append(
+                    {
+                        "roundId": round_id,
+                        "attackerId": attacker_id,
+                        "victimId": victim_id,
+                        "attackerOperatorName": attacker_op,
+                        "victimOperatorName": victim_op,
+                    }
+                )
+                per_round_events.append(
+                    {
+                        "timestamp": ev.get("timestamp"),
+                        "killerId": attacker_id,
+                        "victimId": victim_id,
+                        "killerName": usernames_by_tracker_id.get(attacker_id, attacker_id or "Unknown"),
+                        "victimName": usernames_by_tracker_id.get(victim_id, victim_id or "Unknown"),
+                        "killerOperator": attacker_op,
+                        "victimOperator": victim_op,
+                    }
+                )
+
+            rounds.append(
+                {
+                    "id": round_id,
+                    "winner": overview.get("winner_side", ""),
+                    "roundOutcome": overview.get("end_reason", ""),
+                    "players": player_rows_by_round.get(round_id, []),
+                    "killEvents": per_round_events,
+                }
+            )
+
+        return {"players": players, "killfeed": killfeed_rows, "rounds": rounds}
+
     def _unpack_summary_segments(self, match_id: str, summary_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert a scraped summary payload into normalized row payloads for:
@@ -1263,13 +1493,13 @@ class Database:
                 if tracker_id and meta.get("platformUserHandle"):
                     usernames_by_tracker_id[tracker_id] = str(meta.get("platformUserHandle")).strip()
 
-                first_blood = 0
-                first_death = 0
+                first_blood = self._summary_stat_int(stats.get("firstBloods"))
+                first_death = self._summary_stat_int(stats.get("firstDeaths"))
                 try:
                     round_id_int = int(round_id)
                 except (TypeError, ValueError):
                     round_id_int = None
-                if round_id_int is not None:
+                if round_id_int is not None and first_blood == 0 and first_death == 0:
                     killfeed = killfeed_by_round.get(round_id_int, [])
                     if killfeed:
                         first = killfeed[0] if isinstance(killfeed[0], dict) else {}
@@ -1286,7 +1516,7 @@ class Database:
                         "player_id_tracker": tracker_id,
                         "team_id": attrs.get("teamId", -1),
                         "side": attrs.get("sideId", ""),
-                        "operator": meta.get("operatorName", ""),
+                        "operator": meta.get("operatorName", "") or attrs.get("operatorId", ""),
                         "result": attrs.get("resultId", ""),
                         "is_disconnected": 1 if attrs.get("isDisconnected", False) else 0,
                         "kills": self._summary_stat_int(stats.get("kills")),
@@ -1323,7 +1553,7 @@ class Database:
         cursor = self.conn.cursor()
         params: List[Any] = []
         query = """
-            SELECT id, username, match_id, summary_json
+            SELECT id, username, match_id, mode, summary_json, round_data_json, round_data_source
             FROM scraped_match_cards
             WHERE summary_json IS NOT NULL
               AND TRIM(summary_json) != ''
@@ -1356,6 +1586,7 @@ class Database:
         for row in cards:
             owner_username = str(row["username"] or "").strip()
             match_id = str(row["match_id"] or "").strip()
+            match_type = str(row["mode"] or "").strip()
             summary_raw = row["summary_json"]
             if not owner_username or not match_id or not summary_raw:
                 stats["skipped"] += 1
@@ -1386,6 +1617,22 @@ class Database:
                     continue
 
                 summary_payload = json.loads(summary_raw)
+                round_data_payload = {}
+                try:
+                    round_data_payload = json.loads(row["round_data_json"] or "{}")
+                except Exception:
+                    round_data_payload = {}
+                parsed_summary_round_payload = self._parse_rounds_from_summary(summary_payload)
+                round_data_source = None
+                if self._round_payload_has_rounds(parsed_summary_round_payload):
+                    round_data_source = "summary"
+                elif self._round_payload_has_rounds(round_data_payload):
+                    round_data_source = "ow-ingest"
+                else:
+                    existing_source = str(row["round_data_source"] or "").strip()
+                    if existing_source:
+                        round_data_source = existing_source
+
                 unpacked = self._unpack_summary_segments(match_id, summary_payload)
                 detail_rows = unpacked["detail_rows"]
                 round_rows = unpacked["round_rows"]
@@ -1397,14 +1644,23 @@ class Database:
                     continue
 
                 # Replace per-match normalized rows for this owner to keep data consistent.
-                self.save_match_detail_players(owner_player_id, match_id, detail_rows)
-                self.save_round_outcomes(owner_player_id, match_id, round_rows)
+                self.save_match_detail_players(owner_player_id, match_id, detail_rows, match_type=match_type)
+                self.save_round_outcomes(owner_player_id, match_id, round_rows, match_type=match_type)
                 self.save_player_rounds(
                     owner_player_id,
                     match_id,
                     player_round_rows,
+                    match_type=match_type,
                     usernames_by_tracker_id=usernames_by_tracker_id,
                 )
+                update_round_data_json = row["round_data_json"]
+                if round_data_source == "summary":
+                    update_round_data_json = json.dumps(parsed_summary_round_payload)
+                cursor.execute(
+                    "UPDATE scraped_match_cards SET round_data_source = ?, round_data_json = ? WHERE id = ?",
+                    (round_data_source, update_round_data_json, row["id"]),
+                )
+                self.conn.commit()
 
                 stats["unpacked_matches"] += 1
                 stats["inserted_detail_rows"] += len(detail_rows)
@@ -1418,25 +1674,129 @@ class Database:
     def save_scraped_match_cards(self, username: str, matches: List[Dict]) -> None:
         """Persist scraped match cards for one username without wiping prior rows."""
         cursor = self.conn.cursor()
+
+        def _safe_json_load(raw: Any, fallback: Any) -> Any:
+            try:
+                if raw is None:
+                    return fallback
+                return json.loads(raw)
+            except Exception:
+                return fallback
+
+        def _has_round_list(value: Any) -> bool:
+            return isinstance(value, list) and len(value) > 0
+
+        def _has_round_payload(value: Any) -> bool:
+            if not isinstance(value, dict) or not value:
+                return False
+            rounds = value.get("rounds") or value.get("data", {}).get("rounds")
+            return isinstance(rounds, list) and len(rounds) > 0
+
         for item in matches:
             match_id = (item.get("match_id") or "").strip()
             if match_id:
                 cursor.execute(
                     """
-                    SELECT 1
+                    SELECT id, map_name, mode, score_team_a, score_team_b, duration, match_date,
+                           players_json, rounds_json, summary_json, round_data_json, round_data_source
                     FROM scraped_match_cards
                     WHERE username = ? AND match_id = ?
+                    ORDER BY id DESC
                     LIMIT 1
                     """,
                     (username, match_id),
                 )
-                if cursor.fetchone() is not None:
+                existing = cursor.fetchone()
+                if existing is not None:
+                    existing_players = _safe_json_load(existing["players_json"], [])
+                    existing_rounds = _safe_json_load(existing["rounds_json"], [])
+                    existing_summary = _safe_json_load(existing["summary_json"], {})
+                    existing_round_data = _safe_json_load(existing["round_data_json"], {})
+                    existing_round_data_source = str(existing["round_data_source"] or "").strip()
+
+                    new_players = item.get("players", [])
+                    new_rounds = item.get("rounds", [])
+                    new_summary = item.get("match_summary", {})
+                    new_round_data = item.get("round_data", {})
+
+                    updated = False
+
+                    players_json = json.dumps(existing_players)
+                    rounds_json = json.dumps(existing_rounds)
+                    summary_json = json.dumps(existing_summary)
+                    round_data_json = json.dumps(existing_round_data)
+                    round_data_source = existing_round_data_source or None
+
+                    if (not isinstance(existing_players, list) or not existing_players) and isinstance(new_players, list) and new_players:
+                        players_json = json.dumps(new_players)
+                        updated = True
+                    if (not _has_round_list(existing_rounds)) and _has_round_list(new_rounds):
+                        rounds_json = json.dumps(new_rounds)
+                        updated = True
+                    if (not isinstance(existing_summary, dict) or not existing_summary) and isinstance(new_summary, dict) and new_summary:
+                        summary_json = json.dumps(new_summary)
+                        updated = True
+                    if (not _has_round_payload(existing_round_data)) and _has_round_payload(new_round_data):
+                        round_data_json = json.dumps(new_round_data)
+                        round_data_source = "ow-ingest"
+                        updated = True
+
+                    map_name = existing["map_name"]
+                    if (not str(map_name or "").strip()) and str(item.get("map") or "").strip():
+                        map_name = item.get("map")
+                        updated = True
+                    mode = existing["mode"]
+                    if (not str(mode or "").strip()) and str(item.get("mode") or "").strip():
+                        mode = item.get("mode")
+                        updated = True
+                    match_date = existing["match_date"]
+                    if (not str(match_date or "").strip()) and str(item.get("date") or "").strip():
+                        match_date = item.get("date")
+                        updated = True
+                    duration = existing["duration"]
+                    if (not str(duration or "").strip()) and str(item.get("duration") or "").strip():
+                        duration = item.get("duration")
+                        updated = True
+
+                    score_team_a = existing["score_team_a"]
+                    score_team_b = existing["score_team_b"]
+                    new_a = item.get("score_team_a")
+                    new_b = item.get("score_team_b")
+                    if (not score_team_a and not score_team_b) and (new_a or new_b):
+                        score_team_a = new_a
+                        score_team_b = new_b
+                        updated = True
+
+                    if updated:
+                        cursor.execute(
+                            """
+                            UPDATE scraped_match_cards
+                            SET map_name = ?, mode = ?, score_team_a = ?, score_team_b = ?,
+                                duration = ?, match_date = ?, players_json = ?, rounds_json = ?,
+                                summary_json = ?, round_data_json = ?, round_data_source = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                map_name,
+                                mode,
+                                score_team_a,
+                                score_team_b,
+                                duration,
+                                match_date,
+                                players_json,
+                                rounds_json,
+                                summary_json,
+                                round_data_json,
+                                round_data_source,
+                                existing["id"],
+                            ),
+                        )
                     continue
             cursor.execute("""
                 INSERT INTO scraped_match_cards (
                     username, match_id, map_name, mode, score_team_a, score_team_b,
-                    duration, match_date, players_json, rounds_json, summary_json, round_data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration, match_date, players_json, rounds_json, summary_json, round_data_json, round_data_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 username,
                 item.get("match_id"),
@@ -1450,6 +1810,7 @@ class Database:
                 json.dumps(item.get("rounds", [])),
                 json.dumps(item.get("match_summary", {})),
                 json.dumps(item.get("round_data", {})),
+                "ow-ingest" if _has_round_payload(item.get("round_data", {})) else None,
             ))
 
         self.conn.commit()
@@ -1535,6 +1896,8 @@ class Database:
                 round_data = json.loads(item.get("round_data_json") or "{}")
             except json.JSONDecodeError:
                 round_data = {}
+            has_round_list = isinstance(rounds, list) and len(rounds) > 0
+            has_round_payload = self._round_payload_has_rounds(round_data)
 
             # Repair stale scraped players payloads from normalized rows so UI insights stay current.
             has_named_players = any(
@@ -1571,6 +1934,8 @@ class Database:
                     "rounds": rounds,
                     "match_summary": summary,
                     "round_data": round_data,
+                    "round_data_source": item.get("round_data_source"),
+                    "round_data_missing": not (has_round_list or has_round_payload),
                     "scraped_at": item.get("scraped_at"),
                 }
             )
@@ -1579,6 +1944,103 @@ class Database:
             self.conn.commit()
 
         return out
+
+    def delete_bad_scraped_matches(self, username: str) -> Dict[str, int]:
+        """
+        Delete stored match cards missing round-level data for one username.
+        Also removes normalized rows for those match IDs for this owner player.
+        """
+        owner_username = str(username or "").strip()
+        if not owner_username:
+            return {
+                "deleted_cards": 0,
+                "deleted_match_ids": 0,
+                "deleted_detail_rows": 0,
+                "deleted_round_rows": 0,
+                "deleted_player_round_rows": 0,
+            }
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, match_id, rounds_json, round_data_json
+            FROM scraped_match_cards
+            WHERE username = ?
+            """,
+            (owner_username,),
+        )
+        rows = cursor.fetchall()
+
+        bad_card_ids: List[int] = []
+        bad_match_ids: List[str] = []
+        for row in rows:
+            try:
+                rounds = json.loads(row["rounds_json"] or "[]")
+            except Exception:
+                rounds = []
+            try:
+                round_data = json.loads(row["round_data_json"] or "{}")
+            except Exception:
+                round_data = {}
+            has_round_list = isinstance(rounds, list) and len(rounds) > 0
+            has_round_payload = self._round_payload_has_rounds(round_data)
+            if has_round_list or has_round_payload:
+                continue
+            bad_card_ids.append(int(row["id"]))
+            match_id = str(row["match_id"] or "").strip()
+            if match_id:
+                bad_match_ids.append(match_id)
+
+        if not bad_card_ids:
+            return {
+                "deleted_cards": 0,
+                "deleted_match_ids": 0,
+                "deleted_detail_rows": 0,
+                "deleted_round_rows": 0,
+                "deleted_player_round_rows": 0,
+            }
+
+        owner_player_id = self.get_player_id(owner_username)
+        unique_match_ids = sorted(set(bad_match_ids))
+
+        deleted_detail_rows = 0
+        deleted_round_rows = 0
+        deleted_player_round_rows = 0
+
+        if owner_player_id and unique_match_ids:
+            placeholders = ",".join(["?"] * len(unique_match_ids))
+            params = [owner_player_id, *unique_match_ids]
+            cursor.execute(
+                f"DELETE FROM match_detail_players WHERE player_id = ? AND match_id IN ({placeholders})",
+                tuple(params),
+            )
+            deleted_detail_rows = cursor.rowcount if cursor.rowcount >= 0 else 0
+            cursor.execute(
+                f"DELETE FROM round_outcomes WHERE player_id = ? AND match_id IN ({placeholders})",
+                tuple(params),
+            )
+            deleted_round_rows = cursor.rowcount if cursor.rowcount >= 0 else 0
+            cursor.execute(
+                f"DELETE FROM player_rounds WHERE player_id = ? AND match_id IN ({placeholders})",
+                tuple(params),
+            )
+            deleted_player_round_rows = cursor.rowcount if cursor.rowcount >= 0 else 0
+
+        placeholders = ",".join(["?"] * len(bad_card_ids))
+        cursor.execute(
+            f"DELETE FROM scraped_match_cards WHERE id IN ({placeholders})",
+            tuple(bad_card_ids),
+        )
+        deleted_cards = cursor.rowcount if cursor.rowcount >= 0 else len(bad_card_ids)
+        self.conn.commit()
+
+        return {
+            "deleted_cards": int(deleted_cards),
+            "deleted_match_ids": len(unique_match_ids),
+            "deleted_detail_rows": int(deleted_detail_rows),
+            "deleted_round_rows": int(deleted_round_rows),
+            "deleted_player_round_rows": int(deleted_player_round_rows),
+        }
 
     def get_existing_scraped_match_ids(self, username: str) -> set[str]:
         """Return distinct non-empty scraped match IDs for a username."""
@@ -1594,6 +2056,121 @@ class Database:
             (username,),
         )
         return {str(row["match_id"]).strip() for row in cursor.fetchall() if row["match_id"]}
+
+    def get_fully_scraped_match_ids(self, username: str) -> set[str]:
+        """Return match IDs with summary data and either ow-ingest or summary-derived round data."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT match_id
+            FROM scraped_match_cards
+            WHERE username = ?
+              AND match_id IS NOT NULL
+              AND TRIM(match_id) != ''
+              AND summary_json IS NOT NULL
+              AND TRIM(summary_json) NOT IN ('', '{}', 'null')
+              AND (
+                    (round_data_json IS NOT NULL AND TRIM(round_data_json) NOT IN ('', '{}', 'null'))
+                    OR LOWER(TRIM(COALESCE(round_data_source, ''))) = 'summary'
+                  )
+            """,
+            (username,),
+        )
+        return {str(row["match_id"]).strip() for row in cursor.fetchall() if row["match_id"]}
+
+    @staticmethod
+    def _normalize_match_mode_key(raw_mode: Any) -> str:
+        text = str(raw_mode or "").strip().lower()
+        if "unranked" in text:
+            return "unranked"
+        if "ranked" in text:
+            return "ranked"
+        if "quick" in text:
+            return "quick"
+        if "standard" in text:
+            return "standard"
+        if "event" in text:
+            return "event"
+        return "other"
+
+    def count_fully_scraped_match_ids(self, username: str, allowed_mode_keys: Optional[set[str]] = None) -> int:
+        """
+        Count distinct fully-scraped match IDs for a user.
+        If allowed_mode_keys is provided, only count rows whose mode normalizes into that set.
+        """
+        allowed = {str(m or "").strip().lower() for m in (allowed_mode_keys or set()) if str(m or "").strip()}
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT match_id, mode
+            FROM scraped_match_cards
+            WHERE username = ?
+              AND match_id IS NOT NULL
+              AND TRIM(match_id) != ''
+              AND summary_json IS NOT NULL
+              AND TRIM(summary_json) NOT IN ('', '{}', 'null')
+              AND (
+                    (round_data_json IS NOT NULL AND TRIM(round_data_json) NOT IN ('', '{}', 'null'))
+                    OR LOWER(TRIM(COALESCE(round_data_source, ''))) = 'summary'
+                  )
+            """,
+            (username,),
+        )
+        rows = cursor.fetchall()
+        if not allowed:
+            return len(rows)
+        count = 0
+        for row in rows:
+            mode_key = self._normalize_match_mode_key(row["mode"])
+            if mode_key in allowed:
+                count += 1
+        return count
+
+    def get_scrape_checkpoint_skip_count(self, username: str, mode_key: str, filter_key: str) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT skip_count
+            FROM scrape_checkpoints
+            WHERE username = ? AND mode_key = ? AND filter_key = ?
+            LIMIT 1
+            """,
+            (str(username or "").strip(), str(mode_key or "").strip(), str(filter_key or "").strip()),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return 0
+        try:
+            return max(0, int(row["skip_count"]))
+        except Exception:
+            return 0
+
+    def set_scrape_checkpoint_skip_count(
+        self,
+        username: str,
+        mode_key: str,
+        filter_key: str,
+        skip_count: int,
+    ) -> None:
+        safe_count = max(0, int(skip_count or 0))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO scrape_checkpoints (username, mode_key, filter_key, skip_count, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(username, mode_key, filter_key)
+            DO UPDATE SET
+                skip_count = excluded.skip_count,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(username or "").strip(),
+                str(mode_key or "").strip(),
+                str(filter_key or "").strip(),
+                safe_count,
+            ),
+        )
+        self.conn.commit()
 
     def save_map_stats(self, player_id: int, maps: List[Dict], snapshot_id: int = None, season: str = 'Y10S4') -> None:
         """Persist scraped map stats for a player and season."""
@@ -1780,7 +2357,13 @@ class Database:
                 out['team_b'].append(row)
         return out
 
-    def save_match_detail_players(self, player_id: int, match_id: str, players: List[Dict]) -> None:
+    def save_match_detail_players(
+        self,
+        player_id: int,
+        match_id: str,
+        players: List[Dict],
+        match_type: Optional[str] = None,
+    ) -> None:
         """Persist parsed API player overviews for one match."""
         cursor = self.conn.cursor()
         cursor.execute(
@@ -1791,17 +2374,18 @@ class Database:
         for p in players:
             cursor.execute("""
                 INSERT INTO match_detail_players (
-                    player_id, match_id, player_id_tracker, username, team_id, result,
+                    player_id, match_id, match_type, player_id_tracker, username, team_id, result,
                     kills, deaths, assists, headshots, first_bloods, first_deaths,
                     clutches_won, clutches_lost, clutches_1v1, clutches_1v2, clutches_1v3,
                     clutches_1v4, clutches_1v5, kills_1k, kills_2k, kills_3k, kills_4k,
                     kills_5k, rounds_won, rounds_lost, rank_points, rank_points_delta,
                     rank_points_previous, kd_ratio, hs_pct, esr, kills_per_round,
                     time_played_ms, elo, elo_delta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 player_id,
                 match_id,
+                match_type,
                 p.get("player_id_tracker"),
                 p.get("username"),
                 p.get("team_id"),
@@ -1863,7 +2447,13 @@ class Database:
         )
         return {row["match_id"] for row in cursor.fetchall() if row["match_id"]}
 
-    def save_round_outcomes(self, player_id: int, match_id: str, rounds: List[Dict]) -> None:
+    def save_round_outcomes(
+        self,
+        player_id: int,
+        match_id: str,
+        rounds: List[Dict],
+        match_type: Optional[str] = None,
+    ) -> None:
         """Persist parsed API round outcomes for one match."""
         cursor = self.conn.cursor()
         cursor.execute(
@@ -1872,11 +2462,12 @@ class Database:
         )
         for r in rounds:
             cursor.execute("""
-                INSERT INTO round_outcomes (player_id, match_id, round_id, end_reason, winner_side)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO round_outcomes (player_id, match_id, match_type, round_id, end_reason, winner_side)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 player_id,
                 match_id,
+                match_type,
                 r.get("round_id"),
                 r.get("end_reason"),
                 r.get("winner_side"),
@@ -1903,6 +2494,7 @@ class Database:
         player_id: int,
         match_id: str,
         player_rounds: List[Dict],
+        match_type: Optional[str] = None,
         usernames_by_tracker_id: Optional[Dict[str, str]] = None,
     ) -> None:
         """Persist parsed API player-round rows for one match."""
@@ -1917,13 +2509,14 @@ class Database:
             tracker_id = pr.get("player_id_tracker")
             cursor.execute("""
                 INSERT INTO player_rounds (
-                    player_id, match_id, round_id, player_id_tracker, username, team_id, side,
+                    player_id, match_id, match_type, round_id, player_id_tracker, username, team_id, side,
                     operator, result, is_disconnected, kills, deaths, assists, headshots,
                     first_blood, first_death, clutch_won, clutch_lost, hs_pct, esr
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 player_id,
                 match_id,
+                match_type,
                 pr.get("round_id"),
                 tracker_id,
                 usernames_by_tracker_id.get(tracker_id),
@@ -1976,13 +2569,21 @@ class Database:
                 for p in players
                 if p.get("player_id_tracker")
             }
+            meta = detail.get("match_meta") if isinstance(detail.get("match_meta"), dict) else {}
+            match_type = (
+                detail.get("mode")
+                or meta.get("mode")
+                or meta.get("sessionTypeName")
+                or ""
+            )
 
-            self.save_match_detail_players(player_id, match_id, players)
-            self.save_round_outcomes(player_id, match_id, rounds)
+            self.save_match_detail_players(player_id, match_id, players, match_type=match_type)
+            self.save_round_outcomes(player_id, match_id, rounds, match_type=match_type)
             self.save_player_rounds(
                 player_id,
                 match_id,
                 player_rounds,
+                match_type=match_type,
                 usernames_by_tracker_id=usernames_by_tracker_id,
             )
             saved_matches += 1
