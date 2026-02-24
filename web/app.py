@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
@@ -19,9 +19,87 @@ from src.database import Database
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _normalize_asset_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+map_images_dir = None
+for candidate in ("map_images", "map images"):
+    candidate_path = os.path.join(project_root, candidate)
+    if os.path.isdir(candidate_path):
+        map_images_dir = candidate_path
+        break
+
+if map_images_dir:
+    app.mount("/map-images", StaticFiles(directory=map_images_dir), name="map-images")
+    try:
+        map_file_count = len(
+            [name for name in os.listdir(map_images_dir) if os.path.isfile(os.path.join(map_images_dir, name))]
+        )
+    except Exception:
+        map_file_count = -1
+    print(f"[MAP] Serving map images from: {map_images_dir} (files={map_file_count})")
+else:
+    print(f"[MAP] Warning: no map image folder found under {project_root}")
+
+operator_images_dir = None
+operator_image_candidates = (
+    "operator_images",
+    "operator images",
+    "operator-icons",
+    "operator icons",
+    "operators",
+    os.path.join("web", "static", "operator_images"),
+    os.path.join("web", "static", "operator-images"),
+    os.path.join("web", "static", "operators"),
+)
+for candidate in operator_image_candidates:
+    candidate_path = os.path.join(project_root, candidate)
+    if os.path.isdir(candidate_path):
+        operator_images_dir = candidate_path
+        break
+
+operator_image_file_by_key = {}
+if operator_images_dir:
+    app.mount("/operator-images", StaticFiles(directory=operator_images_dir), name="operator-images")
+    try:
+        operator_files = [
+            name for name in os.listdir(operator_images_dir) if os.path.isfile(os.path.join(operator_images_dir, name))
+        ]
+        for filename in operator_files:
+            stem = os.path.splitext(filename)[0]
+            key = _normalize_asset_key(stem)
+            if key and key not in operator_image_file_by_key:
+                operator_image_file_by_key[key] = filename
+        print(
+            f"[OPERATORS] Serving operator images from: {operator_images_dir} "
+            f"(files={len(operator_files)}, indexed={len(operator_image_file_by_key)})"
+        )
+    except Exception:
+        operator_image_file_by_key = {}
+        print(f"[OPERATORS] Warning: failed to index operator images from {operator_images_dir}")
+else:
+    print(
+        f"[OPERATORS] Warning: no operator image folder found under {project_root}. "
+        f"Searched: {', '.join(operator_image_candidates)}"
+    )
 
 api_client = TrackerAPIClient()
-db = Database()
+db = Database(os.environ.get("JAKAL_DB_PATH", "data/jakal_fresh.db"))
+print(f"[DB] Using database at: {os.path.abspath(db.db_path)}")
+try:
+    unpack_stats = db.unpack_pending_scraped_match_cards()
+    print(
+        "[DB] Auto-unpack complete: "
+        f"scanned={unpack_stats.get('scanned', 0)} "
+        f"unpacked={unpack_stats.get('unpacked_matches', 0)} "
+        f"errors={unpack_stats.get('errors', 0)}"
+    )
+except Exception as e:
+    print(f"[DB] Warning: auto-unpack on startup failed: {e}")
 
 rate_tracker = {
     "calls_made": 0,
@@ -97,6 +175,25 @@ async def root() -> HTMLResponse:
 @app.get("/api/rate-status")
 async def rate_status() -> dict:
     return get_rate_status()
+
+
+@app.get("/api/operator-image-index")
+async def operator_image_index() -> dict:
+    return {
+        "enabled": bool(operator_images_dir),
+        "count": len(operator_image_file_by_key),
+        "files": operator_image_file_by_key,
+    }
+
+
+@app.get("/api/scraped-matches/{username}")
+async def scraped_matches(username: str, limit: int = 50) -> dict:
+    safe_limit = max(1, min(limit, 200))
+    try:
+        matches = db.get_scraped_match_cards(username, safe_limit)
+        return {"username": username, "matches": matches, "count": len(matches)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load saved matches: {str(e)}")
 
 
 @app.websocket("/ws/scan")
@@ -734,7 +831,55 @@ async def scrape_match_history(
         try:
             url = f"https://r6.tracker.network/r6siege/profile/ubi/{username}/matches"
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(random.randint(2000, 3000))
+            await page.wait_for_timeout(random.randint(800, 1200))
+            await websocket.send_json(
+                {
+                    "type": "debug",
+                    "message": f"On matches page, URL: {page.url}",
+                }
+            )
+            # Navigate to Matches tab and wait for rendered match rows.
+            try:
+                matches_link = page.get_by_role("link", name="Matches", exact=True)
+                await matches_link.scroll_into_view_if_needed()
+                await page.wait_for_timeout(random.randint(500, 1000))
+                await matches_link.click()
+                await page.wait_for_timeout(random.randint(800, 1200))
+            except Exception:
+                # Already on matches tab or link not present in this layout.
+                pass
+            try:
+                await page.wait_for_selector(".v3-match-row", timeout=10000, state="visible")
+                await websocket.send_json(
+                    {
+                        "type": "debug",
+                        "message": "Match rows loaded and visible",
+                    }
+                )
+            except Exception as e:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"Match rows failed to load: {str(e)}",
+                    }
+                )
+                return
+            await page.wait_for_timeout(800)
+            match_cards = await page.query_selector_all(".v3-match-row")
+            await websocket.send_json(
+                {
+                    "type": "debug",
+                    "message": f"Found {len(match_cards)} match cards",
+                }
+            )
+            if len(match_cards) == 0:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "No matches found (even after waiting)",
+                    }
+                )
+                return
 
             def _unique_items(items):
                 out = []
@@ -773,7 +918,269 @@ async def scrape_match_history(
                         break
                 return _unique_items(targets)
 
-            match_targets = await _collect_match_targets()
+            def _extract_match_id(text: str) -> str:
+                if not text:
+                    return ""
+                m = re.search(r"/matches/([0-9a-fA-F-]{36})", text)
+                if m:
+                    return m.group(1)
+                m = re.search(r"([0-9a-fA-F-]{36})", text)
+                return m.group(1) if m else ""
+
+            def _extract_operator_name(raw: object) -> str:
+                if isinstance(raw, str):
+                    return raw.strip()
+                if isinstance(raw, dict):
+                    for key in ("name", "operatorName", "operator", "label", "value", "slug"):
+                        value = raw.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+                return ""
+
+            def _parse_rounds(round_data: dict) -> list:
+                if not isinstance(round_data, dict):
+                    return []
+                players_raw = round_data.get("players", [])
+                player_name_by_id = {}
+                player_operator_by_id = {}
+                if isinstance(players_raw, list):
+                    for p in players_raw:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = p.get("id")
+                        pname = p.get("nickname") or p.get("pseudonym") or p.get("name") or ""
+                        if pid and pname:
+                            player_name_by_id[str(pid)] = str(pname)
+                        op_name = _extract_operator_name(
+                            p.get("operator")
+                            or p.get("operatorName")
+                            or p.get("operator_name")
+                            or p.get("operatorData")
+                            or p.get("operator_data")
+                        )
+                        if pid and op_name:
+                            player_operator_by_id[str(pid)] = op_name
+
+                killfeed_raw = round_data.get("killfeed", [])
+                killfeed_by_round = {}
+                if isinstance(killfeed_raw, list):
+                    for ev in killfeed_raw:
+                        if not isinstance(ev, dict):
+                            continue
+                        rid = ev.get("roundId")
+                        if rid is None:
+                            continue
+                        rid_key = str(rid)
+                        attacker_id = ev.get("attackerId")
+                        victim_id = ev.get("victimId")
+                        attacker_operator = _extract_operator_name(
+                            ev.get("attackerOperatorName")
+                            or ev.get("attackerOperator")
+                            or ev.get("killerOperatorName")
+                            or ev.get("killerOperator")
+                        )
+                        victim_operator = _extract_operator_name(
+                            ev.get("victimOperatorName")
+                            or ev.get("victimOperator")
+                        )
+                        parsed_ev = {
+                            "timestamp": ev.get("timestamp"),
+                            "killerId": attacker_id,
+                            "victimId": victim_id,
+                            "killerName": player_name_by_id.get(str(attacker_id), attacker_id or "Unknown"),
+                            "victimName": player_name_by_id.get(str(victim_id), victim_id or "Unknown"),
+                            "killerOperator": attacker_operator or player_operator_by_id.get(str(attacker_id), ""),
+                            "victimOperator": victim_operator or player_operator_by_id.get(str(victim_id), ""),
+                        }
+                        killfeed_by_round.setdefault(rid_key, []).append(parsed_ev)
+
+                rounds_raw = (
+                    round_data.get("rounds")
+                    or round_data.get("data", {}).get("rounds")
+                    or []
+                )
+                parsed = []
+                for idx, rnd in enumerate(rounds_raw):
+                    if not isinstance(rnd, dict):
+                        continue
+                    round_id = rnd.get("id", idx + 1)
+                    round_num = idx + 1
+                    try:
+                        if isinstance(round_id, (int, float)):
+                            round_num = int(round_id)
+                        elif isinstance(round_id, str) and round_id.isdigit():
+                            round_num = int(round_id)
+                    except Exception:
+                        pass
+                    kill_events = (
+                        killfeed_by_round.get(str(round_num))
+                        or killfeed_by_round.get(str(round_id))
+                        or rnd.get("killEvents")
+                        or rnd.get("kills")
+                        or []
+                    )
+                    round_players = rnd.get("players", [])
+                    round_operator_by_id = {}
+                    if isinstance(round_players, list):
+                        for p in round_players:
+                            if not isinstance(p, dict):
+                                continue
+                            pid = p.get("id") or p.get("playerId") or p.get("player_id")
+                            op_name = _extract_operator_name(
+                                p.get("operator")
+                                or p.get("operatorName")
+                                or p.get("operator_name")
+                                or p.get("operatorData")
+                                or p.get("operator_data")
+                            )
+                            if pid and op_name:
+                                round_operator_by_id[str(pid)] = op_name
+                    if isinstance(kill_events, list):
+                        for ev in kill_events:
+                            if not isinstance(ev, dict):
+                                continue
+                            if not ev.get("killerOperator"):
+                                killer_id = ev.get("killerId") or ev.get("attackerId")
+                                if killer_id:
+                                    ev["killerOperator"] = round_operator_by_id.get(
+                                        str(killer_id),
+                                        player_operator_by_id.get(str(killer_id), ""),
+                                    )
+                            if not ev.get("victimOperator"):
+                                victim_id = ev.get("victimId")
+                                if victim_id:
+                                    ev["victimOperator"] = round_operator_by_id.get(
+                                        str(victim_id),
+                                        player_operator_by_id.get(str(victim_id), ""),
+                                    )
+                    parsed.append(
+                        {
+                            "round_number": round_num,
+                            "winner": (
+                                rnd.get("winner")
+                                or rnd.get("winningTeam")
+                                or rnd.get("resultId")
+                                or "unknown"
+                            ),
+                            "outcome": (
+                                rnd.get("roundOutcome")
+                                or rnd.get("outcome")
+                                or rnd.get("outcomeId")
+                                or rnd.get("resultId")
+                                or "unknown"
+                            ),
+                            "kill_events": kill_events,
+                            "players": round_players if isinstance(round_players, list) else [],
+                        }
+                    )
+                return parsed
+
+            def _enrich_round_operators_from_match_players(match_data: dict) -> None:
+                rounds = match_data.get("rounds", [])
+                players = match_data.get("players", [])
+                if not isinstance(rounds, list) or not isinstance(players, list):
+                    return
+
+                operator_by_username = {}
+                for player in players:
+                    if not isinstance(player, dict):
+                        continue
+                    username = str(player.get("username") or "").strip().lower()
+                    if not username:
+                        continue
+                    operators = player.get("operators")
+                    if isinstance(operators, list):
+                        for op in operators:
+                            op_name = _extract_operator_name(op)
+                            if op_name:
+                                operator_by_username[username] = op_name
+                                break
+
+                if not operator_by_username:
+                    return
+
+                for rnd in rounds:
+                    if not isinstance(rnd, dict):
+                        continue
+                    events = rnd.get("kill_events")
+                    if not isinstance(events, list):
+                        continue
+                    for ev in events:
+                        if not isinstance(ev, dict):
+                            continue
+                        if not ev.get("killerOperator"):
+                            killer_name = str(ev.get("killerName") or "").strip().lower()
+                            if killer_name and killer_name in operator_by_username:
+                                ev["killerOperator"] = operator_by_username[killer_name]
+                        if not ev.get("victimOperator"):
+                            victim_name = str(ev.get("victimName") or "").strip().lower()
+                            if victim_name and victim_name in operator_by_username:
+                                ev["victimOperator"] = operator_by_username[victim_name]
+
+            def _team_score(team: dict) -> int:
+                if not isinstance(team, dict):
+                    return 0
+                direct_score = team.get("score")
+                if isinstance(direct_score, (int, float)):
+                    return int(direct_score)
+                stats = team.get("stats", {})
+                if not isinstance(stats, dict):
+                    return 0
+                for key in ("score", "roundsWon", "rounds_won"):
+                    value = stats.get(key)
+                    if isinstance(value, (int, float)):
+                        return int(value)
+                    if isinstance(value, dict):
+                        inner = value.get("value")
+                        if isinstance(inner, (int, float)):
+                            return int(inner)
+                return 0
+
+            def _stat_value(segment: dict, key: str) -> int | None:
+                stats = segment.get("stats", {}) if isinstance(segment, dict) else {}
+                if not isinstance(stats, dict):
+                    return None
+                raw = stats.get(key)
+                if isinstance(raw, (int, float)):
+                    return int(raw)
+                if isinstance(raw, dict):
+                    value = raw.get("value")
+                    if isinstance(value, (int, float)):
+                        return int(value)
+                return None
+
+            def _user_round_score(summary_data: dict, target_username: str) -> tuple[int | None, int | None]:
+                if not isinstance(summary_data, dict):
+                    return (None, None)
+                segments = summary_data.get("segments", [])
+                if not isinstance(segments, list):
+                    return (None, None)
+                normalized = (target_username or "").strip().lower()
+                if not normalized:
+                    return (None, None)
+                for seg in segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    metadata = seg.get("metadata", {})
+                    if not isinstance(metadata, dict):
+                        continue
+                    handle = (
+                        metadata.get("platformUserHandle")
+                        or metadata.get("name")
+                        or metadata.get("username")
+                        or ""
+                    )
+                    if str(handle).strip().lower() != normalized:
+                        continue
+                    won = _stat_value(seg, "roundsWon")
+                    lost = _stat_value(seg, "roundsLost")
+                    return (won, lost)
+                return (None, None)
+
+            # r6.tracker.network no longer uses <a href="/matches/..."> links.
+            # Match rows are click-handler divs with no href. We count the
+            # .v3-match-row elements directly and drive everything by index.
+            match_targets = await page.query_selector_all(".v3-match-row")
             if not match_targets:
                 await websocket.send_json(
                     {
@@ -784,84 +1191,236 @@ async def scrape_match_history(
                 return
 
             matches_data = []
-            max_to_scrape = min(max_matches, len(match_targets))
+            existing_match_ids = set()
+            try:
+                existing_match_ids = db.get_existing_scraped_match_ids(username)
+                await websocket.send_json(
+                    {
+                        "type": "debug",
+                        "message": f"Loaded {len(existing_match_ids)} existing stored match IDs for {username}",
+                    }
+                )
+            except Exception as e:
+                await websocket.send_json(
+                    {
+                        "type": "warning",
+                        "message": f"Could not load existing stored matches: {str(e)}",
+                    }
+                )
+            # Pre-filter unavailable/rollback rows before the loop.
+            available_match_indexes = []
+            for idx, row in enumerate(match_targets):
+                cls = await row.get_attribute("class") or ""
+                if "v3-match-row--unavailable" in cls:
+                    continue
+                try:
+                    row_text = await row.inner_text()
+                    if "Quick Match" in row_text or "Event" in row_text:
+                        continue
+                except Exception:
+                    pass
+                available_match_indexes.append(idx)
 
-            for i in range(max_to_scrape):
+            await websocket.send_json(
+                {
+                    "type": "debug",
+                    "message": (
+                        f"Found {len(match_targets)} rows, "
+                        f"{len(available_match_indexes)} available after filtering"
+                    ),
+                }
+            )
+
+            # Fast path: newest rows are usually already scraped.
+            # Skip an initial window equal to known stored IDs to avoid needless clicks.
+            skip_count = min(len(existing_match_ids), len(available_match_indexes))
+            candidate_match_indexes = available_match_indexes[skip_count:]
+            if not candidate_match_indexes:
+                candidate_match_indexes = available_match_indexes
+            if skip_count > 0:
+                await websocket.send_json(
+                    {
+                        "type": "debug",
+                        "message": (
+                            f"Fast-skip enabled: skipping first {skip_count} rows based on "
+                            f"{len(existing_match_ids)} stored IDs"
+                        ),
+                    }
+                )
+
+            target_new_matches = max_matches
+            newly_captured = 0
+            consecutive_dupes = 0
+            discovered_ids = set()
+            await websocket.send_json(
+                {
+                    "type": "debug",
+                    "message": (
+                        f"Targeting {target_new_matches} new matches "
+                        f"(early-stop after 5 consecutive stored/duplicate IDs)"
+                    ),
+                }
+            )
+
+            for i, row_index in enumerate(candidate_match_indexes):
+                if newly_captured >= target_new_matches:
+                    break
+                opened_detail = False
                 try:
                     await websocket.send_json(
                         {
                             "type": "scraping_match",
-                            "match_number": i + 1,
-                            "total": max_to_scrape,
+                            "match_number": len(matches_data) + 1,
+                            "total": target_new_matches,
                         }
                     )
 
-                    # Re-open matches page each loop to avoid stale handles.
-                    await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                    await page.wait_for_timeout(random.randint(1200, 2200))
-                    match_targets = await _collect_match_targets()
-                    if i >= len(match_targets):
+                    # Stay on the matches page between iterations; do not reload.
+                    try:
+                        await page.wait_for_selector(".v3-match-row", timeout=10000, state="visible")
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": "Match rows loaded and visible",
+                            }
+                        )
+                    except Exception as e:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": f"Match rows failed to load: {str(e)}",
+                            }
+                        )
+                        continue
+                    await page.wait_for_timeout(800)
+                    match_cards = await page.query_selector_all(".v3-match-row")
+                    await websocket.send_json(
+                        {
+                            "type": "debug",
+                            "message": f"Found {len(match_cards)} match cards",
+                        }
+                    )
+                    if len(match_cards) == 0:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": "No matches found (even after waiting)",
+                            }
+                        )
+                        continue
+                    # Re-query rows each iteration (page reloads between matches)
+                    match_elements = await page.query_selector_all(".v3-match-row")
+                    if row_index >= len(match_elements):
                         await websocket.send_json(
                             {
                                 "type": "warning",
-                                "message": f"Match index {i + 1} no longer available on page.",
+                                "message": f"Match row index {row_index + 1} no longer available on page.",
                             }
                         )
                         continue
 
-                    opened_detail = False
-                    if i < len(match_targets):
-                        target_href = match_targets[i]["href"]
-                        if target_href.startswith("/"):
-                            target_href = f"https://r6.tracker.network{target_href}"
-                        elif not target_href.startswith("http"):
-                            target_href = f"https://r6.tracker.network/{target_href.lstrip('/')}"
+                    # Match ID is unknown until the API fires — start empty
+                    current_match_id = ""
+                    captured_api = {}
 
-                        try:
-                            await page.goto(target_href, wait_until="domcontentloaded", timeout=20000)
-                            await page.wait_for_timeout(random.randint(1500, 2500))
-                            await page.wait_for_selector("text=/Team A|Team B/", timeout=7000)
-                            opened_detail = True
-                        except Exception:
-                            opened_detail = False
+                    async def _capture_response(response):
+                        response_url = response.url
+                        if "/api/v2/r6siege/standard/matches/" in response_url:
+                            if "match_summary" in captured_api:
+                                return
+                            try:
+                                captured_api["match_summary"] = await response.json()
+                                # Extract match ID from URL now that we have it
+                                m = re.search(r"/matches/([0-9a-fA-F-]{36})", response_url)
+                                if m:
+                                    captured_api["_match_id"] = m.group(1)
+                                await websocket.send_json(
+                                    {
+                                        "type": "debug",
+                                        "message": f"Captured match_summary API ({response.status})",
+                                    }
+                                )
+                            except Exception as e:
+                                await websocket.send_json(
+                                    {
+                                        "type": "warning",
+                                        "message": f"Failed to parse match_summary API: {str(e)}",
+                                    }
+                                )
+                        elif "/api/v1/r6siege/ow-ingest/match/get/" in response_url:
+                            if "round_data" in captured_api:
+                                return
+                            try:
+                                captured_api["round_data"] = await response.json()
+                                await websocket.send_json(
+                                    {
+                                        "type": "debug",
+                                        "message": f"Captured round_data API ({response.status})",
+                                    }
+                                )
+                            except Exception as e:
+                                await websocket.send_json(
+                                    {
+                                        "type": "warning",
+                                        "message": f"Failed to parse round_data API: {str(e)}",
+                                    }
+                                )
 
-                    if not opened_detail:
-                        match_elements = await page.query_selector_all(
-                            '[class*="match"], div:has-text(" : "), tr:has-text(" : ")'
-                        )
-                        if i >= len(match_elements):
-                            await websocket.send_json(
-                                {
-                                    "type": "warning",
-                                    "message": f"Could not open match {i + 1}: no clickable match element found.",
-                                }
-                            )
-                            continue
+                    page.on("response", _capture_response)
+                    try:
+                        # Rows are click-handler divs — click by index directly
+                        match_card = match_elements[row_index]
 
-                        match_card = match_elements[i]
                         await match_card.scroll_into_view_if_needed()
                         await page.wait_for_timeout(500)
+                        await match_card.evaluate("element => element.click()")
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": f"Clicked match row {i + 1}",
+                            }
+                        )
+                        # Wait for the detail panel to open
                         try:
-                            clickable = await match_card.query_selector(
-                                'text=/[0-9] : [0-9]/, text=/Ranked/, a, button'
-                            )
-                            if clickable:
-                                await clickable.click()
-                            else:
-                                await match_card.click()
-                            await page.wait_for_timeout(random.randint(1500, 2500))
                             await page.wait_for_selector("text=/Team A|Team B/", timeout=7000)
                             opened_detail = True
-                        except Exception as e:
-                            await websocket.send_json(
-                                {
-                                    "type": "warning",
-                                    "message": f"Could not open match {i + 1}: {str(e)}",
-                                }
-                            )
-                            continue
+                            # Grab match ID from URL if page navigated
+                            current_match_id = _extract_match_id(page.url)
+                        except Exception:
+                            opened_detail = True  # Panel may be inline; proceed anyway
+
+                        await page.wait_for_timeout(800)
+                        # Allow internal tracker API requests to fire and be intercepted.
+                        for _ in range(20):
+                            if "match_summary" in captured_api and "round_data" in captured_api:
+                                break
+                            await asyncio.sleep(0.5)
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    f"API capture status for match {i + 1}: "
+                                    f"summary={'yes' if 'match_summary' in captured_api else 'no'}, "
+                                    f"rounds={'yes' if 'round_data' in captured_api else 'no'}"
+                                ),
+                            }
+                        )
+                    except Exception as e:
+                        await websocket.send_json(
+                            {
+                                "type": "warning",
+                                "message": f"Error while opening/capturing match {i + 1}: {str(e)}",
+                            }
+                        )
+                        continue
+                    finally:
+                        try:
+                            page.remove_listener("response", _capture_response)
+                        except Exception:
+                            pass
 
                     match_data = {
+                        "match_id": current_match_id,
                         "map": "",
                         "mode": "",
                         "score_team_a": 0,
@@ -869,7 +1428,100 @@ async def scrape_match_history(
                         "duration": "",
                         "date": "",
                         "players": [],
+                        "match_summary": captured_api.get("match_summary"),
+                        "round_data": captured_api.get("round_data"),
+                        "rounds": _parse_rounds(captured_api.get("round_data", {})),
+                        "partial_capture": False,
+                        "partial_reason": "",
                     }
+
+                    summary_payload = match_data.get("match_summary") or {}
+                    summary_data = summary_payload.get("data", {}) if isinstance(summary_payload, dict) else {}
+                    metadata = {}
+                    variant_match_ids = set()
+                    if isinstance(summary_data, dict):
+                        metadata = summary_data.get("metadata", {})
+                        if isinstance(metadata, dict):
+                            if not current_match_id:
+                                current_match_id = captured_api.get("_match_id", "") or current_match_id
+                            if not current_match_id:
+                                try:
+                                    variants = metadata.get("overwolfMatchVariants", [])
+                                    if variants:
+                                        current_match_id = variants[0].get("matchId", "")
+                                except Exception:
+                                    pass
+                            try:
+                                variants = metadata.get("overwolfMatchVariants", [])
+                                for v in variants:
+                                    mid = (v.get("matchId", "") if isinstance(v, dict) else "").strip()
+                                    if mid:
+                                        variant_match_ids.add(mid)
+                            except Exception:
+                                pass
+                            match_data["match_id"] = current_match_id or match_data["match_id"]
+
+                            if not match_data["map"]:
+                                match_data["map"] = (
+                                    metadata.get("sessionMapName")
+                                    or metadata.get("mapName")
+                                    or metadata.get("map")
+                                    or match_data["map"]
+                                )
+                            if not match_data["mode"]:
+                                match_data["mode"] = (
+                                    metadata.get("sessionTypeName")
+                                    or metadata.get("sessionGameModeName")
+                                    or metadata.get("playlistName")
+                                    or metadata.get("gamemode")
+                                    or match_data["mode"]
+                                )
+                            if not match_data["date"]:
+                                match_data["date"] = (
+                                    metadata.get("timestamp")
+                                    or metadata.get("date")
+                                    or match_data["date"]
+                                )
+
+                        teams = summary_data.get("teams", [])
+                        if isinstance(teams, list) and len(teams) >= 2:
+                            if not match_data["score_team_a"]:
+                                match_data["score_team_a"] = _team_score(teams[0])
+                            if not match_data["score_team_b"]:
+                                match_data["score_team_b"] = _team_score(teams[1])
+
+                        user_won, user_lost = _user_round_score(summary_data, username)
+                        if isinstance(user_won, int) and isinstance(user_lost, int):
+                            match_data["score_team_a"] = user_won
+                            match_data["score_team_b"] = user_lost
+
+                    match_id = (match_data.get("match_id") or "").strip()
+                    if match_id and (match_id in existing_match_ids or match_id in discovered_ids):
+                        consecutive_dupes += 1
+                        discovered_ids.update(variant_match_ids)
+                        await websocket.send_json(
+                            {
+                                "type": "debug",
+                                "message": (
+                                    f"Skipping already-stored/seen match {match_id} "
+                                    f"(dupe streak={consecutive_dupes})"
+                                ),
+                            }
+                        )
+                        if consecutive_dupes >= 5:
+                            await websocket.send_json(
+                                {
+                                    "type": "debug",
+                                    "message": "5 consecutive already-stored matches, stopping early",
+                                }
+                            )
+                            break
+                        continue
+
+                    consecutive_dupes = 0
+                    if match_id:
+                        discovered_ids.add(match_id)
+                    discovered_ids.update(variant_match_ids)
 
                     try:
                         map_elem = await page.query_selector('[class*="map-name"]')
@@ -879,15 +1531,26 @@ async def scrape_match_history(
                         pass
 
                     try:
-                        score_text = await page.query_selector("text=/[0-9] : [0-9]/")
-                        if score_text:
-                            scores = await score_text.inner_text()
-                            parts = scores.split(":")
-                            if len(parts) == 2:
-                                match_data["score_team_a"] = int(parts[0].strip())
-                                match_data["score_team_b"] = int(parts[1].strip())
+                        # Only use DOM score as fallback when API score parsing failed.
+                        if not match_data["score_team_a"] and not match_data["score_team_b"]:
+                            score_text = await page.query_selector("text=/[0-9] : [0-9]/")
+                            if score_text:
+                                scores = await score_text.inner_text()
+                                parts = scores.split(":")
+                                if len(parts) == 2:
+                                    match_data["score_team_a"] = int(parts[0].strip())
+                                    match_data["score_team_b"] = int(parts[1].strip())
                     except Exception:
                         pass
+
+                    summary_present = bool(match_data.get("match_summary"))
+                    rounds_present = bool(match_data.get("round_data"))
+                    if summary_present and not rounds_present:
+                        reasons = ["round_data_missing"]
+                        if isinstance(metadata, dict) and metadata.get("extendedDataAvailable") is False:
+                            reasons.append("extendedDataAvailable=false")
+                        match_data["partial_capture"] = True
+                        match_data["partial_reason"] = ", ".join(reasons)
 
                     try:
                         player_rows = await page.query_selector_all('tr[class*="group/row"]')
@@ -977,7 +1640,11 @@ async def scrape_match_history(
                             }
                         )
 
+                    _enrich_round_operators_from_match_players(match_data)
                     matches_data.append(match_data)
+                    newly_captured += 1
+                    if match_id:
+                        existing_match_ids.add(match_id)
 
                     await websocket.send_json(
                         {
@@ -985,8 +1652,16 @@ async def scrape_match_history(
                             "match_data": match_data,
                         }
                     )
-
-                    # Next iteration refreshes matches page directly.
+                    if match_data.get("partial_capture"):
+                        await websocket.send_json(
+                            {
+                                "type": "warning",
+                                "message": (
+                                    f"Partial capture for match {match_data.get('match_id') or i + 1}: "
+                                    f"{match_data.get('partial_reason')}"
+                                ),
+                            }
+                        )
 
                 except Exception as e:
                     await websocket.send_json(
@@ -996,6 +1671,18 @@ async def scrape_match_history(
                         }
                     )
                     continue
+                finally:
+                    if opened_detail and page.url != url:
+                        try:
+                            await page.go_back(wait_until="domcontentloaded", timeout=20000)
+                            await page.wait_for_timeout(random.randint(800, 1200))
+                        except Exception as nav_err:
+                            await websocket.send_json(
+                                {
+                                    "type": "warning",
+                                    "message": f"Failed to navigate back to matches list: {str(nav_err)}",
+                                }
+                            )
 
             await websocket.send_json(
                 {
@@ -1003,6 +1690,23 @@ async def scrape_match_history(
                     "total_matches": len(matches_data),
                 }
             )
+
+            try:
+                db.save_scraped_match_cards(username, matches_data)
+                await websocket.send_json(
+                    {
+                        "type": "matches_saved",
+                        "username": username,
+                        "saved_matches": len(matches_data),
+                    }
+                )
+            except Exception as e:
+                await websocket.send_json(
+                    {
+                        "type": "warning",
+                        "message": f"Failed to save scraped matches: {str(e)}",
+                    }
+                )
 
         finally:
             if browser:

@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import json
+import time
 
 class Database:
     """Handle all database operations."""
@@ -36,9 +37,13 @@ class Database:
                 except OSError as e:
                     raise RuntimeError(f"Failed to create database directory '{db_dir}': {e}")
 
-            self.conn = sqlite3.connect(self.db_path)
+            self.conn = sqlite3.connect(self.db_path, timeout=30.0)
             self.conn.row_factory = sqlite3.Row  # Access columns by name
+            self.conn.execute("PRAGMA busy_timeout = 30000")
             self.conn.execute("PRAGMA foreign_keys = ON")
+            # WAL improves concurrency, but enabling it requires a write lock.
+            # If another process holds the DB briefly, keep startup non-fatal.
+            self._set_wal_mode_best_effort()
 
             cursor = self.conn.cursor()
 
@@ -432,7 +437,32 @@ class Database:
                 )
             """)
 
-            self.conn.commit()
+            # Scraped match cards from live websocket scraper
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scraped_match_cards (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username        TEXT NOT NULL,
+                    match_id        TEXT,
+                    map_name        TEXT,
+                    mode            TEXT,
+                    score_team_a    INTEGER,
+                    score_team_b    INTEGER,
+                    duration        TEXT,
+                    match_date      TEXT,
+                    players_json    TEXT,
+                    rounds_json     TEXT,
+                    summary_json    TEXT,
+                    round_data_json TEXT,
+                    scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_scraped_at
+                ON scraped_match_cards (username, scraped_at DESC)
+            """)
+
+            self._commit_with_retry(context="init schema commit")
             self._migrate_schema()
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to initialize database at '{self.db_path}': {e}")
@@ -445,10 +475,45 @@ class Database:
             self._migrate_players_table()
             self._migrate_stats_snapshots_table()
             self._migrate_computed_metrics_table()
-            self.conn.commit()
+            self._commit_with_retry(context="migrate schema commit")
         except sqlite3.Error as e:
             self.conn.rollback()
             raise RuntimeError(f"Failed to migrate database schema: {e}")
+
+    def _commit_with_retry(self, retries: int = 8, delay_seconds: float = 0.25, context: str = "commit") -> None:
+        """
+        Retry commit on transient SQLITE_BUSY/locked errors.
+        """
+        last_error = None
+        for attempt in range(retries):
+            try:
+                self.conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                last_error = e
+                if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+                    raise
+                if attempt == retries - 1:
+                    break
+                time.sleep(delay_seconds)
+        raise RuntimeError(
+            f"Failed to {context}: database remained locked after {retries} attempts ({last_error})"
+        )
+
+    def _set_wal_mode_best_effort(self, retries: int = 5, delay_seconds: float = 0.2) -> None:
+        """Try to enable WAL without failing startup if the DB is temporarily locked."""
+        for attempt in range(retries):
+            try:
+                self.conn.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                if attempt == retries - 1:
+                    print(f"[DB] Warning: could not enable WAL mode (database locked); continuing. ({e})")
+                    return
+                time.sleep(delay_seconds)
 
     def _get_table_columns(self, table_name: str) -> set:
         cursor = self.conn.cursor()
@@ -1070,6 +1135,465 @@ class Database:
         return cursor.lastrowid
 
     # --- Scraper data persistence ---
+
+    @staticmethod
+    def _summary_stat_value(raw: Any) -> Any:
+        """Return tracker stat value, supporting either scalar or {'value': ...} objects."""
+        if isinstance(raw, dict):
+            return raw.get("value")
+        return raw
+
+    @classmethod
+    def _summary_stat_int(cls, raw: Any) -> int:
+        value = cls._summary_stat_value(raw)
+        if value is None:
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _summary_stat_float(cls, raw: Any) -> float:
+        value = cls._summary_stat_value(raw)
+        if value is None:
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _unpack_summary_segments(self, match_id: str, summary_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert a scraped summary payload into normalized row payloads for:
+        - match_detail_players
+        - round_outcomes
+        - player_rounds
+        """
+        data = summary_payload.get("data", {}) if isinstance(summary_payload, dict) else {}
+        segments = data.get("segments", []) if isinstance(data, dict) else []
+        if not isinstance(segments, list):
+            segments = []
+
+        # Index killfeed per round to derive first blood / first death in player-round rows.
+        killfeed_by_round: Dict[int, List[Dict[str, Any]]] = {}
+        for seg in segments:
+            if not isinstance(seg, dict) or seg.get("type") != "round-overview":
+                continue
+            attrs = seg.get("attributes", {}) if isinstance(seg.get("attributes"), dict) else {}
+            meta = seg.get("metadata", {}) if isinstance(seg.get("metadata"), dict) else {}
+            round_id = attrs.get("roundId")
+            try:
+                round_id_int = int(round_id)
+            except (TypeError, ValueError):
+                continue
+            killfeed_raw = meta.get("killfeed", [])
+            killfeed_by_round[round_id_int] = killfeed_raw if isinstance(killfeed_raw, list) else []
+
+        detail_rows: List[Dict[str, Any]] = []
+        round_rows: List[Dict[str, Any]] = []
+        player_round_rows: List[Dict[str, Any]] = []
+        usernames_by_tracker_id: Dict[str, str] = {}
+
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_type = seg.get("type")
+            attrs = seg.get("attributes", {}) if isinstance(seg.get("attributes"), dict) else {}
+            meta = seg.get("metadata", {}) if isinstance(seg.get("metadata"), dict) else {}
+            stats = seg.get("stats", {}) if isinstance(seg.get("stats"), dict) else {}
+
+            if seg_type == "overview":
+                tracker_id = attrs.get("playerId") or meta.get("platformUserId") or ""
+                tracker_id = str(tracker_id).strip() if tracker_id is not None else ""
+                username = str(meta.get("platformUserHandle") or meta.get("displayName") or "").strip()
+                if tracker_id and username:
+                    usernames_by_tracker_id[tracker_id] = username
+
+                detail_rows.append(
+                    {
+                        "player_id_tracker": tracker_id,
+                        "username": username,
+                        "team_id": attrs.get("teamId", -1),
+                        "result": meta.get("result", ""),
+                        "kills": self._summary_stat_int(stats.get("kills")),
+                        "deaths": self._summary_stat_int(stats.get("deaths")),
+                        "assists": self._summary_stat_int(stats.get("assists")),
+                        "headshots": self._summary_stat_int(stats.get("headshots")),
+                        "first_bloods": self._summary_stat_int(stats.get("firstBloods")),
+                        "first_deaths": self._summary_stat_int(stats.get("firstDeaths")),
+                        "clutches_won": self._summary_stat_int(stats.get("clutches")),
+                        "clutches_lost": self._summary_stat_int(stats.get("clutchesLost")),
+                        "clutches_1v1": self._summary_stat_int(stats.get("clutches1v1")),
+                        "clutches_1v2": self._summary_stat_int(stats.get("clutches1v2")),
+                        "clutches_1v3": self._summary_stat_int(stats.get("clutches1v3")),
+                        "clutches_1v4": self._summary_stat_int(stats.get("clutches1v4")),
+                        "clutches_1v5": self._summary_stat_int(stats.get("clutches1v5")),
+                        "kills_1k": self._summary_stat_int(stats.get("kills1K")),
+                        "kills_2k": self._summary_stat_int(stats.get("kills2K")),
+                        "kills_3k": self._summary_stat_int(stats.get("kills3K")),
+                        "kills_4k": self._summary_stat_int(stats.get("kills4K")),
+                        "kills_5k": self._summary_stat_int(stats.get("kills5K")),
+                        "rounds_won": self._summary_stat_int(stats.get("roundsWon")),
+                        "rounds_lost": self._summary_stat_int(stats.get("roundsLost")),
+                        "rank_points": self._summary_stat_int(stats.get("rankPoints")),
+                        "rank_points_delta": self._summary_stat_int(stats.get("rankPointsDelta")),
+                        "rank_points_previous": self._summary_stat_int(stats.get("rankPointsPrevious")),
+                        "kd_ratio": self._summary_stat_float(stats.get("kdRatio")),
+                        "hs_pct": self._summary_stat_float(stats.get("headshotPct")),
+                        "esr": self._summary_stat_float(stats.get("esr")),
+                        "kills_per_round": self._summary_stat_float(stats.get("killsPerRound")),
+                        "time_played_ms": self._summary_stat_int(stats.get("timePlayed")),
+                        "elo": self._summary_stat_int(stats.get("elo")),
+                        "elo_delta": self._summary_stat_int(stats.get("eloDelta")),
+                    }
+                )
+            elif seg_type == "round-overview":
+                round_rows.append(
+                    {
+                        "round_id": attrs.get("roundId"),
+                        "end_reason": attrs.get("roundEndReasonId", ""),
+                        "winner_side": attrs.get("winnerSideId", ""),
+                    }
+                )
+            elif seg_type == "player-round":
+                round_id = attrs.get("roundId")
+                tracker_id = attrs.get("playerId") or ""
+                tracker_id = str(tracker_id).strip() if tracker_id is not None else ""
+                if tracker_id and meta.get("platformUserHandle"):
+                    usernames_by_tracker_id[tracker_id] = str(meta.get("platformUserHandle")).strip()
+
+                first_blood = 0
+                first_death = 0
+                try:
+                    round_id_int = int(round_id)
+                except (TypeError, ValueError):
+                    round_id_int = None
+                if round_id_int is not None:
+                    killfeed = killfeed_by_round.get(round_id_int, [])
+                    if killfeed:
+                        first = killfeed[0] if isinstance(killfeed[0], dict) else {}
+                        killer_id = str(first.get("killerId", "")).strip()
+                        victim_id = str(first.get("victimId", "")).strip()
+                        if killer_id and killer_id == tracker_id:
+                            first_blood = 1
+                        if victim_id and victim_id == tracker_id:
+                            first_death = 1
+
+                player_round_rows.append(
+                    {
+                        "round_id": round_id,
+                        "player_id_tracker": tracker_id,
+                        "team_id": attrs.get("teamId", -1),
+                        "side": attrs.get("sideId", ""),
+                        "operator": meta.get("operatorName", ""),
+                        "result": attrs.get("resultId", ""),
+                        "is_disconnected": 1 if attrs.get("isDisconnected", False) else 0,
+                        "kills": self._summary_stat_int(stats.get("kills")),
+                        "deaths": self._summary_stat_int(stats.get("deaths")),
+                        "assists": self._summary_stat_int(stats.get("assists")),
+                        "headshots": self._summary_stat_int(stats.get("headshots")),
+                        "first_blood": first_blood,
+                        "first_death": first_death,
+                        "clutch_won": self._summary_stat_int(stats.get("clutches")),
+                        "clutch_lost": self._summary_stat_int(stats.get("clutchesLost")),
+                        "hs_pct": self._summary_stat_float(stats.get("headshotPct")),
+                        "esr": self._summary_stat_float(stats.get("esr")),
+                    }
+                )
+
+        return {
+            "detail_rows": detail_rows,
+            "round_rows": round_rows,
+            "player_round_rows": player_round_rows,
+            "usernames_by_tracker_id": usernames_by_tracker_id,
+        }
+
+    def unpack_pending_scraped_match_cards(
+        self,
+        username: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """
+        Unpack scraped match cards with summary_json that have not yet been normalized.
+
+        A card is considered unpacked when all three normalized match tables have at least
+        one row for (player_id, match_id).
+        """
+        cursor = self.conn.cursor()
+        params: List[Any] = []
+        query = """
+            SELECT id, username, match_id, summary_json
+            FROM scraped_match_cards
+            WHERE summary_json IS NOT NULL
+              AND TRIM(summary_json) != ''
+              AND TRIM(summary_json) != '{}'
+              AND LOWER(TRIM(summary_json)) != 'null'
+              AND match_id IS NOT NULL
+              AND TRIM(match_id) != ''
+        """
+        if username:
+            query += " AND username = ?"
+            params.append(username)
+        query += " ORDER BY id DESC"
+        if isinstance(limit, int) and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        cursor.execute(query, tuple(params))
+        cards = cursor.fetchall()
+
+        stats = {
+            "scanned": len(cards),
+            "unpacked_matches": 0,
+            "inserted_detail_rows": 0,
+            "inserted_round_rows": 0,
+            "inserted_player_round_rows": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+
+        for row in cards:
+            owner_username = str(row["username"] or "").strip()
+            match_id = str(row["match_id"] or "").strip()
+            summary_raw = row["summary_json"]
+            if not owner_username or not match_id or not summary_raw:
+                stats["skipped"] += 1
+                continue
+
+            try:
+                owner_player_id = self.get_player_id(owner_username)
+                if owner_player_id is None:
+                    owner_player_id = self.add_player(owner_username)
+
+                cursor.execute(
+                    "SELECT 1 FROM match_detail_players WHERE player_id = ? AND match_id = ? LIMIT 1",
+                    (owner_player_id, match_id),
+                )
+                has_detail = cursor.fetchone() is not None
+                cursor.execute(
+                    "SELECT 1 FROM round_outcomes WHERE player_id = ? AND match_id = ? LIMIT 1",
+                    (owner_player_id, match_id),
+                )
+                has_round_outcomes = cursor.fetchone() is not None
+                cursor.execute(
+                    "SELECT 1 FROM player_rounds WHERE player_id = ? AND match_id = ? LIMIT 1",
+                    (owner_player_id, match_id),
+                )
+                has_player_rounds = cursor.fetchone() is not None
+                if has_detail and has_round_outcomes and has_player_rounds:
+                    stats["skipped"] += 1
+                    continue
+
+                summary_payload = json.loads(summary_raw)
+                unpacked = self._unpack_summary_segments(match_id, summary_payload)
+                detail_rows = unpacked["detail_rows"]
+                round_rows = unpacked["round_rows"]
+                player_round_rows = unpacked["player_round_rows"]
+                usernames_by_tracker_id = unpacked["usernames_by_tracker_id"]
+
+                if not detail_rows and not round_rows and not player_round_rows:
+                    stats["skipped"] += 1
+                    continue
+
+                # Replace per-match normalized rows for this owner to keep data consistent.
+                self.save_match_detail_players(owner_player_id, match_id, detail_rows)
+                self.save_round_outcomes(owner_player_id, match_id, round_rows)
+                self.save_player_rounds(
+                    owner_player_id,
+                    match_id,
+                    player_round_rows,
+                    usernames_by_tracker_id=usernames_by_tracker_id,
+                )
+
+                stats["unpacked_matches"] += 1
+                stats["inserted_detail_rows"] += len(detail_rows)
+                stats["inserted_round_rows"] += len(round_rows)
+                stats["inserted_player_round_rows"] += len(player_round_rows)
+            except Exception:
+                stats["errors"] += 1
+
+        return stats
+
+    def save_scraped_match_cards(self, username: str, matches: List[Dict]) -> None:
+        """Persist scraped match cards for one username without wiping prior rows."""
+        cursor = self.conn.cursor()
+        for item in matches:
+            match_id = (item.get("match_id") or "").strip()
+            if match_id:
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM scraped_match_cards
+                    WHERE username = ? AND match_id = ?
+                    LIMIT 1
+                    """,
+                    (username, match_id),
+                )
+                if cursor.fetchone() is not None:
+                    continue
+            cursor.execute("""
+                INSERT INTO scraped_match_cards (
+                    username, match_id, map_name, mode, score_team_a, score_team_b,
+                    duration, match_date, players_json, rounds_json, summary_json, round_data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                username,
+                item.get("match_id"),
+                item.get("map"),
+                item.get("mode"),
+                item.get("score_team_a"),
+                item.get("score_team_b"),
+                item.get("duration"),
+                item.get("date"),
+                json.dumps(item.get("players", [])),
+                json.dumps(item.get("rounds", [])),
+                json.dumps(item.get("match_summary", {})),
+                json.dumps(item.get("round_data", {})),
+            ))
+
+        self.conn.commit()
+        # Automatically normalize any new/legacy cards that still need unpacking.
+        self.unpack_pending_scraped_match_cards(username=username)
+
+    @staticmethod
+    def _normalize_team_label(raw_team: Any) -> str:
+        """Convert assorted team identifiers to canonical 'A'/'B' labels."""
+        if raw_team is None:
+            return ""
+        text = str(raw_team).strip().lower()
+        if not text:
+            return ""
+        if text in {"a", "team_a", "teama", "blue", "0"}:
+            return "A"
+        if text in {"b", "team_b", "teamb", "orange", "1"}:
+            return "B"
+        if "blue" in text or text.startswith("team a"):
+            return "A"
+        if "orange" in text or text.startswith("team b"):
+            return "B"
+        return ""
+
+    def _build_players_from_detail_rows(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Map normalized match_detail_players rows back into the scraped players shape."""
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            username = str(row.get("username") or "").strip()
+            if not username:
+                continue
+            out.append(
+                {
+                    "team": self._normalize_team_label(row.get("team_id")),
+                    "username": username,
+                    "rank_points": row.get("rank_points") or 0,
+                    "kd": row.get("kd_ratio") or 0.0,
+                    "kills": row.get("kills") or 0,
+                    "deaths": row.get("deaths") or 0,
+                    "assists": row.get("assists") or 0,
+                    "hs_percent": row.get("hs_pct") or 0.0,
+                    "operators": [],
+                }
+            )
+        return out
+
+    def get_scraped_match_cards(self, username: str, limit: int = 50) -> List[Dict]:
+        """Fetch persisted scraped match cards for one username."""
+        # Keep normalized tables current whenever stored cards are accessed.
+        self.unpack_pending_scraped_match_cards(username=username)
+        owner_player_id = self.get_player_id(username)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM scraped_match_cards
+            WHERE username = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (username, limit),
+        )
+
+        out = []
+        repaired_players_json = False
+        for row in cursor.fetchall():
+            item = dict(row)
+            try:
+                players = json.loads(item.get("players_json") or "[]")
+            except json.JSONDecodeError:
+                players = []
+            if not isinstance(players, list):
+                players = []
+            try:
+                rounds = json.loads(item.get("rounds_json") or "[]")
+            except json.JSONDecodeError:
+                rounds = []
+            try:
+                summary = json.loads(item.get("summary_json") or "{}")
+            except json.JSONDecodeError:
+                summary = {}
+            try:
+                round_data = json.loads(item.get("round_data_json") or "{}")
+            except json.JSONDecodeError:
+                round_data = {}
+
+            # Repair stale scraped players payloads from normalized rows so UI insights stay current.
+            has_named_players = any(
+                isinstance(p, dict) and str(p.get("username") or p.get("name") or "").strip()
+                for p in players
+            )
+            has_team_labels = any(
+                isinstance(p, dict) and str(p.get("team") or "").strip().upper() in {"A", "B"}
+                for p in players
+            )
+            needs_player_rebuild = (not has_named_players) or (has_named_players and not has_team_labels)
+            if needs_player_rebuild and owner_player_id and item.get("match_id"):
+                detail_rows = self.get_match_detail_players(owner_player_id, str(item.get("match_id")))
+                rebuilt_players = self._build_players_from_detail_rows(detail_rows)
+                if rebuilt_players:
+                    players = rebuilt_players
+                    cursor.execute(
+                        "UPDATE scraped_match_cards SET players_json = ? WHERE id = ?",
+                        (json.dumps(players), item.get("id")),
+                    )
+                    repaired_players_json = True
+
+            out.append(
+                {
+                    "username": item.get("username"),
+                    "match_id": item.get("match_id") or "",
+                    "map": item.get("map_name") or "",
+                    "mode": item.get("mode") or "",
+                    "score_team_a": item.get("score_team_a") or 0,
+                    "score_team_b": item.get("score_team_b") or 0,
+                    "duration": item.get("duration") or "",
+                    "date": item.get("match_date") or "",
+                    "players": players,
+                    "rounds": rounds,
+                    "match_summary": summary,
+                    "round_data": round_data,
+                    "scraped_at": item.get("scraped_at"),
+                }
+            )
+
+        if repaired_players_json:
+            self.conn.commit()
+
+        return out
+
+    def get_existing_scraped_match_ids(self, username: str) -> set[str]:
+        """Return distinct non-empty scraped match IDs for a username."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT match_id
+            FROM scraped_match_cards
+            WHERE username = ?
+              AND match_id IS NOT NULL
+              AND TRIM(match_id) != ''
+            """,
+            (username,),
+        )
+        return {str(row["match_id"]).strip() for row in cursor.fetchall() if row["match_id"]}
 
     def save_map_stats(self, player_id: int, maps: List[Dict], snapshot_id: int = None, season: str = 'Y10S4') -> None:
         """Persist scraped map stats for a player and season."""

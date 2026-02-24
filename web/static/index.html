@@ -2,8 +2,8 @@
 <html>
 <head>
     <title>JAKAL - R6 Network Scanner</title>
-    <script src="/static/vis-network.min.js"></script>
-    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/vis-network.min.js?v=20260223k"></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260224n">
 </head>
 <body>
     <div class="container">
@@ -14,6 +14,8 @@
         <div class="tabs">
             <button class="tab-btn active" id="tab-scanner" data-tab="scanner">Network Scanner</button>
             <button class="tab-btn" id="tab-matches" data-tab="matches">Match Scraper</button>
+            <button class="tab-btn" id="tab-stored" data-tab="stored">Stored Matches</button>
+            <button class="tab-btn" id="tab-compute" data-tab="compute">Stat Computation</button>
         </div>
 
         <section id="panel-scanner" class="tab-panel active">
@@ -69,6 +71,7 @@
                 </label>
                 <button id="start-match-scrape">Scrape Matches</button>
                 <button id="stop-match-scrape" disabled>Stop Scrape</button>
+                <button id="load-saved-matches">Load Saved</button>
             </div>
 
             <div class="stats">
@@ -89,8 +92,69 @@
             <div class="log" id="match-log"></div>
             <div class="log" id="match-results"></div>
         </section>
+
+        <section id="panel-stored" class="tab-panel">
+            <div class="controls">
+                <input type="text" id="stored-username" placeholder="Enter R6 username" value="SaucedZyn">
+                <label>
+                    <input type="checkbox" id="stored-show-ranked" checked>
+                    Ranked
+                </label>
+                <label>
+                    <input type="checkbox" id="stored-show-unranked" checked>
+                    Unranked
+                </label>
+                <button id="load-stored-matches">Load Stored Matches</button>
+            </div>
+
+            <div class="stats">
+                <div class="stat">
+                    <label>Total Stored:</label>
+                    <span id="stored-total">0</span>
+                </div>
+                <div class="stat">
+                    <label>Wins:</label>
+                    <span id="stored-wins">0</span>
+                </div>
+                <div class="stat">
+                    <label>Losses:</label>
+                    <span id="stored-losses">0</span>
+                </div>
+            </div>
+
+            <div id="stored-match-list" class="stored-match-list"></div>
+
+            <div id="stored-detail" class="stored-detail hidden">
+                <div class="stored-detail-head">
+                    <h3 id="stored-detail-title">Match Insights</h3>
+                    <div class="stored-detail-head-actions">
+                        <span id="stored-detail-meta"></span>
+                        <button id="stored-detail-close" type="button">Close</button>
+                    </div>
+                </div>
+                <div id="stored-operator-icon-hint" class="stored-icon-hint hidden"></div>
+                <div id="stored-insights" class="stored-insights"></div>
+                <div id="stored-round-list" class="stored-round-list"></div>
+                <div id="stored-round-label" class="stored-round-label">Round -/-</div>
+                <div id="stored-round-body" class="stored-round-body"></div>
+            </div>
+        </section>
+
+        <section id="panel-compute" class="tab-panel">
+            <div class="controls">
+                <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
+                <button id="run-stat-compute">Compute Stats</button>
+            </div>
+            <div id="compute-results" class="compute-results">
+                <div class="compute-card">
+                    <div class="compute-label">Status</div>
+                    <div class="compute-value">Enter a username and click Compute Stats.</div>
+                </div>
+            </div>
+            <div class="log" id="compute-log"></div>
+        </section>
     </div>
 
-    <script src="/static/network.js"></script>
+    <script src="/static/network.js?v=20260224o"></script>
 </body>
 </html>
