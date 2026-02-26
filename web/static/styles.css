@@ -407,6 +407,8 @@ header p { color: #888; font-size: 14px; }
     flex-direction: column;
     gap: 12px;
     min-height: 0;
+    overflow-y: auto;
+    padding-right: 6px;
 }
 
 .compute-kpi-strip {
@@ -626,10 +628,36 @@ button:focus-visible {
     margin-bottom: 8px;
 }
 
+.compute-type-controls {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+}
+
+.compute-types-label {
+    font-size: 12px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.compute-types-label-spacer {
+    visibility: hidden;
+}
+
+.compute-types-sub-label {
+    font-size: 11px;
+    color: #b6c0d0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
 .compute-playbook {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 10px;
+    max-height: 38vh;
+    overflow-y: auto;
+    padding-right: 4px;
 }
 
 .playbook-card {
@@ -744,6 +772,8 @@ button:focus-visible {
     padding: 10px;
     color: #cfd8e6;
     font-size: 12px;
+    max-height: 22vh;
+    overflow-y: auto;
 }
 
 .dashboard-evidence-title {
@@ -762,6 +792,63 @@ button:focus-visible {
     margin-top: 8px;
     color: #d7deea;
     line-height: 1.45;
+}
+
+.dashboard-insights-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    min-height: 0;
+}
+
+.dashboard-insights-left,
+.dashboard-bestworst-right {
+    min-height: 0;
+}
+
+.dashboard-insights-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 52vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.dashboard-bestworst-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    max-height: 52vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.dashboard-focus-card {
+    border: 1px solid #2f3440;
+    border-radius: 10px;
+    background: linear-gradient(180deg, #171b22, #141414);
+    padding: 10px;
+}
+
+.dashboard-focus-title {
+    font-size: 11px;
+    color: #9ca9bd;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.dashboard-focus-value {
+    margin-top: 6px;
+    font-size: 20px;
+    color: #eef4ff;
+    font-weight: 800;
+}
+
+.dashboard-focus-meta {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #adb8ca;
 }
 
 .compute-console {
@@ -794,6 +881,15 @@ button:focus-visible {
     }
     .compute-mode-cards {
         grid-template-columns: 1fr;
+    }
+    .compute-types-label-spacer {
+        display: none;
+    }
+    .dashboard-insights-layout {
+        grid-template-columns: 1fr;
+    }
+    .dashboard-insights-scroll {
+        max-height: 42vh;
     }
 }
 
@@ -1173,6 +1269,27 @@ button:focus-visible {
 .insights-sev-info {
     border-left-color: #22c55e;
     background: rgba(34, 197, 94, 0.1);
+}
+
+.insights-findings-more {
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #141414;
+    padding: 6px 9px;
+}
+
+.insights-findings-more summary {
+    cursor: pointer;
+    color: #d8dce2;
+    font-size: 12px;
+    user-select: none;
+}
+
+.insights-findings-more-body {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .stored-match-list {

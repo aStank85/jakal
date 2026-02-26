@@ -3,7 +3,7 @@
 <head>
     <title>JAKAL - R6 Network Scanner</title>
     <script src="/static/vis-network.min.js?v=20260223k"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260224w">
+    <link rel="stylesheet" href="/static/styles.css?v=20260226a">
 </head>
 <body>
     <div id="global-scrape-indicator" class="global-scrape-indicator hidden">
@@ -174,6 +174,28 @@
                 <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
                 <button id="run-stat-compute">Run Dashboard</button>
             </div>
+            <div class="controls compute-type-controls">
+                <span class="compute-types-label">Dashboard Match Types:</span>
+                <span class="compute-types-sub-label">Include</span>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="ranked"> Ranked</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="unranked"> Unranked</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="standard"> Standard</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="quick"> Quick</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="event"> Event</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="arcade"> Arcade</label>
+                <label><input type="checkbox" class="dashboard-include-type-filter" value="other"> Other</label>
+            </div>
+            <div class="controls compute-type-controls">
+                <span class="compute-types-label compute-types-label-spacer" aria-hidden="true">Dashboard Match Types:</span>
+                <span class="compute-types-sub-label">Exclude</span>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="ranked"> Ranked</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="unranked"> Unranked</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="standard"> Standard</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="quick"> Quick</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="event"> Event</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="arcade"> Arcade</label>
+                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="other"> Other</label>
+            </div>
             <div id="compute-results" class="compute-report">
                 <div class="compute-kpi-strip">
                     <div class="compute-kpi-main">
@@ -232,6 +254,40 @@
                         Click a stat for inline evidence.
                     </div>
                 </div>
+
+                <div class="dashboard-insights-layout">
+                    <div class="compute-card dashboard-insights-left">
+                        <div class="compute-label">Info & Insight Cards</div>
+                        <div id="dashboard-insights-scroll" class="dashboard-insights-scroll">
+                            <div class="compute-value">Run Dashboard to auto-populate insight cards.</div>
+                        </div>
+                    </div>
+                    <div class="compute-card dashboard-bestworst-right">
+                        <div class="compute-label">Performance Focus</div>
+                        <div class="dashboard-bestworst-grid">
+                            <section class="dashboard-focus-card">
+                                <div class="dashboard-focus-title">Best Operator</div>
+                                <div id="dashboard-best-operator-value" class="dashboard-focus-value">N/A</div>
+                                <div id="dashboard-best-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
+                            </section>
+                            <section class="dashboard-focus-card">
+                                <div class="dashboard-focus-title">Worst Operator</div>
+                                <div id="dashboard-worst-operator-value" class="dashboard-focus-value">N/A</div>
+                                <div id="dashboard-worst-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
+                            </section>
+                            <section class="dashboard-focus-card">
+                                <div class="dashboard-focus-title">Best Map</div>
+                                <div id="dashboard-best-map-value" class="dashboard-focus-value">N/A</div>
+                                <div id="dashboard-best-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
+                            </section>
+                            <section class="dashboard-focus-card">
+                                <div class="dashboard-focus-title">Worst Map</div>
+                                <div id="dashboard-worst-map-value" class="dashboard-focus-value">N/A</div>
+                                <div id="dashboard-worst-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
+                            </section>
+                        </div>
+                    </div>
+                </div>
             </div>
             <details id="compute-console" class="compute-console">
                 <summary>Console</summary>
@@ -240,6 +296,6 @@
         </section>
     </div>
 
-    <script src="/static/network.js?v=20260224aa"></script>
+    <script src="/static/network.js?v=20260226a"></script>
 </body>
 </html>

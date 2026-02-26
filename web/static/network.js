@@ -9,6 +9,7 @@ let matchProgressTarget = 0;
 let continuousScrapeEnabled = false;
 let continuousStopRequested = false;
 let continuousRestartTimer = null;
+let lastMatchRowsScanned = 0;
 let visLib = null;
 let layoutTick = null;
 let currentMatchUsername = "";
@@ -30,6 +31,11 @@ let computeReportState = {
     chemistry: null,
     lobby: null,
     trade: null,
+    team: null,
+    operator: null,
+    map: null,
+    sorted: null,
+    evidenceByKey: {},
     selectedEvidenceKey: "",
 };
 const MAP_IMAGE_FILE_BY_KEY = {
@@ -397,17 +403,24 @@ function setGlobalScrapeRunning(isRunning) {
     indicator.classList.toggle("hidden", !isRunning);
 }
 
-function setMatchProgress(processed, total) {
+function setMatchProgress(processed, total, options = {}) {
     const bar = document.getElementById("match-progress-bar");
     const text = document.getElementById("match-progress-text");
     const wrap = document.getElementById("match-progress-wrap");
     if (!bar || !text) return;
+    const animateOpenEnded = options.animateOpenEnded !== false;
     const safeProcessed = Math.max(0, toNumber(processed, 0));
     const rawTotal = toNumber(total, 0);
     const isOpenEnded = continuousScrapeEnabled || rawTotal <= 0;
     if (isOpenEnded) {
-        wrap?.classList.add("indeterminate");
-        bar.style.width = "35%";
+        if (animateOpenEnded) {
+            wrap?.classList.add("indeterminate");
+            bar.style.width = "35%";
+        } else {
+            wrap?.classList.remove("indeterminate");
+            bar.style.transform = "";
+            bar.style.width = "100%";
+        }
         text.textContent = `${safeProcessed} scanned`;
         return;
     }
@@ -499,8 +512,10 @@ function startMatchScrape(autoRestart = false) {
         document.getElementById("match-count").textContent = "0";
         document.getElementById("current-match").textContent = "-";
         document.getElementById("match-status").textContent = "Starting";
+        lastMatchRowsScanned = 0;
     } else {
         document.getElementById("match-status").textContent = "Restarting";
+        lastMatchRowsScanned = 0;
     }
     matchProgressTarget = (continuousScrapeEnabled || openEndedNewest || openEndedBackfill) ? 0 : Math.max(1, toNumber(maxMatches, 1));
     setMatchProgress(0, matchProgressTarget);
@@ -551,6 +566,7 @@ function startMatchScrape(autoRestart = false) {
     wsMatches.onclose = () => {
         logMatch("Match scraper disconnected");
         matchScraping = false;
+        setMatchProgress(lastMatchRowsScanned, matchProgressTarget, { animateOpenEnded: false });
         if (
             continuousScrapeEnabled &&
             !continuousStopRequested &&
@@ -598,6 +614,7 @@ function stopMatchScrape() {
     }
     matchScraping = false;
     setGlobalScrapeRunning(false);
+    setMatchProgress(0, 1, { animateOpenEnded: false });
     document.getElementById("start-match-scrape").disabled = false;
     document.getElementById("stop-match-scrape").disabled = true;
     document.getElementById("match-status").textContent = "Stopped";
@@ -663,6 +680,7 @@ function handleMatchMessage(data) {
             const newestOnly = document.getElementById("matches-newest-only")?.checked === true;
             const fullBackfill = document.getElementById("matches-full-backfill")?.checked === true;
             const openEnded = continuousScrapeEnabled || newestOnly || fullBackfill;
+            lastMatchRowsScanned = Math.max(lastMatchRowsScanned, toNumber(data.match_number, 0));
             if (openEnded) {
                 document.getElementById("current-match").textContent = `${data.match_number}`;
             } else {
@@ -713,9 +731,11 @@ function handleMatchMessage(data) {
             const fullBackfillDone = document.getElementById("matches-full-backfill")?.checked === true;
             const openEndedDone = continuousScrapeEnabled || newestOnlyDone || fullBackfillDone;
             const completedScanned = toNumber(data.rows_scanned, toNumber(data.total_matches, 0));
+            lastMatchRowsScanned = Math.max(lastMatchRowsScanned, completedScanned);
             setMatchProgress(
                 completedScanned,
-                openEndedDone ? 0 : (matchProgressTarget || toNumber(data.total_matches, 1))
+                openEndedDone ? 0 : (matchProgressTarget || toNumber(data.total_matches, 1)),
+                { animateOpenEnded: false }
             );
             logMatch(`Match scraping complete (${data.total_matches} matches)`, "success");
             break;
@@ -1145,6 +1165,10 @@ function classifyStoredMode(match) {
     if (!mode) return "other";
     if (mode.includes("unranked")) return "unranked";
     if (mode.includes("ranked")) return "ranked";
+    if (mode.includes("standard")) return "standard";
+    if (mode.includes("quick")) return "quick";
+    if (mode.includes("event")) return "event";
+    if (mode.includes("arcade")) return "arcade";
     return "other";
 }
 
@@ -1155,6 +1179,32 @@ function applyStoredModeFilters(matches) {
         const category = classifyStoredMode(match);
         if (category === "ranked") return showRanked;
         if (category === "unranked") return showUnranked;
+        return true;
+    });
+}
+
+function getDashboardModeFilters() {
+    const include = new Set(
+        Array.from(document.querySelectorAll(".dashboard-include-type-filter"))
+            .filter((el) => el.checked)
+            .map((el) => String(el.value || "").trim().toLowerCase())
+            .filter(Boolean)
+    );
+    const exclude = new Set(
+        Array.from(document.querySelectorAll(".dashboard-exclude-type-filter"))
+            .filter((el) => el.checked)
+            .map((el) => String(el.value || "").trim().toLowerCase())
+            .filter(Boolean)
+    );
+    return { include, exclude };
+}
+
+function applyDashboardModeFilters(matches) {
+    const { include, exclude } = getDashboardModeFilters();
+    return (Array.isArray(matches) ? matches : []).filter((match) => {
+        const category = classifyStoredMode(match);
+        if (include.size && !include.has(category)) return false;
+        if (exclude.has(category)) return false;
         return true;
     });
 }
@@ -1871,7 +1921,7 @@ async function loadStoredMatchesView(explicitUsername = "", silent = false) {
 
     currentStoredUsername = username;
     try {
-        const res = await fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=100`);
+        const res = await fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=2000`);
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
         }
@@ -1951,12 +2001,42 @@ function splitFindingMessage(message) {
     };
 }
 
+function normalizeCitation(citation) {
+    if (typeof citation === "string") {
+        return citation.trim();
+    }
+    if (citation && typeof citation === "object") {
+        const preferred = ["message", "text", "label", "match_id", "round_id", "map_name"];
+        for (const key of preferred) {
+            const value = citation[key];
+            if (typeof value === "string" && value.trim()) return value.trim();
+            if (typeof value === "number" && Number.isFinite(value)) return String(value);
+        }
+        try {
+            return JSON.stringify(citation);
+        } catch (_) {
+            return String(citation);
+        }
+    }
+    return String(citation ?? "").trim();
+}
+
+function formatCitationText(citations) {
+    const rows = (Array.isArray(citations) ? citations : [])
+        .map(normalizeCitation)
+        .filter(Boolean);
+    return rows.length ? rows.join("\n") : "No citation provided.";
+}
+
 function flattenSortedFindings() {
     const sources = [
         { label: "Round Analysis", data: computeReportState.round },
         { label: "Teammate Chemistry", data: computeReportState.chemistry },
         { label: "Lobby Quality", data: computeReportState.lobby },
         { label: "Trade Analysis", data: computeReportState.trade },
+        { label: "Team Analysis", data: computeReportState.team },
+        { label: "Operator Stats", data: computeReportState.operator },
+        { label: "Map Stats", data: computeReportState.map },
     ];
     const combined = [];
     for (const src of sources) {
@@ -1984,6 +2064,7 @@ function renderPlaybook() {
     const container = document.getElementById("compute-playbook");
     if (!container) return;
     const findings = flattenSortedFindings();
+    computeReportState.evidenceByKey = {};
     if (!findings.length) {
         container.innerHTML = `<div class="compute-value">No findings generated for this player.</div>`;
         return;
@@ -1993,8 +2074,12 @@ function renderPlaybook() {
             const sev = normalizeFindingSeverity(f?.severity);
             const parts = splitFindingMessage(f?.message || "");
             const sevLabel = sev === "critical" ? "Critical" : sev === "warning" ? "Warning" : "Info";
-            const citations = Array.isArray(f?.citations) ? f.citations : [];
-            const evidenceText = citations.length ? citations.join(" | ") : "No citation provided.";
+            const key = `playbook-${idx}`;
+            computeReportState.evidenceByKey[key] = {
+                title: parts.headline || "Finding",
+                source: f.source || "Insight",
+                text: formatCitationText(f?.citations),
+            };
             return `
                 <article class="playbook-card playbook-${sev}" data-playbook-index="${idx}">
                     <div class="playbook-top">
@@ -2006,10 +2091,7 @@ function renderPlaybook() {
                     <button
                         type="button"
                         class="playbook-evidence"
-                        data-evidence-key="playbook-${idx}"
-                        data-evidence-title="${escapeHtml(parts.headline)}"
-                        data-evidence-source="${escapeHtml(f.source || "Insight")}"
-                        data-evidence-text="${escapeHtml(evidenceText)}"
+                        data-evidence-key="${key}"
                     >
                         Evidence
                     </button>
@@ -2020,15 +2102,17 @@ function renderPlaybook() {
 
     container.querySelectorAll(".playbook-evidence").forEach((btn) => {
         btn.addEventListener("click", () => {
-            const title = btn.dataset.evidenceTitle || "Finding";
-            const source = btn.dataset.evidenceSource || "Insight";
-            const text = btn.dataset.evidenceText || "No citation provided.";
             const key = btn.dataset.evidenceKey || "";
+            const evidence = computeReportState.evidenceByKey[key] || {};
+            const title = evidence.title || "Finding";
+            const source = evidence.source || "Insight";
+            const text = evidence.text || "No citation provided.";
+            const body = escapeHtml(text).replace(/\n/g, "<br>");
             renderEvidencePanel(
                 key,
                 `<div class="dashboard-evidence-title">${escapeHtml(title)}</div>` +
                 `<div class="dashboard-evidence-meta">${escapeHtml(source)}</div>` +
-                `<div class="dashboard-evidence-body">${escapeHtml(text)}</div>`
+                `<div class="dashboard-evidence-body">${body}</div>`
             );
         });
     });
@@ -2076,6 +2160,125 @@ function renderDeepStats(round) {
             );
         });
     });
+}
+
+function computeDashboardSortedData() {
+    const seededMapRows = Array.isArray(computeReportState.sorted?.mapRows) ? computeReportState.sorted.mapRows : [];
+    const operatorRows = (Array.isArray(computeReportState.operator?.operators) ? computeReportState.operator.operators : [])
+        .filter((row) => String(row?.operator || "").trim() && toNumber(row?.rounds, 0) > 0)
+        .slice()
+        .sort((a, b) => (
+            toNumber(b?.win_pct, 0) - toNumber(a?.win_pct, 0) ||
+            toNumber(b?.rounds, 0) - toNumber(a?.rounds, 0)
+        ));
+
+    const mapRows = seededMapRows.length
+        ? seededMapRows
+        : (Array.isArray(computeReportState.map?.maps) ? computeReportState.map.maps : [])
+            .filter((row) => String(row?.map_name || "").trim() && toNumber(row?.matches, 0) > 0)
+            .slice()
+            .sort((a, b) => (
+                toNumber(b?.win_pct, 0) - toNumber(a?.win_pct, 0) ||
+                toNumber(b?.matches, 0) - toNumber(a?.matches, 0)
+            ));
+
+    const sorted = { operatorRows, mapRows };
+    computeReportState.sorted = sorted;
+    return sorted;
+}
+
+function computeSortedMapsFromMatches(matches, username) {
+    const rows = Array.isArray(matches) ? matches : [];
+    const agg = new Map();
+    for (const match of rows) {
+        const mapName = String(match?.map || "").trim() || "Unknown";
+        const perspective = inferTeamPerspective(match, username);
+        const entry = agg.get(mapName) || { map_name: mapName, matches: 0, wins: 0, losses: 0, win_pct: 0 };
+        entry.matches += 1;
+        if (perspective.result === "Win") entry.wins += 1;
+        if (perspective.result === "Loss") entry.losses += 1;
+        agg.set(mapName, entry);
+    }
+    return Array.from(agg.values())
+        .map((row) => ({
+            ...row,
+            win_pct: row.matches ? Number(((row.wins / row.matches) * 100).toFixed(1)) : 0,
+        }))
+        .sort((a, b) => (
+            toNumber(b?.win_pct, 0) - toNumber(a?.win_pct, 0) ||
+            toNumber(b?.matches, 0) - toNumber(a?.matches, 0)
+        ));
+}
+
+function renderDashboardBestWorstSummary() {
+    const operator = computeReportState.operator || {};
+    const map = computeReportState.map || {};
+    const sorted = computeReportState.sorted || computeDashboardSortedData();
+    const bestOperator = operator.best_operator || sorted.operatorRows[0] || null;
+    const worstOperator = operator.worst_operator || sorted.operatorRows[sorted.operatorRows.length - 1] || null;
+    const bestMap = map.best_map || sorted.mapRows[0] || null;
+    const worstMap = map.worst_map || map.ban_recommendation || sorted.mapRows[sorted.mapRows.length - 1] || null;
+
+    const writeSummary = (valueId, metaId, label, winPct, matches, extra = "") => {
+        const valueEl = document.getElementById(valueId);
+        const metaEl = document.getElementById(metaId);
+        if (valueEl) valueEl.textContent = label || "N/A";
+        if (!metaEl) return;
+        if (!label) {
+            metaEl.textContent = "No data available.";
+            return;
+        }
+        const pctText = Number.isFinite(Number(winPct)) ? `${formatFixed(winPct, 1)}% WR` : "WR N/A";
+        const matchesText = Number.isFinite(Number(matches)) ? `${toNumber(matches, 0)} matches` : "match count N/A";
+        metaEl.textContent = `${pctText} • ${matchesText}${extra ? ` • ${extra}` : ""}`;
+    };
+
+    writeSummary(
+        "dashboard-best-operator-value",
+        "dashboard-best-operator-meta",
+        bestOperator?.operator || "",
+        bestOperator?.win_pct,
+        bestOperator?.rounds,
+        bestOperator?.side ? String(bestOperator.side) : ""
+    );
+    writeSummary(
+        "dashboard-worst-operator-value",
+        "dashboard-worst-operator-meta",
+        worstOperator?.operator || "",
+        worstOperator?.win_pct,
+        worstOperator?.rounds,
+        worstOperator?.side ? String(worstOperator.side) : ""
+    );
+    writeSummary(
+        "dashboard-best-map-value",
+        "dashboard-best-map-meta",
+        bestMap?.map_name || "",
+        bestMap?.win_pct,
+        bestMap?.matches
+    );
+    writeSummary(
+        "dashboard-worst-map-value",
+        "dashboard-worst-map-meta",
+        worstMap?.map_name || "",
+        worstMap?.win_pct,
+        worstMap?.matches
+    );
+}
+
+function renderDashboardInsightCards() {
+    const wrap = document.getElementById("dashboard-insights-scroll");
+    if (!wrap) return;
+    const lastUpdated = new Date().toLocaleString();
+    wrap.innerHTML = [
+        renderRoundReportCard(computeReportState.round, lastUpdated),
+        renderChemistryReportCard(computeReportState.chemistry, lastUpdated),
+        renderLobbyReportCard(computeReportState.lobby, lastUpdated),
+        renderTradeReportCard(computeReportState.trade, lastUpdated),
+        renderTeamReportCard(computeReportState.team, lastUpdated),
+        renderOperatorReportCard(computeReportState.operator, lastUpdated),
+        renderMapReportCard(computeReportState.map, lastUpdated),
+    ].join("");
+    renderDashboardBestWorstSummary();
 }
 
 function renderComputeReport() {
@@ -2129,8 +2332,10 @@ function renderComputeReport() {
     if (fdText) fdText.textContent = `${formatFixed(fd, 1)}%`;
     if (fbText) fbText.textContent = `${fb >= 0 ? "+" : ""}${formatFixed(fb, 1)}%`;
 
+    computeDashboardSortedData();
     renderPlaybook();
     renderDeepStats(round);
+    renderDashboardInsightCards();
 }
 
 function formatPct(value) {
@@ -2374,6 +2579,7 @@ function toPctValue(value) {
 
 function renderInsightsFindings(findings) {
     const list = Array.isArray(findings) ? findings : [];
+    const maxVisible = 10;
     if (!list.length) {
         return `
             <div class="insights-finding-chip insights-sev-info">
@@ -2384,8 +2590,8 @@ function renderInsightsFindings(findings) {
             </div>
         `;
     }
-    return list
-        .map((finding) => {
+
+    const renderFinding = (finding) => {
             const severity = normalizeFindingSeverity(finding?.severity);
             const citations = Array.isArray(finding?.citations) ? finding.citations : [];
             const citesHtml = citations.length
@@ -2400,8 +2606,20 @@ function renderInsightsFindings(findings) {
                     ${citesHtml}
                 </div>
             `;
-        })
-        .join("");
+        };
+
+    const visible = list.slice(0, maxVisible).map(renderFinding).join("");
+    const hidden = list.slice(maxVisible).map(renderFinding).join("");
+    if (list.length <= maxVisible) {
+        return visible;
+    }
+    return `
+        ${visible}
+        <details class="insights-findings-more">
+            <summary>Show ${list.length - maxVisible} more findings</summary>
+            <div class="insights-findings-more-body">${hidden}</div>
+        </details>
+    `;
 }
 
 function renderRoundReportCard(analysis, lastUpdated) {
@@ -2609,7 +2827,126 @@ function renderTradeReportCard(analysis, lastUpdated) {
     `;
 }
 
-function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis) {
+function renderTeamReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Team Analysis</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No team analysis data available.")}</div>
+            </section>
+        `;
+    }
+    const best = analysis.best_partner?.username || "N/A";
+    const stack = analysis.best_stack_size?.label || "N/A";
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Team Analysis</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Matches analyzed <strong>${toNumber(analysis.total_matches, 0)}</strong></span>
+                    <span>Baseline <strong>${formatPct(analysis.baseline_win_rate)}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout insights-neutral">
+                <span class="insights-callout-label">Best Queue Partner</span>
+                <strong>${escapeHtml(best)}</strong>
+            </div>
+            <div class="insights-callout insights-neutral">
+                <span class="insights-callout-label">Best Stack</span>
+                <strong>${escapeHtml(stack)}</strong>
+            </div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderOperatorReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Operator Stats</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No operator stats data available.")}</div>
+            </section>
+        `;
+    }
+    const best = analysis.best_operator?.operator || "N/A";
+    const diversity = toNumber(analysis.diversity_score, 0);
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Operator Stats</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Rounds analyzed <strong>${toNumber(analysis.total_rounds_analyzed, 0)}</strong></span>
+                    <span>Diversity <strong>${diversity}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout insights-neutral">
+                <span class="insights-callout-label">Best Operator</span>
+                <strong>${escapeHtml(best)}</strong>
+            </div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderMapReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Map Stats</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No map stats data available.")}</div>
+            </section>
+        `;
+    }
+    const best = analysis.best_map?.map_name || "N/A";
+    const ban = analysis.ban_recommendation?.map_name || "N/A";
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Map Stats</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Matches analyzed <strong>${toNumber(analysis.total_matches_analyzed, 0)}</strong></span>
+                    <span>Maps tracked <strong>${toNumber(Array.isArray(analysis.maps) ? analysis.maps.length : 0, 0)}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout insights-neutral">
+                <span class="insights-callout-label">Best Map</span>
+                <strong>${escapeHtml(best)}</strong>
+            </div>
+            <div class="insights-callout insights-negative">
+                <span class="insights-callout-label">Ban Recommendation</span>
+                <strong>${escapeHtml(ban)}</strong>
+            </div>
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
+function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, operatorStats, mapStats) {
     const el = document.getElementById("insights-results");
     if (!el) return;
     const lastUpdated = new Date().toLocaleString();
@@ -2618,6 +2955,9 @@ function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tra
         ...(Array.isArray(teammateChemistry?.findings) ? teammateChemistry.findings : []),
         ...(Array.isArray(lobbyQuality?.findings) ? lobbyQuality.findings : []),
         ...(Array.isArray(tradeAnalysis?.findings) ? tradeAnalysis.findings : []),
+        ...(Array.isArray(teamAnalysis?.findings) ? teamAnalysis.findings : []),
+        ...(Array.isArray(operatorStats?.findings) ? operatorStats.findings : []),
+        ...(Array.isArray(mapStats?.findings) ? mapStats.findings : []),
     ];
     const severityCounts = { critical: 0, warning: 0, info: 0 };
     for (const finding of allFindings) {
@@ -2635,6 +2975,9 @@ function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tra
             ${renderChemistryReportCard(teammateChemistry, lastUpdated)}
             ${renderLobbyReportCard(lobbyQuality, lastUpdated)}
             ${renderTradeReportCard(tradeAnalysis, lastUpdated)}
+            ${renderTeamReportCard(teamAnalysis, lastUpdated)}
+            ${renderOperatorReportCard(operatorStats, lastUpdated)}
+            ${renderMapReportCard(mapStats, lastUpdated)}
         </div>
     `;
 }
@@ -2646,17 +2989,23 @@ async function runInsights(explicitUsername = "") {
         return;
     }
     try {
-        const [roundRes, chemistryRes, lobbyRes, tradeRes] = await Promise.all([
+        const [roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, operatorRes, mapRes] = await Promise.all([
             fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
             fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
             fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
             fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
+            fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
+            fetch(`/api/map-stats/${encodeURIComponent(username)}`),
         ]);
 
         let roundAnalysis = null;
         let teammateChemistry = null;
         let lobbyQuality = null;
         let tradeAnalysis = null;
+        let teamAnalysis = null;
+        let operatorStats = null;
+        let mapStats = null;
         if (roundRes.ok) {
             roundAnalysis = (await roundRes.json())?.analysis || null;
         }
@@ -2669,13 +3018,25 @@ async function runInsights(explicitUsername = "") {
         if (tradeRes.ok) {
             tradeAnalysis = (await tradeRes.json())?.analysis || null;
         }
+        if (teamRes.ok) {
+            teamAnalysis = (await teamRes.json())?.analysis || null;
+        }
+        if (operatorRes.ok) {
+            operatorStats = (await operatorRes.json())?.analysis || null;
+        }
+        if (mapRes.ok) {
+            mapStats = (await mapRes.json())?.analysis || null;
+        }
 
-        renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis);
+        renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, operatorStats, mapStats);
         logInsights(`Ran insight plugins for ${username}.`, "success");
         if (!roundRes.ok) logInsights(`Round analysis unavailable (HTTP ${roundRes.status}).`, "error");
         if (!chemistryRes.ok) logInsights(`Teammate chemistry unavailable (HTTP ${chemistryRes.status}).`, "error");
         if (!lobbyRes.ok) logInsights(`Lobby quality unavailable (HTTP ${lobbyRes.status}).`, "error");
         if (!tradeRes.ok) logInsights(`Trade analysis unavailable (HTTP ${tradeRes.status}).`, "error");
+        if (!teamRes.ok) logInsights(`Team analysis unavailable (HTTP ${teamRes.status}).`, "error");
+        if (!operatorRes.ok) logInsights(`Operator stats unavailable (HTTP ${operatorRes.status}).`, "error");
+        if (!mapRes.ok) logInsights(`Map stats unavailable (HTTP ${mapRes.status}).`, "error");
     } catch (err) {
         logInsights(`Failed to run insights: ${err}`, "error");
     }
@@ -2688,12 +3049,15 @@ async function runStatComputation(explicitUsername = "") {
         return;
     }
     try {
-        const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes] = await Promise.all([
-            fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=100`),
+        const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, operatorRes, mapRes] = await Promise.all([
+            fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=2000`),
             fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
             fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
             fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
             fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
+            fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
+            fetch(`/api/map-stats/${encodeURIComponent(username)}`),
         ]);
         if (!matchesRes.ok) {
             throw new Error(`HTTP ${matchesRes.status}`);
@@ -2717,7 +3081,20 @@ async function runStatComputation(explicitUsername = "") {
         if (tradeRes.ok) {
             tradeAnalysis = (await tradeRes.json())?.analysis || null;
         }
+        let teamAnalysis = null;
+        if (teamRes.ok) {
+            teamAnalysis = (await teamRes.json())?.analysis || null;
+        }
+        let operatorStats = null;
+        if (operatorRes.ok) {
+            operatorStats = (await operatorRes.json())?.analysis || null;
+        }
+        let mapStats = null;
+        if (mapRes.ok) {
+            mapStats = (await mapRes.json())?.analysis || null;
+        }
         const matches = Array.isArray(payload.matches) ? payload.matches : [];
+        const filteredMatches = applyDashboardModeFilters(matches);
         const emptyBucket = () => ({
             matches: 0,
             wins: 0,
@@ -2760,14 +3137,41 @@ async function runStatComputation(explicitUsername = "") {
                 chemistry: teammateChemistry,
                 lobby: lobbyQuality,
                 trade: tradeAnalysis,
+                team: teamAnalysis,
+                operator: operatorStats,
+                map: mapStats,
+                sorted: { operatorRows: [], mapRows: [] },
             };
             renderComputeCards(stats);
             logCompute(`No stored matches found for ${username}.`, "info");
             return;
         }
+        if (!filteredMatches.length) {
+            const stats = {
+                overall: finalize(buckets.overall),
+                ranked: finalize(buckets.ranked),
+                unranked: finalize(buckets.unranked),
+            };
+            computeReportState = {
+                ...computeReportState,
+                stats,
+                round: roundAnalysis,
+                chemistry: teammateChemistry,
+                lobby: lobbyQuality,
+                trade: tradeAnalysis,
+                team: teamAnalysis,
+                operator: operatorStats,
+                map: mapStats,
+                sorted: { operatorRows: [], mapRows: [] },
+            };
+            renderComputeCards(stats);
+            logCompute("Dashboard filters excluded all matches for this username.", "info");
+            return;
+        }
+        const sortedMapRows = computeSortedMapsFromMatches(filteredMatches, username);
 
         const normalized = username.toLowerCase();
-        for (const match of matches) {
+        for (const match of filteredMatches) {
             const category = classifyStoredMode(match);
             const group =
                 category === "ranked" ? buckets.ranked :
@@ -2822,11 +3226,19 @@ async function runStatComputation(explicitUsername = "") {
             chemistry: teammateChemistry,
             lobby: lobbyQuality,
             trade: tradeAnalysis,
+            team: teamAnalysis,
+            operator: operatorStats,
+            map: mapStats,
+            sorted: {
+                operatorRows: Array.isArray(computeReportState.sorted?.operatorRows) ? computeReportState.sorted.operatorRows : [],
+                mapRows: sortedMapRows,
+            },
         };
         renderComputeCards(stats);
         logCompute(
-            `Computed stats for ${username}: overall ${buckets.overall.matches}, ` +
-            `ranked ${buckets.ranked.matches}, unranked ${buckets.unranked.matches}.`,
+            `Computed stats for ${username} (after dashboard type filters): overall ${buckets.overall.matches}, ` +
+            `ranked ${buckets.ranked.matches}, unranked ${buckets.unranked.matches}. ` +
+            `Sorted map dataset ready (${sortedMapRows.length} maps).`,
             "success"
         );
         if (!roundRes.ok) {
@@ -2840,6 +3252,15 @@ async function runStatComputation(explicitUsername = "") {
         }
         if (!tradeRes.ok) {
             logCompute(`Trade analysis unavailable (HTTP ${tradeRes.status}).`, "error");
+        }
+        if (!teamRes.ok) {
+            logCompute(`Team analysis unavailable (HTTP ${teamRes.status}).`, "error");
+        }
+        if (!operatorRes.ok) {
+            logCompute(`Operator stats unavailable (HTTP ${operatorRes.status}).`, "error");
+        }
+        if (!mapRes.ok) {
+            logCompute(`Map stats unavailable (HTTP ${mapRes.status}).`, "error");
         }
     } catch (err) {
         logCompute(`Failed stat computation: ${err}`, "error");
