@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
 from collections import deque
+from datetime import datetime, timezone
 import json
 import os
 import random
@@ -10,6 +11,9 @@ import re
 import sys
 import time
 import traceback
+import math
+import base64
+import hashlib
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
@@ -21,6 +25,11 @@ from src.plugins.v3_round_analysis import RoundAnalysisPlugin
 from src.plugins.v3_teammate_chemistry import TeammateChemistryPlugin
 from src.plugins.v3_lobby_quality import LobbyQualityPlugin
 from src.plugins.v3_trade_analysis import TradeAnalysisPlugin
+from src.plugins.v3_team_analysis import TeamAnalysisPlugin
+from src.plugins.v3_enemy_operator_threat import EnemyOperatorThreatPlugin
+from src.plugins.v2_operator_stats import OperatorStatsPlugin
+from src.plugins.v2_map_stats import MapStatsPlugin
+from src.db_standardizer import DatabaseStandardizer
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
@@ -29,6 +38,25 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _normalize_asset_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _normalize_mode_key(raw_mode: object) -> str:
+    text = str(raw_mode or "").strip().lower()
+    if not text:
+        return "other"
+    if "unranked" in text:
+        return "unranked"
+    if "ranked" in text:
+        return "ranked"
+    if "standard" in text:
+        return "standard"
+    if "quick" in text:
+        return "quick"
+    if "event" in text:
+        return "event"
+    if "arcade" in text:
+        return "arcade"
+    return "other"
 
 
 map_images_dir = None
@@ -123,6 +151,10 @@ error_tracker = {
     "failure_threshold": 5,
 }
 
+WORKSPACE_API_VERSION = 1
+workspace_cache: dict[str, tuple[float, dict]] = {}
+WORKSPACE_CACHE_TTL_SECONDS = 90
+
 
 def track_call(endpoint: str) -> None:
     now = time.time()
@@ -193,7 +225,7 @@ async def operator_image_index() -> dict:
 
 @app.get("/api/scraped-matches/{username}")
 async def scraped_matches(username: str, limit: int = 50) -> dict:
-    safe_limit = max(1, min(limit, 200))
+    safe_limit = max(1, min(limit, 2000))
     try:
         matches = db.get_scraped_match_cards(username, safe_limit)
         return {"username": username, "matches": matches, "count": len(matches)}
@@ -254,6 +286,1621 @@ async def trade_analysis(username: str, window_seconds: float = 5.0) -> dict:
         return {"username": username, "analysis": analysis}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to run trade analysis: {str(e)}")
+
+
+@app.get("/api/team-analysis/{username}")
+async def team_analysis(username: str) -> dict:
+    try:
+        analysis = TeamAnalysisPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run team analysis: {str(e)}")
+
+
+@app.get("/api/enemy-operator-threat/{username}")
+async def enemy_operator_threat(username: str) -> dict:
+    try:
+        analysis = EnemyOperatorThreatPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run enemy operator threat analysis: {str(e)}")
+
+
+@app.get("/api/operator-stats/{username}")
+async def operator_stats(username: str) -> dict:
+    try:
+        analysis = OperatorStatsPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run operator stats: {str(e)}")
+
+
+@app.get("/api/map-stats/{username}")
+async def map_stats(username: str) -> dict:
+    try:
+        analysis = MapStatsPlugin(db, username).analyze()
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run map stats: {str(e)}")
+
+
+@app.post("/api/settings/db-standardize")
+async def settings_db_standardize(dry_run: bool = True, verbose: bool = False) -> dict:
+    try:
+        def _run() -> dict:
+            standardizer = DatabaseStandardizer(db.db_path, dry_run=dry_run, verbose=verbose)
+            report = standardizer.run()
+            return {
+                "db_path": report.db_path,
+                "run_at": report.run_at,
+                "total_matches": report.total_matches,
+                "total_player_rounds": report.total_player_rounds,
+                "total_round_outcomes": report.total_round_outcomes,
+                "null_usernames_found": report.null_usernames_found,
+                "null_usernames_fixed": report.null_usernames_fixed,
+                "bad_match_types_found": report.bad_match_types_found,
+                "bad_match_types_fixed": report.bad_match_types_fixed,
+                "summary_kills_missing": report.summary_kills_missing,
+                "summary_kills_reconstructed": report.summary_kills_reconstructed,
+                "owingest_stats_missing": report.owingest_stats_missing,
+                "owingest_stats_fixed": report.owingest_stats_fixed,
+                "killed_by_op_missing": report.killed_by_op_missing,
+                "killed_by_op_fixed": report.killed_by_op_fixed,
+                "data_quality_flags": report.data_quality_flags,
+            }
+
+        report_payload = await asyncio.to_thread(_run)
+        return {"ok": True, "dry_run": dry_run, "report": report_payload}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to standardize DB: {str(e)}")
+
+
+def _parse_iso_datetime(raw: object) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
+        try:
+            dt = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            continue
+    return None
+
+
+def _extract_match_times(card_row: dict) -> tuple[datetime | None, datetime | None]:
+    summary = card_row.get("summary_json")
+    payload = {}
+    if isinstance(summary, str) and summary.strip():
+        try:
+            payload = json.loads(summary)
+        except Exception:
+            payload = {}
+    elif isinstance(summary, dict):
+        payload = summary
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    md = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
+    end_keys = (
+        md.get("matchEndTime"),
+        md.get("endTime"),
+        md.get("timestamp"),
+        payload.get("matchEndTime") if isinstance(payload, dict) else None,
+        payload.get("endTime") if isinstance(payload, dict) else None,
+        card_row.get("match_date"),
+    )
+    start_keys = (
+        md.get("matchStartTime"),
+        md.get("startTime"),
+        payload.get("matchStartTime") if isinstance(payload, dict) else None,
+        payload.get("startTime") if isinstance(payload, dict) else None,
+    )
+    end_dt = next((v for v in (_parse_iso_datetime(x) for x in end_keys) if v is not None), None)
+    start_dt = next((v for v in (_parse_iso_datetime(x) for x in start_keys) if v is not None), None)
+    return end_dt, start_dt
+
+
+def _wilson_ci(successes: int, trials: int) -> tuple[float, float]:
+    if trials <= 0:
+        return 0.0, 0.0
+    p = successes / trials
+    z = 1.96
+    z2 = z * z
+    denom = 1.0 + (z2 / trials)
+    center = (p + (z2 / (2.0 * trials))) / denom
+    half = (z / denom) * math.sqrt((p * (1.0 - p) / trials) + (z2 / (4.0 * trials * trials)))
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def _pctile_abs_bound(values: list[float], fallback: float = 15.0) -> float:
+    vals = sorted(abs(float(v)) for v in values if isinstance(v, (float, int)) and math.isfinite(float(v)))
+    if len(vals) < 8:
+        return fallback
+    lo = vals[int(max(0, math.floor(0.05 * (len(vals) - 1))))]
+    hi = vals[int(max(0, math.floor(0.95 * (len(vals) - 1))))]
+    hi = max(hi, lo, 0.000001)
+    return hi
+
+
+def _encode_evidence_cursor(ordering_mode: str, primary_order: float, match_id: str, round_id: int, pr_id: int) -> str:
+    payload = {
+        "v": 1,
+        "ordering_mode": ordering_mode,
+        "primary": float(primary_order),
+        "match_id": str(match_id),
+        "round_id": int(round_id),
+        "pr_id": int(pr_id),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("utf-8")
+
+
+def _decode_evidence_cursor(value: str) -> dict | None:
+    if not value:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(value.encode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _db_revision_token() -> str:
+    cur = db.conn.cursor()
+    cur.execute("SELECT MAX(scraped_at) AS mx FROM scraped_match_cards")
+    row = cur.fetchone()
+    return str(row["mx"] if row and row["mx"] is not None else "")
+
+
+def _workspace_cache_get(key: str) -> dict | None:
+    item = workspace_cache.get(key)
+    if not item:
+        return None
+    ts, payload = item
+    if time.time() - ts > WORKSPACE_CACHE_TTL_SECONDS:
+        workspace_cache.pop(key, None)
+        return None
+    return payload
+
+
+def _workspace_cache_set(key: str, payload: dict) -> None:
+    workspace_cache[key] = (time.time(), payload)
+
+
+def _load_workspace_rows(
+    username: str,
+    *,
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    legacy_mode: str = "",
+) -> tuple[int, list[dict], dict, list[str]]:
+    cur = db.conn.cursor()
+    cur.execute(
+        "SELECT player_id FROM players WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) ORDER BY player_id DESC LIMIT 1",
+        (username,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return 0, [], {}, ["Player not found."]
+    player_id = int(row["player_id"])
+
+    safe_days = max(1, min(int(days), 3650))
+    warnings: list[str] = []
+    queue_key = str(queue or "").strip().lower()
+    if legacy_mode and queue_key in {"", "all"}:
+        queue_key = str(legacy_mode).strip().lower()
+    if legacy_mode:
+        warnings.append("Legacy 'mode' parameter is deprecated; use 'queue' instead.")
+    if queue_key not in {"all", "ranked", "unranked"}:
+        queue_key = "all"
+    playlist_key = str(playlist or "").strip().lower()
+    if playlist_key in {"", "all"}:
+        playlist_key = ""
+    selected_map = str(map_name or "").strip().lower()
+    search_key = str(search or "").strip().lower()
+
+    sql = """
+        WITH latest_card AS (
+            SELECT
+                smc.match_id,
+                smc.map_name,
+                smc.mode,
+                smc.match_date,
+                smc.summary_json,
+                smc.scraped_at,
+                ROW_NUMBER() OVER (PARTITION BY smc.match_id ORDER BY smc.id DESC) AS rn
+            FROM scraped_match_cards smc
+        )
+        SELECT
+            pr.id AS pr_id,
+            pr.player_id,
+            pr.match_id,
+            pr.round_id,
+            pr.side,
+            pr.operator,
+            pr.username,
+            pr.player_id_tracker,
+            pr.kills,
+            pr.deaths,
+            pr.assists,
+            pr.headshots,
+            pr.first_blood,
+            pr.first_death,
+            pr.clutch_won,
+            pr.clutch_lost,
+            pr.match_type,
+            ro.winner_side,
+            lc.map_name,
+            lc.mode AS card_mode,
+            lc.match_date,
+            lc.summary_json,
+            lc.scraped_at
+        FROM player_rounds pr
+        JOIN latest_card lc
+          ON lc.match_id = pr.match_id
+         AND lc.rn = 1
+        JOIN round_outcomes ro
+          ON ro.player_id = pr.player_id
+         AND ro.match_id = pr.match_id
+         AND ro.round_id = pr.round_id
+        WHERE pr.player_id = ?
+          AND pr.operator IS NOT NULL
+          AND TRIM(pr.operator) != ''
+          AND DATETIME(COALESCE(lc.scraped_at, '1970-01-01 00:00:00')) >= DATETIME('now', ?)
+    """
+    cur.execute(sql, (player_id, f"-{safe_days} days"))
+    rows = [dict(r) for r in cur.fetchall()]
+    if not rows:
+        return player_id, [], {}, warnings
+
+    def _row_mode(r: dict) -> str:
+        return _normalize_mode_key(r.get("card_mode") or r.get("match_type"))
+
+    def _queue_ok(r: dict) -> bool:
+        if queue_key == "all":
+            return True
+        return _row_mode(r) == queue_key
+
+    def _playlist_ok(r: dict) -> bool:
+        if not playlist_key:
+            return True
+        return _row_mode(r) == playlist_key
+
+    filtered = [r for r in rows if _queue_ok(r) and _playlist_ok(r)]
+    if selected_map:
+        filtered = [r for r in filtered if str(r.get("map_name") or "").strip().lower() == selected_map]
+    if search_key:
+        filtered = [
+            r for r in filtered
+            if search_key in str(r.get("operator") or "").lower() or search_key in str(r.get("username") or "").lower()
+        ]
+
+    stack_context = {"enabled": stack_only, "applied": False, "stack_id": stack_id, "matched_teammates": [], "reason": ""}
+    if stack_only and filtered:
+        teammates: set[str] = set()
+        chosen_stack_id = stack_id
+        if chosen_stack_id is None:
+            cur.execute(
+                """
+                SELECT s.stack_id
+                FROM stacks s
+                JOIN stack_members sm ON sm.stack_id = s.stack_id
+                JOIN players p ON p.player_id = sm.player_id
+                WHERE LOWER(TRIM(p.username)) = LOWER(TRIM(?))
+                ORDER BY s.stack_id ASC
+                LIMIT 1
+                """,
+                (username,),
+            )
+            sid = cur.fetchone()
+            chosen_stack_id = int(sid["stack_id"]) if sid else None
+        if chosen_stack_id is not None:
+            cur.execute(
+                """
+                SELECT p.username
+                FROM stack_members sm
+                JOIN players p ON p.player_id = sm.player_id
+                WHERE sm.stack_id = ?
+                """,
+                (chosen_stack_id,),
+            )
+            teammates = {
+                str(x["username"]).strip().lower()
+                for x in cur.fetchall()
+                if str(x["username"]).strip().lower() != username.strip().lower()
+            }
+            stack_context["stack_id"] = chosen_stack_id
+        if not teammates:
+            stack_context["reason"] = "No stack teammates available; stack filter not applied."
+        else:
+            by_match_users: dict[str, set[str]] = {}
+            for r in filtered:
+                by_match_users.setdefault(str(r["match_id"]), set()).add(str(r.get("username") or "").strip().lower())
+            allowed = {mid for mid, names in by_match_users.items() if names.intersection(teammates)}
+            matched = sorted({n for mid, names in by_match_users.items() if mid in allowed for n in names.intersection(teammates)})
+            if allowed:
+                filtered = [r for r in filtered if str(r["match_id"]) in allowed]
+                stack_context["applied"] = True
+                stack_context["matched_teammates"] = matched
+            else:
+                stack_context["reason"] = "No matches contained configured stack teammates."
+
+    by_match: dict[str, dict] = {}
+    for r in filtered:
+        mid = str(r["match_id"])
+        info = by_match.setdefault(mid, {})
+        if "end_time" not in info:
+            end_dt, start_dt = _extract_match_times(r)
+            info["end_time"] = end_dt
+            info["start_time"] = start_dt
+            info["scraped_at"] = _parse_iso_datetime(r.get("scraped_at"))
+    ordering_mode = "ingestion_fallback"
+    if any(v.get("end_time") for v in by_match.values()):
+        ordering_mode = "match_end_time"
+    elif any(v.get("start_time") for v in by_match.values()):
+        ordering_mode = "match_start_time"
+
+    def _primary_epoch(mid: str) -> float:
+        info = by_match.get(mid, {})
+        if ordering_mode == "match_end_time" and info.get("end_time"):
+            return float(info["end_time"].timestamp())
+        if ordering_mode == "match_start_time" and info.get("start_time"):
+            return float(info["start_time"].timestamp())
+        dt = info.get("scraped_at")
+        return float(dt.timestamp()) if dt else 0.0
+
+    for r in filtered:
+        r["_order_primary"] = _primary_epoch(str(r["match_id"]))
+    filtered.sort(
+        key=lambda r: (
+            float(r.get("_order_primary", 0.0)),
+            str(r.get("match_id") or ""),
+            int(r.get("round_id") or 0),
+            int(r.get("pr_id") or 0),
+        ),
+        reverse=True,
+    )
+    return player_id, filtered, {"ordering_mode": ordering_mode, "stack_context": stack_context}, warnings
+
+
+def _compute_matchup_block(
+    rows: list[dict],
+    *,
+    normalization: str = "global",
+    lift_mode: str = "percent_delta",
+    interval_method: str = "wilson",
+    min_n: int = 0,
+    weighting: str = "rounds",
+) -> dict:
+    min_n_safe = max(0, min(int(min_n), 5000))
+    norm_key = str(normalization or "global").strip().lower()
+    if norm_key not in {"global", "attacker"}:
+        norm_key = "global"
+    lift_key = str(lift_mode or "percent_delta").strip().lower()
+    if lift_key not in {"percent_delta", "logit_lift", "log_odds_ratio"}:
+        lift_key = "percent_delta"
+    interval_key = str(interval_method or "wilson").strip().lower()
+    if interval_key not in {"wilson", "wald"}:
+        interval_key = "wilson"
+    weight_key = "matches" if str(weighting or "").strip().lower() == "matches" else "rounds"
+
+    rounds: dict[tuple[str, int], dict] = {}
+    for r in rows:
+        key = (str(r["match_id"]), int(r["round_id"]))
+        b = rounds.setdefault(key, {"winner_side": str(r.get("winner_side") or "").lower(), "atk_ops": set(), "def_ops": set()})
+        op = str(r.get("operator") or "").strip()
+        side = str(r.get("side") or "").strip().lower()
+        if side == "attacker":
+            b["atk_ops"].add(op)
+        elif side == "defender":
+            b["def_ops"].add(op)
+
+    valid_rounds = [v for v in rounds.values() if v["atk_ops"] and v["def_ops"] and v["winner_side"] in {"attacker", "defender"}]
+    if not valid_rounds:
+        return {"error": "No valid rounds for matchup analysis.", "cells": [], "attackers": [], "defenders": []}
+
+    if weight_key == "matches":
+        by_match: dict[str, dict] = {}
+        for (mid, _rid), v in rounds.items():
+            if not v["atk_ops"] or not v["def_ops"]:
+                continue
+            m = by_match.setdefault(mid, {"atk_wins": 0, "def_wins": 0, "pairs": set(), "atk_ops": set(), "def_ops": set()})
+            if v["winner_side"] == "attacker":
+                m["atk_wins"] += 1
+            elif v["winner_side"] == "defender":
+                m["def_wins"] += 1
+            m["atk_ops"].update(v["atk_ops"])
+            m["def_ops"].update(v["def_ops"])
+            for a in v["atk_ops"]:
+                for d in v["def_ops"]:
+                    m["pairs"].add((a, d))
+        match_units = []
+        for m in by_match.values():
+            if m["atk_wins"] == m["def_wins"]:
+                continue
+            winner = "attacker" if m["atk_wins"] > m["def_wins"] else "defender"
+            match_units.append({"winner": winner, "atk_ops": sorted(m["atk_ops"]), "def_ops": sorted(m["def_ops"]), "pairs": m["pairs"]})
+        units = match_units
+    else:
+        units = [{"winner": v["winner_side"], "atk_ops": sorted(v["atk_ops"]), "def_ops": sorted(v["def_ops"])} for v in valid_rounds]
+
+    total_units = len(units)
+    atk_unit_wins = sum(1 for u in units if u["winner"] == "attacker")
+    global_baseline = (atk_unit_wins / total_units) * 100.0 if total_units else 0.0
+    pair_stats: dict[tuple[str, str], dict[str, int]] = {}
+    atk_counts: dict[str, int] = {}
+    def_counts: dict[str, int] = {}
+    atk_wins_by_op: dict[str, int] = {}
+    for u in units:
+        atk_win = 1 if u["winner"] == "attacker" else 0
+        atk_ops = u["atk_ops"]
+        def_ops = u["def_ops"]
+        for a in atk_ops:
+            atk_counts[a] = atk_counts.get(a, 0) + 1
+            atk_wins_by_op[a] = atk_wins_by_op.get(a, 0) + atk_win
+        for d in def_ops:
+            def_counts[d] = def_counts.get(d, 0) + 1
+        pairs = u.get("pairs")
+        if pairs is None:
+            for a in atk_ops:
+                for d in def_ops:
+                    p = (a, d)
+                    cell = pair_stats.setdefault(p, {"n": 0, "atk_wins": 0})
+                    cell["n"] += 1
+                    cell["atk_wins"] += atk_win
+        else:
+            for p in pairs:
+                cell = pair_stats.setdefault(p, {"n": 0, "atk_wins": 0})
+                cell["n"] += 1
+                cell["atk_wins"] += atk_win
+
+    attackers = sorted(atk_counts.keys(), key=lambda x: (-atk_counts.get(x, 0), x))
+    defenders = sorted(def_counts.keys(), key=lambda x: (-def_counts.get(x, 0), x))
+    cells = []
+    for a in attackers:
+        for d in defenders:
+            s = pair_stats.get((a, d))
+            if not s:
+                continue
+            n = int(s["n"])
+            wins = int(s["atk_wins"])
+            win_pct = (wins / n) * 100.0 if n > 0 else 0.0
+            row_baseline = (atk_wins_by_op.get(a, 0) / atk_counts.get(a, 1)) * 100.0 if atk_counts.get(a, 0) else global_baseline
+            baseline_used = row_baseline if norm_key == "attacker" else global_baseline
+            p = wins / n if n > 0 else 0.0
+            if interval_key == "wilson":
+                lo_p, hi_p = _wilson_ci(wins, n)
+            else:
+                z = 1.96
+                se = math.sqrt((p * (1.0 - p)) / n) if n > 0 else 0.0
+                lo_p, hi_p = max(0.0, p - z * se), min(1.0, p + z * se)
+            eps = 1e-6
+            baseline_prob = max(eps, min(1.0 - eps, baseline_used / 100.0))
+            lo_prob = max(eps, min(1.0 - eps, lo_p))
+            hi_prob = max(eps, min(1.0 - eps, hi_p))
+            if lift_key == "percent_delta":
+                metric = win_pct - baseline_used
+                ci_low, ci_high = (lo_p * 100.0) - baseline_used, (hi_p * 100.0) - baseline_used
+            elif lift_key == "logit_lift":
+                p_smooth = (wins + 0.5) / (n + 1.0)
+                p_smooth = max(eps, min(1.0 - eps, p_smooth))
+                base_logit = math.log(baseline_prob / (1.0 - baseline_prob))
+                metric = math.log(p_smooth / (1.0 - p_smooth)) - base_logit
+                ci_low = math.log(lo_prob / (1.0 - lo_prob)) - base_logit
+                ci_high = math.log(hi_prob / (1.0 - hi_prob)) - base_logit
+            else:
+                a_count = float(wins)
+                b_count = float(max(0, n - wins))
+                if norm_key == "attacker":
+                    row_total = float(atk_counts.get(a, 0))
+                    row_wins = float(atk_wins_by_op.get(a, 0))
+                    c_count = float(max(0.0, row_wins - a_count))
+                    d_count = float(max(0.0, (row_total - row_wins) - b_count))
+                else:
+                    total_wins = float(atk_unit_wins)
+                    total_losses = float(max(0, total_units - atk_unit_wins))
+                    c_count = float(max(0.0, total_wins - a_count))
+                    d_count = float(max(0.0, total_losses - b_count))
+                if min(a_count, b_count, c_count, d_count) <= 0:
+                    a_count += 0.5
+                    b_count += 0.5
+                    c_count += 0.5
+                    d_count += 0.5
+                metric = math.log((a_count * d_count) / (b_count * c_count))
+                se = math.sqrt((1.0 / a_count) + (1.0 / b_count) + (1.0 / c_count) + (1.0 / d_count))
+                ci_low, ci_high = metric - (1.96 * se), metric + (1.96 * se)
+            cells.append(
+                {
+                    "attacker": a,
+                    "defender": d,
+                    "n_rounds": n,
+                    "atk_wins": wins,
+                    "win_pct": round(win_pct, 3),
+                    "baseline_wr": round(baseline_used, 3),
+                    "win_ci_low": round(lo_p * 100.0, 3),
+                    "win_ci_high": round(hi_p * 100.0, 3),
+                    "lift": round(metric, 4 if lift_key != "percent_delta" else 3),
+                    "ci_low": round(ci_low, 4 if lift_key != "percent_delta" else 3),
+                    "ci_high": round(ci_high, 4 if lift_key != "percent_delta" else 3),
+                }
+            )
+
+    by_def, by_atk = {}, {}
+    for c in cells:
+        d, a = str(c["defender"]), str(c["attacker"])
+        n = int(c["n_rounds"])
+        lift = float(c["lift"])
+        def_rec = by_def.setdefault(d, {"neg_sum_raw": 0.0, "w_raw": 0, "neg_sum_vis": 0.0, "w_vis": 0, "cells_vis": 0})
+        atk_rec = by_atk.setdefault(a, {"neg_sum_raw": 0.0, "w_raw": 0, "neg_sum_vis": 0.0, "w_vis": 0, "cells_vis": 0})
+        penalty = max(0.0, -lift)
+        def_rec["neg_sum_raw"] += penalty * n
+        def_rec["w_raw"] += n
+        atk_rec["neg_sum_raw"] += penalty * n
+        atk_rec["w_raw"] += n
+        if n >= min_n_safe:
+            def_rec["neg_sum_vis"] += penalty * n
+            def_rec["w_vis"] += n
+            def_rec["cells_vis"] += 1
+            atk_rec["neg_sum_vis"] += penalty * n
+            atk_rec["w_vis"] += n
+            atk_rec["cells_vis"] += 1
+    total_side_units = max(1, total_units)
+    defender_threat = []
+    for d in defenders:
+        rec = by_def.get(d, {})
+        has_visible = int(rec.get("cells_vis", 0)) > 0
+        covered_visible = int(def_counts.get(d, 0)) if has_visible else 0
+        defender_threat.append(
+            {
+                "operator": d,
+                "index": round((float(rec.get("neg_sum_vis", 0.0)) / float(rec.get("w_vis", 1))) if rec.get("w_vis", 0) else 0.0, 4),
+                "n_rounds_total": total_side_units,
+                "n_rounds_covered_raw": int(def_counts.get(d, 0)),
+                "n_rounds_covered_visible": covered_visible,
+                "n_cells_visible": int(rec.get("cells_vis", 0)),
+                "coverage_pct_visible": round((covered_visible / total_side_units) * 100.0, 3),
+            }
+        )
+    attacker_vulnerability = []
+    for a in attackers:
+        rec = by_atk.get(a, {})
+        has_visible = int(rec.get("cells_vis", 0)) > 0
+        covered_visible = int(atk_counts.get(a, 0)) if has_visible else 0
+        attacker_vulnerability.append(
+            {
+                "operator": a,
+                "index": round((float(rec.get("neg_sum_vis", 0.0)) / float(rec.get("w_vis", 1))) if rec.get("w_vis", 0) else 0.0, 4),
+                "n_rounds_total": total_side_units,
+                "n_rounds_covered_raw": int(atk_counts.get(a, 0)),
+                "n_rounds_covered_visible": covered_visible,
+                "n_cells_visible": int(rec.get("cells_vis", 0)),
+                "coverage_pct_visible": round((covered_visible / total_side_units) * 100.0, 3),
+            }
+        )
+
+    defender_threat.sort(key=lambda x: (-float(x["index"]), -int(x["n_rounds_covered_visible"]), x["operator"]))
+    attacker_vulnerability.sort(key=lambda x: (-float(x["index"]), -int(x["n_rounds_covered_visible"]), x["operator"]))
+    return {
+        "baseline_atk_win_rate": round(global_baseline, 4),
+        "total_rounds": total_units,
+        "attackers": attackers,
+        "defenders": defenders,
+        "cells": cells,
+        "normalization": norm_key,
+        "lift_mode": lift_key,
+        "interval_method": interval_key,
+        "weighting": weight_key,
+        "filters": {"min_n": min_n_safe},
+        "threat_index": {
+            "defender_threat": defender_threat,
+            "attacker_vulnerability": attacker_vulnerability,
+        },
+        "clamp_defaults": {"clamp_mode": "percentile", "clamp_p_low": 5, "clamp_p_high": 95, "clamp_abs": 15},
+    }
+
+
+def _compute_operator_scatter(
+    rows: list[dict],
+    *,
+    weighting: str = "rounds",
+) -> dict:
+    rounds: dict[tuple[str, int], dict] = {}
+    for r in rows:
+        key = (str(r["match_id"]), int(r["round_id"]))
+        b = rounds.setdefault(key, {"winner_side": str(r.get("winner_side") or "").lower(), "atk_ops": set(), "def_ops": set()})
+        op = str(r.get("operator") or "").strip()
+        side = str(r.get("side") or "").strip().lower()
+        if side == "attacker":
+            b["atk_ops"].add(op)
+        elif side == "defender":
+            b["def_ops"].add(op)
+    valid_rounds = [(mid, rid, v) for (mid, rid), v in rounds.items() if v["atk_ops"] and v["def_ops"] and v["winner_side"] in {"attacker", "defender"}]
+    if not valid_rounds:
+        return {"points": [], "baselines": {"attacker": 0.0, "defender": 0.0}, "total_units": 0}
+    weight_key = "matches" if str(weighting or "").strip().lower() == "matches" else "rounds"
+    if weight_key == "matches":
+        by_match: dict[str, dict] = {}
+        for mid, _rid, v in valid_rounds:
+            m = by_match.setdefault(mid, {"atk_wins": 0, "def_wins": 0, "atk_ops": set(), "def_ops": set()})
+            if v["winner_side"] == "attacker":
+                m["atk_wins"] += 1
+            else:
+                m["def_wins"] += 1
+            m["atk_ops"].update(v["atk_ops"])
+            m["def_ops"].update(v["def_ops"])
+        units = []
+        for m in by_match.values():
+            if m["atk_wins"] == m["def_wins"]:
+                continue
+            units.append({"winner_side": "attacker" if m["atk_wins"] > m["def_wins"] else "defender", "atk_ops": m["atk_ops"], "def_ops": m["def_ops"]})
+        total_matches = len(units)
+        if total_matches <= 0:
+            return {"points": [], "baselines": {"attacker": 0.0, "defender": 0.0}, "total_units": 0}
+        baseline_atk = (sum(1 for u in units if u["winner_side"] == "attacker") / total_matches) * 100.0
+        baseline_def = 100.0 - baseline_atk
+        points = []
+        for side in ("attacker", "defender"):
+            side_ops: dict[str, dict[str, int]] = {}
+            for u in units:
+                ops = u["atk_ops"] if side == "attacker" else u["def_ops"]
+                side_win = 1 if u["winner_side"] == side else 0
+                for op in ops:
+                    rec = side_ops.setdefault(op, {"n": 0, "wins": 0})
+                    rec["n"] += 1
+                    rec["wins"] += side_win
+            for op, rec in side_ops.items():
+                n = rec["n"]
+                wins = rec["wins"]
+                win_pct = (wins / n) * 100.0 if n else 0.0
+                baseline = baseline_atk if side == "attacker" else baseline_def
+                lo, hi = _wilson_ci(wins, n)
+                points.append(
+                    {
+                        "operator": op,
+                        "side": side,
+                        "n_rounds": n,
+                        "presence_pct": round((n / total_matches) * 100.0, 4),
+                        "win_pct": round(win_pct, 4),
+                        "baseline_win_pct": round(baseline, 4),
+                        "win_delta": round(win_pct - baseline, 4),
+                        "ci_low": round((lo * 100.0), 4),
+                        "ci_high": round((hi * 100.0), 4),
+                    }
+                )
+        return {"points": points, "baselines": {"attacker": round(baseline_atk, 4), "defender": round(baseline_def, 4)}, "total_units": total_matches}
+
+    total_rounds = len(valid_rounds)
+    atk_wins = sum(1 for _m, _r, v in valid_rounds if v["winner_side"] == "attacker")
+    baseline_atk = (atk_wins / total_rounds) * 100.0
+    baseline_def = 100.0 - baseline_atk
+    points = []
+    for side in ("attacker", "defender"):
+        side_ops: dict[str, dict[str, int]] = {}
+        for _mid, _rid, v in valid_rounds:
+            ops = v["atk_ops"] if side == "attacker" else v["def_ops"]
+            side_win = 1 if v["winner_side"] == side else 0
+            for op in ops:
+                rec = side_ops.setdefault(op, {"n": 0, "wins": 0})
+                rec["n"] += 1
+                rec["wins"] += side_win
+        for op, rec in side_ops.items():
+            n = rec["n"]
+            wins = rec["wins"]
+            win_pct = (wins / n) * 100.0 if n else 0.0
+            baseline = baseline_atk if side == "attacker" else baseline_def
+            lo, hi = _wilson_ci(wins, n)
+            points.append(
+                {
+                    "operator": op,
+                    "side": side,
+                    "n_rounds": n,
+                    "presence_pct": round((n / total_rounds) * 100.0, 4),
+                    "win_pct": round(win_pct, 4),
+                    "baseline_win_pct": round(baseline, 4),
+                    "win_delta": round(win_pct - baseline, 4),
+                    "ci_low": round((lo * 100.0), 4),
+                    "ci_high": round((hi * 100.0), 4),
+                }
+            )
+    return {"points": points, "baselines": {"attacker": round(baseline_atk, 4), "defender": round(baseline_def, 4)}, "total_units": total_rounds}
+
+
+def _hash_payload(payload: dict) -> str:
+    try:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except Exception:
+        encoded = str(payload).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()
+
+
+def _integrity_counters(rows: list[dict]) -> dict:
+    rounds: dict[tuple[str, int], dict] = {}
+    for r in rows:
+        key = (str(r.get("match_id")), int(r.get("round_id") or 0))
+        b = rounds.setdefault(key, {"players": 0, "atk": 0, "def": 0, "ops_missing": 0, "winner_side": str(r.get("winner_side") or "").lower()})
+        b["players"] += 1
+        side = str(r.get("side") or "").lower()
+        if side == "attacker":
+            b["atk"] += 1
+        elif side == "defender":
+            b["def"] += 1
+        if not str(r.get("operator") or "").strip():
+            b["ops_missing"] += 1
+    counters = {
+        "rounds_total": len(rounds),
+        "rounds_missing_players": 0,
+        "rounds_not_5v5": 0,
+        "rounds_missing_operator_entries": 0,
+        "rounds_invalid_winner_side": 0,
+    }
+    for b in rounds.values():
+        if b["players"] < 10:
+            counters["rounds_missing_players"] += 1
+        if b["atk"] != 5 or b["def"] != 5:
+            counters["rounds_not_5v5"] += 1
+        if b["ops_missing"] > 0:
+            counters["rounds_missing_operator_entries"] += 1
+        if b["winner_side"] not in {"attacker", "defender"}:
+            counters["rounds_invalid_winner_side"] += 1
+    return counters
+
+
+@app.get("/api/dashboard-workspace/{username}")
+async def dashboard_workspace(
+    username: str,
+    panel: str = "all",
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    normalization: str = "global",
+    lift_mode: str = "percent_delta",
+    interval_method: str = "wilson",
+    min_n: int = 0,
+    weighting: str = "rounds",
+    clamp_mode: str = "percentile",
+    clamp_abs: float = 15.0,
+    clamp_p_low: float = 5.0,
+    clamp_p_high: float = 95.0,
+    debug: bool = False,
+    mode: str = "",
+) -> dict:
+    try:
+        panel_key = str(panel or "all").strip().lower()
+        if panel_key not in {"all", "overview", "operators", "matchups", "team"}:
+            panel_key = "all"
+        db_rev = _db_revision_token()
+        cache_key = _hash_payload(
+            {
+                "u": username,
+                "panel": panel_key,
+                "days": days,
+                "queue": queue,
+                "playlist": playlist,
+                "map_name": map_name,
+                "stack_only": stack_only,
+                "stack_id": stack_id,
+                "search": search,
+                "normalization": normalization,
+                "lift_mode": lift_mode,
+                "interval_method": interval_method,
+                "min_n": min_n,
+                "weighting": weighting,
+                "clamp_mode": clamp_mode,
+                "clamp_abs": clamp_abs,
+                "clamp_p_low": clamp_p_low,
+                "clamp_p_high": clamp_p_high,
+                "debug": debug,
+                "mode": mode,
+                "db_rev": db_rev,
+            }
+        )
+        cached = _workspace_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        player_id, rows, ctx, warnings = _load_workspace_rows(
+            username,
+            days=days,
+            queue=queue,
+            playlist=playlist,
+            map_name=map_name,
+            stack_only=stack_only,
+            stack_id=stack_id,
+            search=search,
+            legacy_mode=mode,
+        )
+        if player_id <= 0:
+            return {"username": username, "analysis": {"error": "Player not found."}, "meta": {"api_version": WORKSPACE_API_VERSION}}
+
+        ordering_mode = str(ctx.get("ordering_mode") or "ingestion_fallback")
+        stack_context = ctx.get("stack_context", {})
+        response: dict = {
+            "username": username,
+            "filters_effective": {
+                "panel": panel_key,
+                "days": max(1, min(int(days), 3650)),
+                "queue": str(queue or "all").lower(),
+                "playlist": str(playlist or "").lower(),
+                "map_name": map_name,
+                "stack_only": bool(stack_only),
+                "stack_id": stack_id,
+                "search": search,
+                "normalization": normalization,
+                "lift_mode": lift_mode,
+                "interval_method": interval_method,
+                "min_n": max(0, min(int(min_n), 5000)),
+                "weighting": "matches" if str(weighting).lower() == "matches" else "rounds",
+                "clamp_mode": clamp_mode,
+                "clamp_abs": clamp_abs,
+                "clamp_p_low": clamp_p_low,
+                "clamp_p_high": clamp_p_high,
+                "labels_default": "on",
+            },
+            "meta": {
+                "api_version": WORKSPACE_API_VERSION,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "ordering_mode": ordering_mode,
+                "db_rev": db_rev,
+                "warnings": warnings,
+                "panel": panel_key,
+            },
+        }
+        if not rows:
+            response["analysis"] = {"error": "No rows for current filters."}
+            response["meta"]["hash"] = _hash_payload(response.get("analysis", {}))
+            _workspace_cache_set(cache_key, response)
+            return response
+
+        include_ops = panel_key in {"all", "operators"}
+        include_matchups = panel_key in {"all", "matchups"}
+        if include_ops:
+            op_scatter = _compute_operator_scatter(rows, weighting=weighting)
+            response["operators"] = {
+                "scatter": op_scatter,
+                "stack_context": stack_context,
+            }
+        if include_matchups:
+            matchup = _compute_matchup_block(
+                rows,
+                normalization=normalization,
+                lift_mode=lift_mode,
+                interval_method=interval_method,
+                min_n=min_n,
+                weighting=weighting,
+            )
+            if clamp_mode == "percentile":
+                bound = _pctile_abs_bound([float(c.get("lift", 0.0)) for c in matchup.get("cells", [])], fallback=15.0)
+            else:
+                bound = abs(float(clamp_abs or 15.0))
+            matchup["clamp"] = {
+                "mode": "percentile" if clamp_mode == "percentile" else "abs",
+                "p_low": float(clamp_p_low),
+                "p_high": float(clamp_p_high),
+                "abs_bound": round(bound, 4),
+            }
+            response["matchups"] = matchup
+        if panel_key in {"all", "team"}:
+            response["team"] = {"message": "Phase 1 team workspace shell ready."}
+        if panel_key in {"all", "overview"}:
+            side_counts = {"attacker": 0, "defender": 0}
+            for r in rows:
+                side = str(r.get("side") or "").lower()
+                if side in side_counts:
+                    side_counts[side] += 1
+            response["overview"] = {
+                "message": "Phase 1 overview workspace shell ready.",
+                "rows_after_filters": len(rows),
+                "distinct_matches": len({str(r.get("match_id") or "") for r in rows}),
+                "distinct_rounds": len({(str(r.get("match_id") or ""), int(r.get("round_id") or 0)) for r in rows}),
+                "side_rows": side_counts,
+            }
+        if debug:
+            response["diagnostics"] = {
+                "integrity": _integrity_counters(rows),
+                "rows_after_filters": len(rows),
+            }
+        response["meta"]["hash"] = _hash_payload(
+            {
+                "operators": response.get("operators"),
+                "matchups": response.get("matchups"),
+                "team": response.get("team"),
+                "overview": response.get("overview"),
+                "diagnostics": response.get("diagnostics"),
+            }
+        )
+        _workspace_cache_set(cache_key, response)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute dashboard workspace: {str(e)}")
+
+
+@app.get("/api/dashboard-workspace/{username}/operator/{operator_name}")
+async def dashboard_workspace_operator(
+    username: str,
+    operator_name: str,
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    weighting: str = "rounds",
+    side: str = "all",
+    recent_n_rounds: int = 300,
+    previous_window: bool = True,
+    mode: str = "",
+) -> dict:
+    try:
+        _pid, rows, ctx, warnings = _load_workspace_rows(
+            username,
+            days=days,
+            queue=queue,
+            playlist=playlist,
+            map_name=map_name,
+            stack_only=stack_only,
+            stack_id=stack_id,
+            search=search,
+            legacy_mode=mode,
+        )
+        op_name = str(operator_name or "").strip().lower()
+        side_key = str(side or "all").strip().lower()
+        if side_key not in {"all", "attacker", "defender"}:
+            side_key = "all"
+        op_rows = [
+            r for r in rows
+            if str(r.get("operator") or "").strip().lower() == op_name
+            and (side_key == "all" or str(r.get("side") or "").strip().lower() == side_key)
+        ]
+        ordering_mode = str(ctx.get("ordering_mode") or "ingestion_fallback")
+        db_rev = _db_revision_token()
+        if not op_rows:
+            return {
+                "username": username,
+                "operator": operator_name,
+                "summary": {"error": "No rows for selected operator/filters."},
+                "meta": {"api_version": WORKSPACE_API_VERSION, "ordering_mode": ordering_mode, "db_rev": db_rev, "warnings": warnings},
+            }
+
+        n = len(op_rows)
+        wins = sum(1 for r in op_rows if str(r.get("winner_side") or "").lower() == str(r.get("side") or "").lower())
+        lo, hi = _wilson_ci(wins, n)
+        first_bloods = sum(int(r.get("first_blood") or 0) for r in op_rows)
+        first_deaths = sum(int(r.get("first_death") or 0) for r in op_rows)
+        survived = sum(1 for r in op_rows if int(r.get("deaths") or 0) == 0)
+        clutch_w = sum(int(r.get("clutch_won") or 0) for r in op_rows)
+        clutch_l = sum(int(r.get("clutch_lost") or 0) for r in op_rows)
+        clutch_attempts = clutch_w + clutch_l
+        side_totals = {"attacker": 0, "defender": 0}
+        for r in rows:
+            rk = str(r.get("side") or "").lower()
+            if rk in side_totals:
+                side_totals[rk] += 1
+        op_sides = {"attacker": 0, "defender": 0}
+        for r in op_rows:
+            rk = str(r.get("side") or "").lower()
+            if rk in op_sides:
+                op_sides[rk] += 1
+        presence_side = "attacker" if op_sides["attacker"] >= op_sides["defender"] else "defender"
+        denom = max(1, side_totals.get(presence_side, n))
+        recent_n = max(1, min(int(recent_n_rounds), 5000))
+        recent_rows = op_rows[:recent_n]
+        prev_rows = op_rows[recent_n: recent_n * 2] if previous_window else []
+        def _summary(block_rows: list[dict]) -> dict:
+            if not block_rows:
+                return {"n": 0, "win_pct": 0.0, "opening_kill_rate": 0.0, "opening_death_rate": 0.0, "survival_rate": 0.0}
+            bn = len(block_rows)
+            bw = sum(1 for x in block_rows if str(x.get("winner_side") or "").lower() == str(x.get("side") or "").lower())
+            return {
+                "n": bn,
+                "win_pct": round((bw / bn) * 100.0, 4),
+                "opening_kill_rate": round((sum(int(x.get("first_blood") or 0) for x in block_rows) / bn) * 100.0, 4),
+                "opening_death_rate": round((sum(int(x.get("first_death") or 0) for x in block_rows) / bn) * 100.0, 4),
+                "survival_rate": round((sum(1 for x in block_rows if int(x.get("deaths") or 0) == 0) / bn) * 100.0, 4),
+            }
+
+        return {
+            "username": username,
+            "operator": operator_name,
+            "summary": {
+                "n_rounds": n,
+                "wins": wins,
+                "win_pct": round((wins / n) * 100.0, 4),
+                "win_ci_low": round(lo * 100.0, 4),
+                "win_ci_high": round(hi * 100.0, 4),
+                "presence_pct": round((op_sides[presence_side] / denom) * 100.0, 4),
+                "presence_side": presence_side,
+            },
+            "impact_metrics": {
+                "opening_kill_rate": round((first_bloods / n) * 100.0, 4),
+                "opening_death_rate": round((first_deaths / n) * 100.0, 4),
+                "survival_rate": round((survived / n) * 100.0, 4),
+                "clutch_rate": round((clutch_w / max(1, clutch_attempts)) * 100.0, 4),
+                "clutch_attempts": clutch_attempts,
+            },
+            "splits": {
+                "attacker_n": op_sides["attacker"],
+                "defender_n": op_sides["defender"],
+            },
+            "recent_windows": {
+                "recent_n_rounds": recent_n,
+                "recent": _summary(recent_rows),
+                "previous": _summary(prev_rows),
+            },
+            "meta": {
+                "api_version": WORKSPACE_API_VERSION,
+                "ordering_mode": ordering_mode,
+                "db_rev": db_rev,
+                "warnings": warnings,
+                "weighting": "matches" if str(weighting).lower() == "matches" else "rounds",
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute operator inspector: {str(e)}")
+
+
+@app.get("/api/dashboard-workspace/{username}/evidence")
+async def dashboard_workspace_evidence(
+    username: str,
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    selection_version: int = 1,
+    selection_type: str = "",
+    operator: str = "",
+    atk_op: str = "",
+    def_op: str = "",
+    row_atk_op: str = "",
+    col_def_op: str = "",
+    evidence_limit: int = 200,
+    evidence_cursor: str = "",
+    mode: str = "",
+) -> dict:
+    try:
+        _pid, rows, ctx, warnings = _load_workspace_rows(
+            username,
+            days=days,
+            queue=queue,
+            playlist=playlist,
+            map_name=map_name,
+            stack_only=stack_only,
+            stack_id=stack_id,
+            search=search,
+            legacy_mode=mode,
+        )
+        ordering_mode = str(ctx.get("ordering_mode") or "ingestion_fallback")
+        db_rev = _db_revision_token()
+        sel_type = str(selection_type or "").strip().lower()
+        if sel_type not in {"operator", "matchup_cell", "matchup_row", "matchup_col"}:
+            sel_type = ""
+        filtered_rows = rows
+        round_ops: dict[tuple[str, int], dict] = {}
+        if sel_type in {"matchup_cell", "matchup_row", "matchup_col"}:
+            for r in rows:
+                key = (str(r["match_id"]), int(r["round_id"]))
+                b = round_ops.setdefault(key, {"atk": set(), "def": set()})
+                side = str(r.get("side") or "").lower()
+                op = str(r.get("operator") or "").strip()
+                if side == "attacker":
+                    b["atk"].add(op.lower())
+                elif side == "defender":
+                    b["def"].add(op.lower())
+        if sel_type == "operator":
+            target = str(operator or "").strip().lower()
+            filtered_rows = [r for r in rows if str(r.get("operator") or "").strip().lower() == target]
+        elif sel_type == "matchup_cell":
+            a = str(atk_op or "").strip().lower()
+            d = str(def_op or "").strip().lower()
+            allowed = {k for k, v in round_ops.items() if a in v["atk"] and d in v["def"]}
+            filtered_rows = [r for r in rows if (str(r["match_id"]), int(r["round_id"])) in allowed]
+        elif sel_type == "matchup_row":
+            a = str(row_atk_op or "").strip().lower()
+            allowed = {k for k, v in round_ops.items() if a in v["atk"]}
+            filtered_rows = [r for r in rows if (str(r["match_id"]), int(r["round_id"])) in allowed]
+        elif sel_type == "matchup_col":
+            d = str(col_def_op or "").strip().lower()
+            allowed = {k for k, v in round_ops.items() if d in v["def"]}
+            filtered_rows = [r for r in rows if (str(r["match_id"]), int(r["round_id"])) in allowed]
+
+        limit = max(1, min(int(evidence_limit), 1000))
+        cursor_obj = _decode_evidence_cursor(evidence_cursor) if evidence_cursor else None
+        if cursor_obj and str(cursor_obj.get("ordering_mode") or "") != ordering_mode:
+            cursor_obj = None
+        if cursor_obj and int(cursor_obj.get("v") or 0) != 1:
+            cursor_obj = None
+
+        def _row_tuple(r: dict) -> tuple[float, str, int, int]:
+            return (
+                float(r.get("_order_primary") or 0.0),
+                str(r.get("match_id") or ""),
+                int(r.get("round_id") or 0),
+                int(r.get("pr_id") or 0),
+            )
+
+        if cursor_obj:
+            cur_tuple = (
+                float(cursor_obj.get("primary") or 0.0),
+                str(cursor_obj.get("match_id") or ""),
+                int(cursor_obj.get("round_id") or 0),
+                int(cursor_obj.get("pr_id") or 0),
+            )
+            filtered_rows = [r for r in filtered_rows if _row_tuple(r) < cur_tuple]
+
+        page = filtered_rows[:limit]
+        has_more = len(filtered_rows) > limit
+        next_cursor = ""
+        if has_more and page:
+            last = page[-1]
+            next_cursor = _encode_evidence_cursor(
+                ordering_mode,
+                float(last.get("_order_primary") or 0.0),
+                str(last.get("match_id") or ""),
+                int(last.get("round_id") or 0),
+                int(last.get("pr_id") or 0),
+            )
+        rows_out = []
+        for r in page:
+            rows_out.append(
+                {
+                    "pr_id": int(r.get("pr_id") or 0),
+                    "match_id": str(r.get("match_id") or ""),
+                    "round_id": int(r.get("round_id") or 0),
+                    "map_name": r.get("map_name"),
+                    "queue_mode": _normalize_mode_key(r.get("card_mode") or r.get("match_type")),
+                    "username": r.get("username"),
+                    "side": r.get("side"),
+                    "operator": r.get("operator"),
+                    "winner_side": r.get("winner_side"),
+                    "result": "win" if str(r.get("winner_side") or "").lower() == str(r.get("side") or "").lower() else "loss",
+                    "kills": int(r.get("kills") or 0),
+                    "deaths": int(r.get("deaths") or 0),
+                    "assists": int(r.get("assists") or 0),
+                    "order_primary": float(r.get("_order_primary") or 0.0),
+                }
+            )
+
+        return {
+            "username": username,
+            "selection": {
+                "selection_version": selection_version,
+                "selection_type": sel_type or None,
+                "operator": operator or None,
+                "atk_op": atk_op or None,
+                "def_op": def_op or None,
+                "row_atk_op": row_atk_op or None,
+                "col_def_op": col_def_op or None,
+            },
+            "rows": rows_out,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "limit": limit,
+            "meta": {
+                "api_version": WORKSPACE_API_VERSION,
+                "ordering_mode": ordering_mode,
+                "cursor_version": 1,
+                "db_rev": db_rev,
+                "warnings": warnings,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute evidence page: {str(e)}")
+
+
+@app.get("/api/atk-def-heatmap/{username}")
+async def atk_def_heatmap(
+    username: str,
+    mode: str = "ranked",
+    map_name: str = "",
+    days: int = 90,
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    normalization: str = "global",
+    lift_mode: str = "percent_delta",
+    interval_method: str = "wilson",
+    min_n: int = 0,
+    debug: bool = False,
+) -> dict:
+    try:
+        cur = db.conn.cursor()
+        cur.execute(
+            "SELECT player_id FROM players WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) ORDER BY player_id DESC LIMIT 1",
+            (username,),
+        )
+        player = cur.fetchone()
+        if not player:
+            return {"username": username, "analysis": {"error": "Player not found."}}
+        player_id = int(player["player_id"])
+
+        safe_days = max(1, min(int(days), 3650))
+        latest_card_sql = """
+            WITH latest_card AS (
+                SELECT
+                    smc.match_id,
+                    smc.map_name,
+                    smc.mode,
+                    smc.scraped_at,
+                    ROW_NUMBER() OVER (PARTITION BY smc.match_id ORDER BY smc.id DESC) AS rn
+                FROM scraped_match_cards smc
+            )
+            SELECT
+                pr.match_id,
+                pr.round_id,
+                pr.side,
+                pr.operator,
+                pr.username,
+                ro.winner_side,
+                lc.map_name,
+                lc.mode,
+                lc.scraped_at
+            FROM player_rounds pr
+            JOIN latest_card lc ON lc.match_id = pr.match_id AND lc.rn = 1
+            JOIN round_outcomes ro
+              ON ro.player_id = pr.player_id
+             AND ro.match_id = pr.match_id
+             AND ro.round_id = pr.round_id
+            WHERE pr.player_id = ?
+              AND pr.operator IS NOT NULL
+              AND TRIM(pr.operator) != ''
+              AND DATETIME(COALESCE(lc.scraped_at, '1970-01-01 00:00:00')) >= DATETIME('now', ?)
+            ORDER BY pr.match_id, pr.round_id
+        """
+        cur.execute(latest_card_sql, (player_id, f"-{safe_days} days"))
+        rows = [dict(r) for r in cur.fetchall()]
+        if not rows:
+            return {"username": username, "analysis": {"error": "No round data for selected filters."}}
+
+        mode_raw = str(mode or "").strip().lower()
+        all_modes = mode_raw == "all"
+        mode_key = _normalize_mode_key(mode_raw)
+        selected_map = str(map_name or "").strip().lower()
+        filtered_mode = [r for r in rows if all_modes or _normalize_mode_key(r.get("mode")) == mode_key]
+        available_maps = sorted({str(r.get("map_name") or "").strip() for r in filtered_mode if str(r.get("map_name") or "").strip()})
+        filtered = filtered_mode
+        if selected_map:
+            filtered = [r for r in filtered if str(r.get("map_name") or "").strip().lower() == selected_map]
+        if not filtered:
+            return {"username": username, "analysis": {"error": "No rounds after mode/map filters.", "available_maps": available_maps}}
+
+        stack_teammates: set[str] = set()
+        stack_context = {
+            "enabled": stack_only,
+            "applied": False,
+            "stack_id": stack_id,
+            "matched_teammates": [],
+            "reason": "",
+        }
+        if stack_only:
+            chosen_stack_id = stack_id
+            if chosen_stack_id is None:
+                cur.execute(
+                    """
+                    SELECT s.stack_id
+                    FROM stacks s
+                    JOIN stack_members sm ON sm.stack_id = s.stack_id
+                    JOIN players p ON p.player_id = sm.player_id
+                    WHERE LOWER(TRIM(p.username)) = LOWER(TRIM(?))
+                    ORDER BY s.stack_id ASC
+                    LIMIT 1
+                    """,
+                    (username,),
+                )
+                row = cur.fetchone()
+                chosen_stack_id = int(row["stack_id"]) if row else None
+            if chosen_stack_id is not None:
+                cur.execute(
+                    """
+                    SELECT p.username
+                    FROM stack_members sm
+                    JOIN players p ON p.player_id = sm.player_id
+                    WHERE sm.stack_id = ?
+                    """,
+                    (chosen_stack_id,),
+                )
+                stack_teammates = {
+                    str(r["username"]).strip().lower()
+                    for r in cur.fetchall()
+                    if str(r["username"]).strip().lower() != username.strip().lower()
+                }
+                stack_context["stack_id"] = chosen_stack_id
+            if chosen_stack_id is None:
+                stack_context["reason"] = "No stack found for this player; showing all matches."
+            elif not stack_teammates:
+                stack_context["reason"] = "Stack has no teammates besides the player; showing all matches."
+            else:
+                by_match_users: dict[str, set[str]] = {}
+                for r in filtered:
+                    by_match_users.setdefault(str(r["match_id"]), set()).add(str(r.get("username") or "").strip().lower())
+                allowed_matches = {
+                    mid for mid, names in by_match_users.items()
+                    if names.intersection(stack_teammates)
+                }
+                matched = sorted({
+                    n for mid, names in by_match_users.items()
+                    if mid in allowed_matches
+                    for n in names.intersection(stack_teammates)
+                })
+                stack_context["matched_teammates"] = matched
+                if allowed_matches:
+                    filtered = [r for r in filtered if str(r["match_id"]) in allowed_matches]
+                    stack_context["applied"] = True
+                else:
+                    stack_context["reason"] = "No rounds matched stack teammates under current filters; showing all matches."
+
+        min_n_safe = max(0, min(int(min_n), 5000))
+        rounds: dict[tuple[str, int], dict] = {}
+        for r in filtered:
+            key = (str(r["match_id"]), int(r["round_id"]))
+            bucket = rounds.setdefault(
+                key,
+                {
+                    "winner_side": str(r.get("winner_side") or ""),
+                    "atk_ops": set(),
+                    "def_ops": set(),
+                },
+            )
+            op = str(r.get("operator") or "").strip()
+            side = str(r.get("side") or "").strip().lower()
+            if not op:
+                continue
+            if side == "attacker":
+                bucket["atk_ops"].add(op)
+            elif side == "defender":
+                bucket["def_ops"].add(op)
+
+        valid_rounds = [v for v in rounds.values() if v["atk_ops"] and v["def_ops"]]
+        if not valid_rounds:
+            return {"username": username, "analysis": {"error": "No valid rounds with both ATK and DEF operator sets.", "available_maps": available_maps}}
+
+        atk_round_wins = sum(1 for v in valid_rounds if str(v.get("winner_side") or "").lower() == "attacker")
+        total_rounds = len(valid_rounds)
+        global_baseline = (atk_round_wins / total_rounds) * 100.0 if total_rounds else 0.0
+
+        pair_stats: dict[tuple[str, str], dict[str, int]] = {}
+        atk_counts: dict[str, int] = {}
+        def_counts: dict[str, int] = {}
+        atk_wins_by_op: dict[str, int] = {}
+        exposures_total = 0
+        exposures_atk_wins = 0
+
+        for v in valid_rounds:
+            atk_ops = sorted(v["atk_ops"])
+            def_ops = sorted(v["def_ops"])
+            atk_win = 1 if str(v.get("winner_side") or "").lower() == "attacker" else 0
+            exposures = len(atk_ops) * len(def_ops)
+            exposures_total += exposures
+            exposures_atk_wins += exposures * atk_win
+            for a in atk_ops:
+                atk_counts[a] = atk_counts.get(a, 0) + 1
+                if atk_win:
+                    atk_wins_by_op[a] = atk_wins_by_op.get(a, 0) + 1
+                else:
+                    atk_wins_by_op.setdefault(a, atk_wins_by_op.get(a, 0))
+            for d in def_ops:
+                def_counts[d] = def_counts.get(d, 0) + 1
+            for a in atk_ops:
+                for d in def_ops:
+                    key = (a, d)
+                    cell = pair_stats.setdefault(key, {"n": 0, "atk_wins": 0})
+                    cell["n"] += 1
+                    cell["atk_wins"] += atk_win
+
+        attackers = [k for k, _ in sorted(atk_counts.items(), key=lambda x: (-x[1], x[0]))]
+        defenders = [k for k, _ in sorted(def_counts.items(), key=lambda x: (-x[1], x[0]))]
+
+        norm_key = str(normalization or "global").strip().lower()
+        if norm_key not in {"global", "attacker"}:
+            norm_key = "global"
+        lift_key = str(lift_mode or "percent_delta").strip().lower()
+        if lift_key not in {"percent_delta", "logit_lift", "log_odds_ratio"}:
+            lift_key = "percent_delta"
+        interval_key = str(interval_method or "wilson").strip().lower()
+        if interval_key not in {"wilson", "wald"}:
+            interval_key = "wilson"
+
+        cells = []
+        continuity_applied_count = 0
+        logit_eps_clips_count = 0
+        nan_or_inf_cells_count = 0
+        for a in attackers:
+            for d in defenders:
+                key = (a, d)
+                if key not in pair_stats:
+                    continue
+                n = int(pair_stats[key]["n"])
+                wins = int(pair_stats[key]["atk_wins"])
+                win_pct = (wins / n) * 100.0 if n > 0 else 0.0
+                row_baseline = (atk_wins_by_op.get(a, 0) / atk_counts.get(a, 1)) * 100.0 if atk_counts.get(a, 0) else global_baseline
+                baseline_used = row_baseline if norm_key == "attacker" else global_baseline
+                p = wins / n if n > 0 else 0.0
+                z = 1.96
+                if interval_key == "wilson":
+                    z2 = z * z
+                    denom = 1.0 + (z2 / n)
+                    center = (p + (z2 / (2.0 * n))) / denom
+                    half = (z / denom) * math.sqrt((p * (1.0 - p) / n) + (z2 / (4.0 * n * n)))
+                    lo_p = max(0.0, center - half)
+                    hi_p = min(1.0, center + half)
+                else:
+                    se = math.sqrt((p * (1.0 - p)) / n) if n > 0 else 0.0
+                    lo_p = max(0.0, p - z * se)
+                    hi_p = min(1.0, p + z * se)
+
+                eps = 1e-6
+                baseline_prob = max(eps, min(1.0 - eps, baseline_used / 100.0))
+                if baseline_prob in {eps, 1.0 - eps}:
+                    logit_eps_clips_count += 1
+                lo_prob = max(eps, min(1.0 - eps, lo_p))
+                if lo_prob in {eps, 1.0 - eps}:
+                    logit_eps_clips_count += 1
+                hi_prob = max(eps, min(1.0 - eps, hi_p))
+                if hi_prob in {eps, 1.0 - eps}:
+                    logit_eps_clips_count += 1
+                p_prob = max(eps, min(1.0 - eps, p))
+                if p_prob in {eps, 1.0 - eps}:
+                    logit_eps_clips_count += 1
+
+                if lift_key == "percent_delta":
+                    metric = win_pct - baseline_used
+                    ci_low = (lo_p * 100.0) - baseline_used
+                    ci_high = (hi_p * 100.0) - baseline_used
+                elif lift_key == "logit_lift":
+                    # Jeffreys-smoothed mean for stable logit when wins==0 or wins==n.
+                    p_smooth = (wins + 0.5) / (n + 1.0)
+                    p_smooth = max(eps, min(1.0 - eps, p_smooth))
+                    base_logit = math.log(baseline_prob / (1.0 - baseline_prob))
+                    metric = math.log(p_smooth / (1.0 - p_smooth)) - base_logit
+                    ci_low = math.log(lo_prob / (1.0 - lo_prob)) - base_logit
+                    ci_high = math.log(hi_prob / (1.0 - hi_prob)) - base_logit
+                else:
+                    # log_odds_ratio from 2x2 table:
+                    # present(pair) vs absent(pair) by ATK win/loss.
+                    a_count = float(wins)
+                    b_count = float(max(0, n - wins))
+                    if norm_key == "attacker":
+                        row_total = float(atk_counts.get(a, 0))
+                        row_wins = float(atk_wins_by_op.get(a, 0))
+                        c_count = float(max(0.0, row_wins - a_count))
+                        d_count = float(max(0.0, (row_total - row_wins) - b_count))
+                    else:
+                        total_wins = float(atk_round_wins)
+                        total_losses = float(max(0, total_rounds - atk_round_wins))
+                        c_count = float(max(0.0, total_wins - a_count))
+                        d_count = float(max(0.0, total_losses - b_count))
+
+                    # Continuity correction for zero cells to avoid infinities.
+                    if min(a_count, b_count, c_count, d_count) <= 0.0:
+                        continuity_applied_count += 1
+                        a_count += 0.5
+                        b_count += 0.5
+                        c_count += 0.5
+                        d_count += 0.5
+
+                    log_or = math.log((a_count * d_count) / (b_count * c_count))
+                    se_log_or = math.sqrt((1.0 / a_count) + (1.0 / b_count) + (1.0 / c_count) + (1.0 / d_count))
+                    metric = log_or
+                    ci_low = log_or - (1.96 * se_log_or)
+                    ci_high = log_or + (1.96 * se_log_or)
+
+                if not math.isfinite(metric):
+                    metric = 0.0
+                    nan_or_inf_cells_count += 1
+                if not math.isfinite(ci_low):
+                    ci_low = 0.0
+                    nan_or_inf_cells_count += 1
+                if not math.isfinite(ci_high):
+                    ci_high = 0.0
+                    nan_or_inf_cells_count += 1
+                cells.append(
+                    {
+                        "attacker": a,
+                        "defender": d,
+                        "n_rounds": n,
+                        "atk_wins": wins,
+                        "win_pct": round(win_pct, 1),
+                        "baseline_wr": round(baseline_used, 1),
+                        "win_ci_low": round(lo_p * 100.0, 1),
+                        "win_ci_high": round(hi_p * 100.0, 1),
+                        "lift": round(metric, 3 if lift_key != "percent_delta" else 1),
+                        "ci_low": round(ci_low, 3 if lift_key != "percent_delta" else 1),
+                        "ci_high": round(ci_high, 3 if lift_key != "percent_delta" else 1),
+                    }
+                )
+
+        analysis = {
+            "baseline_atk_win_rate": round(global_baseline, 1),
+            "total_rounds": total_rounds,
+            "attackers": attackers,
+            "defenders": defenders,
+            "cells": cells,
+            "available_maps": available_maps,
+            "normalization": norm_key,
+            "lift_mode": lift_key,
+            "interval_method": interval_key,
+            "filters": {
+                "mode": "all" if all_modes else mode_key,
+                "map_name": map_name,
+                "days": safe_days,
+                "stack_only": stack_only,
+                "normalization": norm_key,
+                "lift_mode": lift_key,
+                "interval_method": interval_key,
+                "min_n": min_n_safe,
+            },
+            "stack_context": stack_context,
+        }
+        if debug:
+            total_cell_weight = sum(int(c["n_rounds"]) for c in cells)
+            weighted_mean_cell_wr = (
+                sum(float(c["win_pct"]) * int(c["n_rounds"]) for c in cells) / total_cell_weight
+                if total_cell_weight > 0 else 0.0
+            )
+            exposure_weighted_baseline = (
+                (exposures_atk_wins / exposures_total) * 100.0 if exposures_total > 0 else 0.0
+            )
+            row_checks = []
+            if norm_key == "attacker":
+                for atk in attackers:
+                    row_cells = [c for c in cells if c["attacker"] == atk]
+                    row_w = sum(int(c["n_rounds"]) for c in row_cells)
+                    row_lift = (
+                        sum(float(c["lift"]) * int(c["n_rounds"]) for c in row_cells) / row_w
+                        if row_w > 0 else 0.0
+                    )
+                    row_checks.append(
+                        {
+                            "attacker": atk,
+                            "weighted_mean_lift": round(row_lift, 4),
+                            "max_abs_lift": round(max((abs(float(c["lift"])) for c in row_cells), default=0.0), 4),
+                            "cells_hidden": sum(1 for c in row_cells if int(c["n_rounds"]) < min_n_safe),
+                            "cells_total": len(row_cells),
+                        }
+                    )
+            analysis["diagnostics"] = {
+                "global_checks": {
+                    "global_atk_baseline_wr": round(global_baseline, 4),
+                    "exposure_weighted_baseline_wr": round(exposure_weighted_baseline, 4),
+                    "weighted_mean_cell_wr": round(weighted_mean_cell_wr, 4),
+                    "rounds_total": len(rounds),
+                    "rounds_valid": total_rounds,
+                    "rows_fetched": len(rows),
+                    "rows_after_mode_filter": len(filtered_mode),
+                    "rows_after_all_filters": len(filtered),
+                    "cells_hidden_by_min_n": sum(1 for c in cells if int(c["n_rounds"]) < min_n_safe),
+                    "cells_total": len(cells),
+                },
+                "row_checks": row_checks,
+                "pathology_counters": {
+                    "or_continuity_applied_count": continuity_applied_count,
+                    "logit_eps_clips_count": logit_eps_clips_count,
+                    "nan_or_inf_cells_count": nan_or_inf_cells_count,
+                },
+            }
+        return {"username": username, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute atk-def heatmap: {str(e)}")
 
 
 @app.websocket("/ws/scan")

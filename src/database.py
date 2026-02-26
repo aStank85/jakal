@@ -56,6 +56,9 @@ class Database:
                     device_tag TEXT DEFAULT 'pc',
                     tag TEXT DEFAULT 'untagged',
                     last_match_synced_at TEXT,
+                    oldest_match_synced_at TEXT,
+                    backfill_next_page INTEGER,
+                    backfill_complete INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     notes TEXT
                 )
@@ -419,10 +422,12 @@ class Database:
                     match_type          TEXT,
                     round_id            INTEGER NOT NULL,
                     player_id_tracker   TEXT,
+                    killed_by_player_id TEXT,
                     username            TEXT,
                     team_id             INTEGER,
                     side                TEXT,
                     operator            TEXT,
+                    killed_by_operator  TEXT,
                     result              TEXT,
                     is_disconnected     INTEGER DEFAULT 0,
                     kills               INTEGER,
@@ -465,6 +470,34 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_scraped_at
                 ON scraped_match_cards (username, scraped_at DESC)
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_round_outcomes_match_round
+                ON round_outcomes (match_id, round_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_round_outcomes_player_match_round
+                ON round_outcomes (player_id, match_id, round_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_rounds_player_match_round
+                ON player_rounds (player_id, match_id, round_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_rounds_player_side_operator
+                ON player_rounds (player_id, side, operator)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_rounds_match_round
+                ON player_rounds (match_id, round_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_match_scraped
+                ON scraped_match_cards (match_id, scraped_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_players_username
+                ON players (username)
+            """)
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scrape_checkpoints (
@@ -491,10 +524,42 @@ class Database:
             self._migrate_stats_snapshots_table()
             self._migrate_computed_metrics_table()
             self._migrate_match_analysis_tables()
+            self._ensure_performance_indexes()
             self._commit_with_retry(context="migrate schema commit")
         except sqlite3.Error as e:
             self.conn.rollback()
             raise RuntimeError(f"Failed to migrate database schema: {e}")
+
+    def _ensure_performance_indexes(self) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_round_outcomes_match_round
+            ON round_outcomes (match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_round_outcomes_player_match_round
+            ON round_outcomes (player_id, match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_player_match_round
+            ON player_rounds (player_id, match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_player_side_operator
+            ON player_rounds (player_id, side, operator)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_match_round
+            ON player_rounds (match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_match_scraped
+            ON scraped_match_cards (match_id, scraped_at DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_players_username
+            ON players (username)
+        """)
 
     def _commit_with_retry(self, retries: int = 8, delay_seconds: float = 0.25, context: str = "commit") -> None:
         """
@@ -547,10 +612,14 @@ class Database:
         self._add_column_if_missing("players", "device_tag TEXT DEFAULT 'pc'", "device_tag")
         self._add_column_if_missing("players", "tag TEXT DEFAULT 'untagged'", "tag")
         self._add_column_if_missing("players", "last_match_synced_at TEXT", "last_match_synced_at")
+        self._add_column_if_missing("players", "oldest_match_synced_at TEXT", "oldest_match_synced_at")
+        self._add_column_if_missing("players", "backfill_next_page INTEGER", "backfill_next_page")
+        self._add_column_if_missing("players", "backfill_complete INTEGER DEFAULT 0", "backfill_complete")
         self._add_column_if_missing("players", "notes TEXT", "notes")
 
         cursor = self.conn.cursor()
         cursor.execute("UPDATE players SET device_tag = 'pc' WHERE device_tag IS NULL")
+        cursor.execute("UPDATE players SET backfill_complete = 0 WHERE backfill_complete IS NULL")
 
     def _migrate_stats_snapshots_table(self) -> None:
         self._add_column_if_missing("stats_snapshots", "score INTEGER", "score")
@@ -586,6 +655,8 @@ class Database:
         self._add_column_if_missing("match_detail_players", "match_type TEXT", "match_type")
         self._add_column_if_missing("round_outcomes", "match_type TEXT", "match_type")
         self._add_column_if_missing("player_rounds", "match_type TEXT", "match_type")
+        self._add_column_if_missing("player_rounds", "killed_by_player_id TEXT", "killed_by_player_id")
+        self._add_column_if_missing("player_rounds", "killed_by_operator TEXT", "killed_by_operator")
         self._add_column_if_missing("scraped_match_cards", "round_data_source TEXT", "round_data_source")
 
         cursor = self.conn.cursor()
@@ -886,7 +957,18 @@ class Database:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT player_id, username, tracker_uuid, device_tag, tag, created_at, notes
+                SELECT
+                    player_id,
+                    username,
+                    tracker_uuid,
+                    device_tag,
+                    tag,
+                    last_match_synced_at,
+                    oldest_match_synced_at,
+                    backfill_next_page,
+                    backfill_complete,
+                    created_at,
+                    notes
                 FROM players
                 WHERE username = ?
             """, (username,))
@@ -914,6 +996,56 @@ class Database:
         except sqlite3.Error as e:
             self.conn.rollback()
             raise RuntimeError(f"Failed to update last_match_synced_at for '{username}': {e}")
+
+    def get_backfill_state(self, username: str) -> Dict[str, Any]:
+        """Get backfill cursor state for a player."""
+        player = self.get_player(username)
+        if not player:
+            return {
+                "oldest_match_synced_at": None,
+                "backfill_next_page": None,
+                "backfill_complete": False,
+            }
+        return {
+            "oldest_match_synced_at": player.get("oldest_match_synced_at"),
+            "backfill_next_page": player.get("backfill_next_page"),
+            "backfill_complete": bool(player.get("backfill_complete")),
+        }
+
+    def update_backfill_state(
+        self,
+        username: str,
+        *,
+        oldest_match_synced_at: Optional[str] = None,
+        backfill_next_page: Optional[int] = None,
+        backfill_complete: Optional[bool] = None,
+    ) -> None:
+        """Persist backfill cursor state for a player."""
+        try:
+            updates = []
+            values: List[Any] = []
+            if oldest_match_synced_at is not None:
+                updates.append("oldest_match_synced_at = ?")
+                values.append(oldest_match_synced_at)
+            if backfill_next_page is not None:
+                updates.append("backfill_next_page = ?")
+                values.append(int(backfill_next_page))
+            if backfill_complete is not None:
+                updates.append("backfill_complete = ?")
+                values.append(1 if backfill_complete else 0)
+            if not updates:
+                return
+
+            values.append(username)
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"UPDATE players SET {', '.join(updates)} WHERE username = ?",
+                tuple(values),
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to update backfill state for '{username}': {e}")
 
     def update_player_tracker_uuid(self, username: str, tracker_uuid: str) -> None:
         """Persist tracker platform UUID for a player."""
@@ -2510,9 +2642,9 @@ class Database:
             cursor.execute("""
                 INSERT INTO player_rounds (
                     player_id, match_id, match_type, round_id, player_id_tracker, username, team_id, side,
-                    operator, result, is_disconnected, kills, deaths, assists, headshots,
+                    operator, killed_by_player_id, killed_by_operator, result, is_disconnected, kills, deaths, assists, headshots,
                     first_blood, first_death, clutch_won, clutch_lost, hs_pct, esr
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 player_id,
                 match_id,
@@ -2523,6 +2655,8 @@ class Database:
                 pr.get("team_id"),
                 pr.get("side"),
                 pr.get("operator"),
+                pr.get("killed_by_player_id"),
+                pr.get("killed_by_operator"),
                 pr.get("result"),
                 pr.get("is_disconnected", 0),
                 pr.get("kills"),

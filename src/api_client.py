@@ -326,6 +326,7 @@ class TrackerAPIClient:
         return {
             "round_id": self._safe_int(attrs.get("roundId")),
             "player_id_tracker": attrs.get("playerId"),
+            "killed_by_player_id": meta.get("killedByPlayerId"),
             "team_id": self._safe_int(attrs.get("teamId"), -1),
             "side": self._map_side(attrs.get("sideId") or meta.get("sideName")),
             "operator": meta.get("operatorName") or attrs.get("operatorId"),
@@ -773,11 +774,26 @@ class TrackerAPIClient:
     def get_match_detail(self, match_id: str) -> Dict[str, Any]:
         payload = self._get_json(f"{self.BASE}/matches/{match_id}")
         grouped = self.parse_match_detail_segments(payload)
+        player_rounds = [self.parse_player_round(s) for s in grouped["player-round"]]
+        rounds_by_id: Dict[int, Dict[str, str]] = {}
+        for row in player_rounds:
+            round_id = self._safe_int(row.get("round_id"))
+            tracker_id = str(row.get("player_id_tracker") or "").strip()
+            operator = str(row.get("operator") or "").strip()
+            if round_id < 0 or not tracker_id or not operator:
+                continue
+            rounds_by_id.setdefault(round_id, {})[tracker_id] = operator
+
+        for row in player_rounds:
+            round_id = self._safe_int(row.get("round_id"))
+            killer_id = str(row.get("killed_by_player_id") or "").strip()
+            row["killed_by_operator"] = rounds_by_id.get(round_id, {}).get(killer_id)
+
         return {
             "match_id": match_id,
             "players": [self.parse_player_overview(s) for s in grouped["overview"]],
             "round_outcomes": [self.parse_round_outcome(s) for s in grouped["round-overview"]],
-            "player_rounds": [self.parse_player_round(s) for s in grouped["player-round"]],
+            "player_rounds": player_rounds,
             "segment_counts": {k: len(v) for k, v in grouped.items()},
         }
 
@@ -892,3 +908,84 @@ class TrackerAPIClient:
             self._progress_print("")
 
         return out
+
+    def scrape_backfill_page(
+        self,
+        username: str,
+        next_page: Optional[int],
+        skip_match_ids: Optional[set[str]] = None,
+        show_progress: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Fetch exactly one historical page using `next_page` and return parsed details.
+
+        Returns:
+            {
+                "details": List[Dict[str, Any]],
+                "next_page": Optional[int],
+                "oldest_ts": Optional[str],
+                "complete": bool,
+            }
+        """
+        page = self.get_match_list(username, next_token=next_page)
+        matches = page.get("matches", []) or []
+        following_page = page.get("next")
+        skip_match_ids = skip_match_ids or set()
+
+        oldest_dt: Optional[datetime] = None
+        oldest_ts: Optional[str] = None
+        for match in matches:
+            ts_raw = match.get("timestamp")
+            dt = self._parse_timestamp(ts_raw)
+            if dt is None:
+                continue
+            if oldest_dt is None or dt < oldest_dt:
+                oldest_dt = dt
+                oldest_ts = ts_raw
+
+        details: List[Dict[str, Any]] = []
+        detail_calls = 0
+        total = len(matches)
+        for i, match in enumerate(matches, 1):
+            match_id = match.get("match_id")
+            if not match_id or match_id in skip_match_ids:
+                continue
+
+            if show_progress:
+                map_name = match.get("map") or "Unknown Map"
+                self._progress_print(f"\r  ⏪ Backfill {i}/{total}  {map_name:<20}", end="")
+
+            try:
+                detail_calls += 1
+                detail = self.get_match_detail(match_id)
+            except HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                if exc.code == 429:
+                    time.sleep(10)
+                    try:
+                        detail = self.get_match_detail(match_id)
+                    except Exception:
+                        continue
+                else:
+                    continue
+            except URLError:
+                continue
+            except Exception:
+                continue
+
+            detail["match_meta"] = match
+            details.append(detail)
+            time.sleep(random.uniform(self.detail_sleep_min_seconds, self.detail_sleep_max_seconds))
+            if detail_calls % self.detail_batch_size == 0:
+                time.sleep(self.detail_batch_pause_seconds)
+
+        if show_progress and total > 0:
+            self._progress_print("")
+
+        return {
+            "details": details,
+            "next_page": following_page,
+            "oldest_ts": oldest_ts,
+            "complete": (following_page is None) or (total == 0),
+        }

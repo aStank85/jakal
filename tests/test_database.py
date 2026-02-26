@@ -114,6 +114,33 @@ class TestDatabase:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='computed_metrics'")
         assert cursor.fetchone() is not None
 
+    def test_player_rounds_supports_killer_operator_fields(self, db):
+        db.add_player("TestPlayer")
+        player_id = db.get_player("TestPlayer")["player_id"]
+        db.save_player_rounds(
+            player_id=player_id,
+            match_id="m1",
+            player_rounds=[
+                {
+                    "round_id": 1,
+                    "player_id_tracker": "victim-1",
+                    "killed_by_player_id": "killer-1",
+                    "killed_by_operator": "Ash",
+                    "team_id": 1,
+                    "side": "defender",
+                    "operator": "Smoke",
+                    "result": "defeat",
+                    "deaths": 1,
+                }
+            ],
+            usernames_by_tracker_id={"victim-1": "TestPlayer"},
+        )
+
+        rows = db.get_player_rounds(player_id, "m1")
+        assert len(rows) == 1
+        assert rows[0]["killed_by_player_id"] == "killer-1"
+        assert rows[0]["killed_by_operator"] == "Ash"
+
     def test_add_player(self, db):
         """Test adding a new player."""
         player_id = db.add_player("TestPlayer")
@@ -171,6 +198,24 @@ class TestDatabase:
         """Test retrieving nonexistent player returns None."""
         player = db.get_player("NonExistent")
         assert player is None
+
+    def test_backfill_state_round_trip(self, db):
+        db.add_player("TestPlayer")
+        state = db.get_backfill_state("TestPlayer")
+        assert state["oldest_match_synced_at"] is None
+        assert state["backfill_next_page"] is None
+        assert state["backfill_complete"] is False
+
+        db.update_backfill_state(
+            "TestPlayer",
+            oldest_match_synced_at="2025-01-01T00:00:00+00:00",
+            backfill_next_page=3,
+            backfill_complete=True,
+        )
+        state = db.get_backfill_state("TestPlayer")
+        assert state["oldest_match_synced_at"] == "2025-01-01T00:00:00+00:00"
+        assert state["backfill_next_page"] == 3
+        assert state["backfill_complete"] is True
 
     def test_add_stats_snapshot(self, db, sample_stats):
         """Test adding a stats snapshot."""

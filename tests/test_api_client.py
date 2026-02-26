@@ -108,6 +108,7 @@ def test_parse_player_round(client):
     assert parsed["operator"]
     assert parsed["side"] in {"attacker", "defender", "unknown"}
     assert parsed["result"] in {"victory", "defeat", None}
+    assert "killed_by_player_id" in parsed
 
 
 def test_parse_round_outcome(client):
@@ -229,6 +230,30 @@ def test_batch_pause_every_10_details(monkeypatch):
     assert 15.0 in sleep_calls
 
 
+def test_scrape_backfill_page(monkeypatch):
+    client = TrackerAPIClient(sleep_seconds=0)
+    monkeypatch.setattr(
+        client,
+        "get_match_list",
+        lambda username, next_token=None: {
+            "matches": [
+                {"match_id": "m1", "map": "Oregon", "timestamp": "2026-02-01T00:00:00+00:00"},
+                {"match_id": "m2", "map": "Bank", "timestamp": "2026-01-20T00:00:00+00:00"},
+            ],
+            "next": 2,
+        },
+    )
+    monkeypatch.setattr(client, "get_match_detail", lambda match_id: {"match_id": match_id, "players": [], "round_outcomes": [], "player_rounds": []})
+    monkeypatch.setattr("src.api_client.time.sleep", lambda *_: None)
+    monkeypatch.setattr("src.api_client.random.uniform", lambda a, b: 0.0)
+
+    out = client.scrape_backfill_page("SaucedZyn", next_page=1)
+    assert out["next_page"] == 2
+    assert out["complete"] is False
+    assert out["oldest_ts"] == "2026-01-20T00:00:00+00:00"
+    assert [d["match_id"] for d in out["details"]] == ["m1", "m2"]
+
+
 def test_save_match_detail_players(client, temp_db):
     temp_db.add_player("SaucedZyn")
     player_id = temp_db.get_player("SaucedZyn")["player_id"]
@@ -260,6 +285,53 @@ def test_save_player_rounds(client, temp_db):
     assert len(rows) > 0
     assert "operator" in rows[0]
     assert rows[0]["side"] in {"attacker", "defender", "unknown"}
+    assert "killed_by_operator" in rows[0]
+
+
+def test_get_match_detail_resolves_killed_by_operator(client, monkeypatch):
+    payload = {
+        "data": {
+            "segments": [
+                {
+                    "type": "player-round",
+                    "attributes": {
+                        "roundId": 1,
+                        "playerId": "killer-1",
+                        "teamId": 0,
+                        "sideId": "attacker",
+                        "operatorId": "ash",
+                        "resultId": "victory",
+                        "isDisconnected": False,
+                    },
+                    "metadata": {"operatorName": "Ash"},
+                    "stats": {"kills": {"value": 1}, "deaths": {"value": 0}},
+                },
+                {
+                    "type": "player-round",
+                    "attributes": {
+                        "roundId": 1,
+                        "playerId": "victim-1",
+                        "teamId": 1,
+                        "sideId": "defender",
+                        "operatorId": "smoke",
+                        "resultId": "defeat",
+                        "isDisconnected": False,
+                    },
+                    "metadata": {
+                        "operatorName": "Smoke",
+                        "killedByPlayerId": "killer-1",
+                    },
+                    "stats": {"kills": {"value": 0}, "deaths": {"value": 1}},
+                },
+            ]
+        }
+    }
+    monkeypatch.setattr(client, "_get_json", lambda url: payload)
+
+    detail = client.get_match_detail("match-test")
+    victim_row = next(r for r in detail["player_rounds"] if r["player_id_tracker"] == "victim-1")
+    assert victim_row["killed_by_player_id"] == "killer-1"
+    assert victim_row["killed_by_operator"] == "Ash"
 
 
 def test_parse_profile_season_stats(client):

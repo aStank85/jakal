@@ -3,7 +3,7 @@
 <head>
     <title>JAKAL - R6 Network Scanner</title>
     <script src="/static/vis-network.min.js?v=20260223k"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260226a">
+    <link rel="stylesheet" href="/static/styles.css?v=20260226b">
 </head>
 <body>
     <div id="global-scrape-indicator" class="global-scrape-indicator hidden">
@@ -14,6 +14,7 @@
         <header>
             <h1>JAKAL - R6 Network Scanner</h1>
             <p>Visualize player connections in real time</p>
+            <button id="open-settings" class="settings-btn" type="button">Settings</button>
         </header>
         <div class="tabs">
             <button class="tab-btn active" id="tab-scanner" data-tab="scanner">Network Scanner</button>
@@ -174,6 +175,10 @@
                 <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
                 <button id="run-stat-compute">Run Dashboard</button>
             </div>
+            <div class="dashboard-subtabs" role="tablist" aria-label="Dashboard Views">
+                <button id="dashboard-tab-insights" class="dashboard-subtab active" data-dashboard-view="insights" role="tab">Insights</button>
+                <button id="dashboard-tab-graphs" class="dashboard-subtab" data-dashboard-view="graphs" role="tab">Graphs</button>
+            </div>
             <div class="controls compute-type-controls">
                 <span class="compute-types-label">Dashboard Match Types:</span>
                 <span class="compute-types-sub-label">Include</span>
@@ -234,57 +239,176 @@
                     <div id="compute-mode-cards" class="compute-mode-cards"></div>
                 </div>
 
-                <div class="compute-card compute-report-card">
-                    <div class="compute-label">Playbook</div>
-                    <div id="compute-playbook" class="compute-playbook">
-                        <div class="compute-value">Enter a username and click Run Dashboard.</div>
+                <div id="dashboard-insights-panel" class="dashboard-panel active">
+                    <div id="dashboard-section-toggles" class="dashboard-section-toggles">
+                        <button id="toggle-playbook" class="dashboard-toggle-chip active" data-target-id="dashboard-section-playbook" type="button">Playbook</button>
+                        <button id="toggle-deep-stats" class="dashboard-toggle-chip active" data-target-id="dashboard-section-deep-stats" type="button">Deep Stats</button>
+                        <button id="toggle-insight-cards" class="dashboard-toggle-chip active" data-target-id="dashboard-section-insight-cards" type="button">Info & Insight Cards</button>
+                        <button id="toggle-performance-focus" class="dashboard-toggle-chip active" data-target-id="dashboard-section-performance-focus" type="button">Performance Focus</button>
                     </div>
-                </div>
 
-                <div class="compute-card compute-report-card">
-                    <div class="compute-label">Deep Stats</div>
-                    <div id="dashboard-deep-stats" class="dashboard-deep-stats">
-                        <button class="dashboard-stat-chip" type="button" data-stat-key="fb_delta">FB Delta 0.0%</button>
-                        <button class="dashboard-stat-chip" type="button" data-stat-key="fd_rate">FD Rate 0.0%</button>
-                        <button class="dashboard-stat-chip" type="button" data-stat-key="atk_def">ATK 0.0% / DEF 0.0%</button>
-                        <button class="dashboard-stat-chip" type="button" data-stat-key="clutch">Clutch 0.0%</button>
-                        <button class="dashboard-stat-chip" type="button" data-stat-key="round_wr">Round WR 0.0%</button>
-                    </div>
-                    <div id="dashboard-evidence" class="dashboard-evidence">
-                        Click a stat for inline evidence.
-                    </div>
-                </div>
-
-                <div class="dashboard-insights-layout">
-                    <div class="compute-card dashboard-insights-left">
-                        <div class="compute-label">Info & Insight Cards</div>
-                        <div id="dashboard-insights-scroll" class="dashboard-insights-scroll">
-                            <div class="compute-value">Run Dashboard to auto-populate insight cards.</div>
+                    <div id="dashboard-section-playbook" class="compute-card compute-report-card dashboard-toggle-section">
+                        <div class="compute-label">Playbook</div>
+                        <div id="compute-playbook" class="compute-playbook">
+                            <div class="compute-value">Enter a username and click Run Dashboard.</div>
                         </div>
                     </div>
-                    <div class="compute-card dashboard-bestworst-right">
-                        <div class="compute-label">Performance Focus</div>
-                        <div class="dashboard-bestworst-grid">
-                            <section class="dashboard-focus-card">
-                                <div class="dashboard-focus-title">Best Operator</div>
-                                <div id="dashboard-best-operator-value" class="dashboard-focus-value">N/A</div>
-                                <div id="dashboard-best-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
-                            </section>
-                            <section class="dashboard-focus-card">
-                                <div class="dashboard-focus-title">Worst Operator</div>
-                                <div id="dashboard-worst-operator-value" class="dashboard-focus-value">N/A</div>
-                                <div id="dashboard-worst-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
-                            </section>
-                            <section class="dashboard-focus-card">
-                                <div class="dashboard-focus-title">Best Map</div>
-                                <div id="dashboard-best-map-value" class="dashboard-focus-value">N/A</div>
-                                <div id="dashboard-best-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
-                            </section>
-                            <section class="dashboard-focus-card">
-                                <div class="dashboard-focus-title">Worst Map</div>
-                                <div id="dashboard-worst-map-value" class="dashboard-focus-value">N/A</div>
-                                <div id="dashboard-worst-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
-                            </section>
+
+                    <div id="dashboard-section-deep-stats" class="compute-card compute-report-card dashboard-toggle-section">
+                        <div class="compute-label">Deep Stats</div>
+                        <div id="dashboard-deep-stats" class="dashboard-deep-stats">
+                            <button class="dashboard-stat-chip" type="button" data-stat-key="fb_delta">FB Delta 0.0%</button>
+                            <button class="dashboard-stat-chip" type="button" data-stat-key="fd_rate">FD Rate 0.0%</button>
+                            <button class="dashboard-stat-chip" type="button" data-stat-key="atk_def">ATK 0.0% / DEF 0.0%</button>
+                            <button class="dashboard-stat-chip" type="button" data-stat-key="clutch">Clutch 0.0%</button>
+                            <button class="dashboard-stat-chip" type="button" data-stat-key="round_wr">Round WR 0.0%</button>
+                        </div>
+                        <div id="dashboard-evidence" class="dashboard-evidence">
+                            Click a stat for inline evidence.
+                        </div>
+                    </div>
+
+                    <div class="dashboard-insights-layout">
+                        <div id="dashboard-section-insight-cards" class="compute-card dashboard-insights-left dashboard-toggle-section">
+                            <div class="compute-label">Info & Insight Cards</div>
+                            <div id="dashboard-insights-scroll" class="dashboard-insights-scroll">
+                                <div class="compute-value">Run Dashboard to auto-populate insight cards.</div>
+                            </div>
+                        </div>
+                        <div id="dashboard-section-performance-focus" class="compute-card dashboard-bestworst-right dashboard-toggle-section">
+                            <div class="compute-label">Performance Focus</div>
+                            <div class="dashboard-bestworst-grid">
+                                <section class="dashboard-focus-card">
+                                    <div class="dashboard-focus-title">Best Operator</div>
+                                    <div id="dashboard-best-operator-value" class="dashboard-focus-value">N/A</div>
+                                    <div id="dashboard-best-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
+                                </section>
+                                <section class="dashboard-focus-card">
+                                    <div class="dashboard-focus-title">Worst Operator</div>
+                                    <div id="dashboard-worst-operator-value" class="dashboard-focus-value">N/A</div>
+                                    <div id="dashboard-worst-operator-meta" class="dashboard-focus-meta">No operator stats loaded.</div>
+                                </section>
+                                <section class="dashboard-focus-card">
+                                    <div class="dashboard-focus-title">Best Map</div>
+                                    <div id="dashboard-best-map-value" class="dashboard-focus-value">N/A</div>
+                                    <div id="dashboard-best-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
+                                </section>
+                                <section class="dashboard-focus-card">
+                                    <div class="dashboard-focus-title">Worst Map</div>
+                                    <div id="dashboard-worst-map-value" class="dashboard-focus-value">N/A</div>
+                                    <div id="dashboard-worst-map-meta" class="dashboard-focus-meta">No map stats loaded.</div>
+                                </section>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="dashboard-graphs-panel" class="dashboard-panel">
+                    <div class="compute-card dashboard-graph-card">
+                        <div class="compute-label">Workspace Filters</div>
+                        <div class="dashboard-graph-controls workspace-filter-bar">
+                            <select id="ws-queue">
+                                <option value="all" selected>Queue: All</option>
+                                <option value="ranked">Queue: Ranked</option>
+                                <option value="unranked">Queue: Unranked</option>
+                            </select>
+                            <select id="ws-playlist">
+                                <option value="" selected>Playlist: All</option>
+                                <option value="standard">Playlist: Standard</option>
+                                <option value="quick">Playlist: Quick</option>
+                                <option value="event">Playlist: Event</option>
+                                <option value="arcade">Playlist: Arcade</option>
+                            </select>
+                            <select id="ws-days">
+                                <option value="30">Window: 30d</option>
+                                <option value="60">Window: 60d</option>
+                                <option value="90" selected>Window: 90d</option>
+                                <option value="180">Window: 180d</option>
+                                <option value="365">Window: 365d</option>
+                            </select>
+                            <input id="ws-map-name" type="text" placeholder="Map filter..." autocomplete="off">
+                            <input id="ws-search" type="text" placeholder="Search ops/players..." autocomplete="off">
+                            <label class="settings-check">
+                                <input id="ws-stack-only" type="checkbox">
+                                Stack only
+                            </label>
+                            <button id="ws-refresh" type="button">Refresh Workspace</button>
+                        </div>
+                        <div class="dashboard-graph-controls workspace-analysis-bar">
+                            <select id="ws-normalization">
+                                <option value="global" selected>Norm: Global</option>
+                                <option value="attacker">Norm: Attacker Row</option>
+                            </select>
+                            <select id="ws-lift-mode">
+                                <option value="percent_delta" selected>Lift: Percent Delta</option>
+                                <option value="logit_lift">Lift: Logit</option>
+                                <option value="log_odds_ratio">Lift: Log OR</option>
+                            </select>
+                            <select id="ws-interval-method">
+                                <option value="wilson" selected>CI: Wilson 95%</option>
+                                <option value="wald">CI: Wald 95%</option>
+                            </select>
+                            <select id="ws-weighting">
+                                <option value="rounds" selected>Weighting: Rounds</option>
+                                <option value="matches">Weighting: Matches</option>
+                            </select>
+                            <select id="ws-min-n">
+                                <option value="0">Hide: none</option>
+                                <option value="25" selected>Hide: n&lt;25</option>
+                                <option value="50">Hide: n&lt;50</option>
+                            </select>
+                            <label class="settings-check">
+                                <input id="ws-debug" type="checkbox">
+                                Debug
+                            </label>
+                        </div>
+                        <div class="dashboard-graph-controls workspace-view-bar">
+                            <select id="ws-clamp-mode">
+                                <option value="percentile" selected>Clamp: Percentile</option>
+                                <option value="abs">Clamp: Absolute</option>
+                            </select>
+                            <select id="ws-clamp-abs">
+                                <option value="10">Clamp abs: 10</option>
+                                <option value="15" selected>Clamp abs: 15</option>
+                                <option value="20">Clamp abs: 20</option>
+                                <option value="25">Clamp abs: 25</option>
+                            </select>
+                            <label class="settings-check">
+                                <input id="ws-labels" type="checkbox" checked>
+                                Labels on
+                            </label>
+                        </div>
+                    </div>
+                    <div class="dashboard-subtabs workspace-tabs" role="tablist" aria-label="Workspace Tabs">
+                        <button id="ws-tab-overview" class="dashboard-subtab active" data-ws-panel="overview" type="button">Overview</button>
+                        <button id="ws-tab-operators" class="dashboard-subtab" data-ws-panel="operators" type="button">Operators</button>
+                        <button id="ws-tab-matchups" class="dashboard-subtab" data-ws-panel="matchups" type="button">Matchups</button>
+                        <button id="ws-tab-team" class="dashboard-subtab" data-ws-panel="team" type="button">Team</button>
+                    </div>
+                    <div class="workspace-layout">
+                        <div class="workspace-main">
+                            <div id="workspace-panel-overview" class="workspace-panel active">
+                                <div class="compute-value">Run Dashboard to load workspace data.</div>
+                            </div>
+                            <div id="workspace-panel-operators" class="workspace-panel"></div>
+                            <div id="workspace-panel-matchups" class="workspace-panel"></div>
+                            <div id="workspace-panel-team" class="workspace-panel"></div>
+                        </div>
+                        <aside id="workspace-inspector" class="workspace-inspector">
+                            <div class="compute-label">Inspector</div>
+                            <div class="compute-value">Click a chart item to inspect.</div>
+                        </aside>
+                    </div>
+                    <details id="workspace-evidence-drawer" class="compute-console">
+                        <summary>Evidence</summary>
+                        <div id="workspace-evidence-meta" class="compute-value">No selection.</div>
+                        <div id="workspace-evidence-table" class="dashboard-graphs-content"></div>
+                        <button id="workspace-evidence-more" type="button">Load More</button>
+                    </div>
+                    <div class="compute-card dashboard-graph-card">
+                        <div class="compute-label">Enemy Operator Threat Graph</div>
+                        <div id="dashboard-graphs-content" class="dashboard-graphs-content">
+                            <div class="compute-value">Run Dashboard to load graph data.</div>
                         </div>
                     </div>
                 </div>
@@ -294,6 +418,27 @@
                 <div class="log" id="compute-log"></div>
             </details>
         </section>
+    </div>
+
+    <div id="settings-modal" class="settings-modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="settings-panel">
+            <div class="settings-head">
+                <h2 id="settings-title">Settings</h2>
+                <button id="close-settings" class="settings-close" type="button">Close</button>
+            </div>
+            <div class="settings-body">
+                <label class="settings-check">
+                    <input id="settings-dry-run" type="checkbox" checked>
+                    Dry run only (audit, no DB writes)
+                </label>
+                <label class="settings-check">
+                    <input id="settings-verbose" type="checkbox">
+                    Verbose logging
+                </label>
+                <button id="run-db-standardizer" class="settings-run-btn" type="button">Run DB Standardizer</button>
+                <pre id="settings-output" class="settings-output">Ready.</pre>
+            </div>
+        </div>
     </div>
 
     <script src="/static/network.js?v=20260226a"></script>

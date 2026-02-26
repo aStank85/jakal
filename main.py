@@ -15,6 +15,10 @@ from src.plugins.v3_round_analysis import RoundAnalysisPlugin
 from src.plugins.v3_teammate_chemistry import TeammateChemistryPlugin
 from src.plugins.v3_lobby_quality import LobbyQualityPlugin
 from src.plugins.v3_trade_analysis import TradeAnalysisPlugin
+from src.plugins.v3_team_analysis import TeamAnalysisPlugin
+from src.plugins.v3_enemy_operator_threat import EnemyOperatorThreatPlugin
+from src.plugins.v2_operator_stats import OperatorStatsPlugin
+from src.plugins.v2_map_stats import MapStatsPlugin
 from datetime import datetime
 import time
 
@@ -56,6 +60,71 @@ def _latest_detail_timestamp(detail_rows: list[dict]) -> str | None:
     if latest is None:
         return None
     return latest.isoformat()
+
+
+def _oldest_detail_timestamp(detail_rows: list[dict]) -> str | None:
+    oldest = None
+    for row in detail_rows:
+        ts = ((row.get("match_meta") or {}).get("timestamp"))
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if oldest is None or dt < oldest:
+            oldest = dt
+    if oldest is None:
+        return None
+    return oldest.isoformat()
+
+
+def _backfill_one_page(db: Database, api_client: TrackerAPIClient, username: str, player_id: int) -> dict:
+    state = db.get_backfill_state(username)
+    if state.get("backfill_complete"):
+        return {
+            "username": username,
+            "skipped": True,
+            "reason": "complete",
+            "saved_matches": 0,
+            "saved_round_rows": 0,
+        }
+
+    next_page = state.get("backfill_next_page")
+    if next_page is None:
+        next_page = 1
+
+    existing_ids = db.get_existing_match_detail_ids(player_id)
+    result = api_client.scrape_backfill_page(
+        username,
+        next_page=next_page,
+        skip_match_ids=existing_ids,
+        show_progress=True,
+    )
+    details = result.get("details", []) or []
+    save_summary = {"matches": 0, "round_rows": 0}
+    if details:
+        save_summary = db.save_full_match_detail_history(player_id, details)
+
+    update_kwargs = {
+        "backfill_next_page": result.get("next_page"),
+        "backfill_complete": bool(result.get("complete")),
+    }
+    oldest_ts = result.get("oldest_ts")
+    if oldest_ts:
+        update_kwargs["oldest_match_synced_at"] = oldest_ts
+    db.update_backfill_state(username, **update_kwargs)
+
+    return {
+        "username": username,
+        "skipped": False,
+        "reason": "",
+        "saved_matches": save_summary.get("matches", 0),
+        "saved_round_rows": save_summary.get("round_rows", 0),
+        "next_page": result.get("next_page"),
+        "complete": bool(result.get("complete")),
+        "oldest_ts": oldest_ts,
+    }
 
 
 def _save_scraped_profile(
@@ -193,6 +262,14 @@ def main():
                     latest_synced_at = _latest_detail_timestamp(detail_rows)
                     if latest_synced_at:
                         db.update_player_last_match_synced_at(username, latest_synced_at)
+                    if is_initial_sync:
+                        oldest_synced_at = _oldest_detail_timestamp(detail_rows)
+                        db.update_backfill_state(
+                            username,
+                            oldest_match_synced_at=oldest_synced_at,
+                            backfill_next_page=1,
+                            backfill_complete=False,
+                        )
                     _safe_print("✅ Saved to database")
                     print(f"Role: {metrics['primary_role']} ({metrics['primary_confidence']:.0f}% confidence)")
                     if insights:
@@ -332,6 +409,14 @@ def main():
                             latest_synced_at = _latest_detail_timestamp(detail_rows)
                             if latest_synced_at:
                                 db.update_player_last_match_synced_at(username, latest_synced_at)
+                            if is_initial_sync:
+                                oldest_synced_at = _oldest_detail_timestamp(detail_rows)
+                                db.update_backfill_state(
+                                    username,
+                                    oldest_match_synced_at=oldest_synced_at,
+                                    backfill_next_page=1,
+                                    backfill_complete=False,
+                                )
                             success += 1
                         except Exception as e:
                             _safe_print(f"❌ Sync failed: {e}")
@@ -546,7 +631,7 @@ def main():
                 except Exception as e:
                     ui.show_error(str(e))
 
-            elif choice.upper() == 'A':
+            elif choice == 'a':
                 # Player Analytics
                 try:
                     all_players = db.get_all_players()
@@ -569,6 +654,10 @@ def main():
                     print("2. Teammate Chemistry (who boosts vs tanks your win rate)")
                     print("3. Lobby Quality (enemy RP brackets, punching up/down)")
                     print("4. Trade Analysis (deaths traded within 5 seconds)")
+                    print("5. Team Analysis (partners, stack size, trio synergy)")
+                    print("6. Operator Stats (core pool, cut list, diversity)")
+                    print("7. Map Stats (best/worst maps, side gaps, RP drain)")
+                    print("8. Enemy Operator Threat (death threats + presence vs win delta)")
                     print("0. Back")
                     sub = input("Choose: ").strip()
 
@@ -584,6 +673,60 @@ def main():
                     elif sub == '4':
                         plugin = TradeAnalysisPlugin(db, username_input, window_seconds=5.0)
                         plugin.summary()
+                    elif sub == '5':
+                        plugin = TeamAnalysisPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '6':
+                        plugin = OperatorStatsPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '7':
+                        plugin = MapStatsPlugin(db, username_input)
+                        plugin.summary()
+                    elif sub == '8':
+                        plugin = EnemyOperatorThreatPlugin(db, username_input)
+                        plugin.summary()
+
+                except Exception as e:
+                    ui.show_error(str(e))
+
+            elif choice == 'b':
+                # Backfill one page (single player or all)
+                try:
+                    players = db.get_all_players()
+                    if not players:
+                        ui.show_error("No players in database yet")
+                        continue
+
+                    mode = input("Backfill one page for (s)ingle player or (a)ll players? ").strip().lower()
+                    if mode not in {"s", "a"}:
+                        ui.show_error("Invalid option. Use 's' or 'a'.")
+                        continue
+
+                    selected_players = players
+                    if mode == "s":
+                        ui.show_players(players)
+                        username = input("Enter player username to backfill: ").strip()
+                        selected_players = [p for p in players if p.get("username") == username]
+                        if not selected_players:
+                            ui.show_error(f"Player '{username}' not found")
+                            continue
+
+                    for idx, player in enumerate(selected_players, 1):
+                        username = player.get("username")
+                        print(f"Backfill {idx}/{len(selected_players)}: {username}")
+                        try:
+                            outcome = _backfill_one_page(db, api_client, username, player["player_id"])
+                            if outcome.get("skipped"):
+                                _safe_print(f"⏭️  {username}: backfill already complete")
+                                continue
+                            _safe_print(
+                                f"✅ {username}: +{outcome.get('saved_matches', 0)} matches, "
+                                f"+{outcome.get('saved_round_rows', 0)} rounds "
+                                f"(next_page={outcome.get('next_page')}, complete={outcome.get('complete')})"
+                            )
+                        except Exception as exc:
+                            _safe_print(f"❌ {username}: backfill failed ({exc})")
+                        time.sleep(1)
 
                 except Exception as e:
                     ui.show_error(str(e))

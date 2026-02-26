@@ -39,12 +39,13 @@ class TerminalUI:
         print("9. 5v5 Matchup Analysis")
         print("-" * 30)
         print("A. Player Analytics")
+        print("B. Backfill match history")
         print("-" * 30)
         print("0. Exit")
         print("=" * 50)
 
-        choice = input("Choose an option (0-9, A): ").strip()
-        return choice
+        choice = input("Choose an option (0-9, A-B): ").strip()
+        return choice.lower()
 
     def get_paste_input(self) -> str:
         """Get pasted stats from user."""

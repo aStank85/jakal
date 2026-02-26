@@ -26,17 +26,37 @@ let operatorImageIndexEnabled = false;
 let operatorImageIndexCount = 0;
 let computeReportState = {
     mode: "overall",
+    dashboardView: "insights",
+    username: "",
     stats: null,
     round: null,
     chemistry: null,
     lobby: null,
     trade: null,
     team: null,
+    enemyThreat: null,
+    atkDefHeatmap: null,
     operator: null,
     map: null,
     sorted: null,
+    playbookFindings: [],
     evidenceByKey: {},
     selectedEvidenceKey: "",
+    sectionVisibility: {
+        playbook: true,
+        deepStats: true,
+        insightCards: true,
+        performanceFocus: true,
+    },
+    workspace: {
+        panel: "overview",
+        filters: {},
+        dataByPanel: {},
+        meta: null,
+        selection: { type: null },
+        evidenceCursor: "",
+        evidenceRows: [],
+    },
 };
 const MAP_IMAGE_FILE_BY_KEY = {
     "outback": "r6-maps-outback.avif",
@@ -1948,6 +1968,73 @@ function logCompute(message, level = "info") {
     logEl.scrollTop = logEl.scrollHeight;
 }
 
+function openSettingsModal() {
+    const modal = document.getElementById("settings-modal");
+    if (!modal) return;
+    modal.classList.remove("hidden");
+}
+
+function closeSettingsModal() {
+    const modal = document.getElementById("settings-modal");
+    if (!modal) return;
+    modal.classList.add("hidden");
+}
+
+function renderStandardizerReport(payload) {
+    const report = payload?.report || {};
+    const flags = Array.isArray(report.data_quality_flags) ? report.data_quality_flags : [];
+    const lines = [
+        `DB: ${report.db_path || "-"}`,
+        `Run at: ${report.run_at || "-"}`,
+        `Mode: ${payload?.dry_run ? "Dry Run" : "Write Changes"}`,
+        "",
+        `Total matches: ${toNumber(report.total_matches, 0)}`,
+        `Total player_rounds: ${toNumber(report.total_player_rounds, 0)}`,
+        `Total round_outcomes: ${toNumber(report.total_round_outcomes, 0)}`,
+        "",
+        `Null usernames: found=${toNumber(report.null_usernames_found, 0)} fixed=${toNumber(report.null_usernames_fixed, 0)}`,
+        `Match type normalization: found=${toNumber(report.bad_match_types_found, 0)} fixed=${toNumber(report.bad_match_types_fixed, 0)}`,
+        `Summary kill reconstruction: missing=${toNumber(report.summary_kills_missing, 0)} reconstructed=${toNumber(report.summary_kills_reconstructed, 0)}`,
+        `OW-ingest stats backfill: missing=${toNumber(report.owingest_stats_missing, 0)} fixed=${toNumber(report.owingest_stats_fixed, 0)}`,
+        `Killer operator backfill: missing=${toNumber(report.killed_by_op_missing, 0)} fixed=${toNumber(report.killed_by_op_fixed, 0)}`,
+    ];
+    if (flags.length) {
+        lines.push("", "Data quality flags:");
+        for (const flag of flags) lines.push(`- ${String(flag)}`);
+    }
+    return lines.join("\n");
+}
+
+async function runDbStandardizerFromSettings() {
+    const dryRunEl = document.getElementById("settings-dry-run");
+    const verboseEl = document.getElementById("settings-verbose");
+    const runBtn = document.getElementById("run-db-standardizer");
+    const output = document.getElementById("settings-output");
+    if (!dryRunEl || !verboseEl || !runBtn || !output) return;
+
+    runBtn.disabled = true;
+    output.textContent = "Running DB standardizer...";
+    try {
+        const dryRun = dryRunEl.checked ? "true" : "false";
+        const verbose = verboseEl.checked ? "true" : "false";
+        const res = await fetch(`/api/settings/db-standardize?dry_run=${dryRun}&verbose=${verbose}`, {
+            method: "POST",
+        });
+        if (!res.ok) {
+            const detail = await res.text();
+            throw new Error(`HTTP ${res.status}: ${detail}`);
+        }
+        const payload = await res.json();
+        output.textContent = renderStandardizerReport(payload);
+        logCompute("DB standardizer finished via Settings.", "success");
+    } catch (err) {
+        output.textContent = `Failed to run DB standardizer:\n${String(err)}`;
+        logCompute(`DB standardizer failed: ${err}`, "error");
+    } finally {
+        runBtn.disabled = false;
+    }
+}
+
 function renderComputeCards(stats) {
     computeReportState.stats = stats;
     renderComputeReport();
@@ -2001,6 +2088,63 @@ function splitFindingMessage(message) {
     };
 }
 
+function buildFilteredPlaybookFindings(filteredMatches, stats) {
+    const rows = Array.isArray(filteredMatches) ? filteredMatches : [];
+    const overall = stats?.overall || {};
+    const total = toNumber(overall.matches, 0);
+    const wins = toNumber(overall.wins, 0);
+    const losses = toNumber(overall.losses, 0);
+    const winRate = toNumber(overall.winRate, 0);
+    const avgKd = toNumber(overall.avgKd, 0);
+    const findings = [];
+    const modeCounts = new Map();
+
+    for (const match of rows) {
+        const mode = classifyStoredMode(match);
+        modeCounts.set(mode, toNumber(modeCounts.get(mode), 0) + 1);
+    }
+    const modeCitations = Array.from(modeCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([mode, count]) => `${mode}: ${count} matches`);
+    const { include, exclude } = getDashboardModeFilters();
+    const includeText = include.size ? Array.from(include).sort().join(", ") : "all";
+    const excludeText = exclude.size ? Array.from(exclude).sort().join(", ") : "none";
+
+    findings.push({
+        severity: "info",
+        message:
+            `Filtered set recalculated: ${total} matches (${wins}-${losses}, ${formatFixed(winRate, 1)}% WR). ` +
+            `Include=${includeText}; Exclude=${excludeText}.`,
+        citations: modeCitations,
+    });
+
+    if (total > 0 && total < 8) {
+        findings.push({
+            severity: "warning",
+            message: `Small filtered sample (${total} matches). Treat this playbook as directional.`,
+        });
+    }
+    if (total >= 8 && winRate >= 55) {
+        findings.push({
+            severity: "info",
+            message: `Current filtered trend is strong (${formatFixed(winRate, 1)}% WR). Keep this queue profile.`,
+        });
+    } else if (total >= 8 && winRate <= 45) {
+        findings.push({
+            severity: "warning",
+            message: `Current filtered trend is weak (${formatFixed(winRate, 1)}% WR). Adjust comp/pace for these modes.`,
+        });
+    }
+    if (total >= 8 && avgKd < 1.0) {
+        findings.push({
+            severity: "warning",
+            message: `Average K/D is ${formatFixed(avgKd, 2)} in the filtered set. Prioritize survivability and trade spacing.`,
+        });
+    }
+
+    return findings;
+}
+
 function normalizeCitation(citation) {
     if (typeof citation === "string") {
         return citation.trim();
@@ -2030,6 +2174,7 @@ function formatCitationText(citations) {
 
 function flattenSortedFindings() {
     const sources = [
+        { label: "Filtered Match Set", data: { findings: computeReportState.playbookFindings || [] } },
         { label: "Round Analysis", data: computeReportState.round },
         { label: "Teammate Chemistry", data: computeReportState.chemistry },
         { label: "Lobby Quality", data: computeReportState.lobby },
@@ -2281,6 +2426,866 @@ function renderDashboardInsightCards() {
     renderDashboardBestWorstSummary();
 }
 
+function heatmapCellColor(lift, nRounds, mode = "percent_delta", absBound = 15) {
+    const liftNum = toNumber(lift, 0);
+    const bound = Math.max(0.000001, toNumber(absBound, mode === "percent_delta" ? 15 : 1.25));
+    const normalized = Math.max(-1, Math.min(1, liftNum / bound));
+    const intensity = Math.abs(normalized);
+    const alpha = 0.22 + Math.min(0.78, toNumber(nRounds, 0) / 40);
+    if (intensity < 0.05) {
+        return `rgba(71, 85, 105, ${alpha.toFixed(3)})`;
+    }
+    const hue = normalized >= 0 ? 146 : 8;
+    const sat = 72;
+    const light = 38 - (intensity * 12);
+    return `hsla(${hue}, ${sat}%, ${light}%, ${alpha.toFixed(3)})`;
+}
+
+function computeHeatmapBound(values, mode = "percent_delta") {
+    const nums = values
+        .map((v) => Math.abs(toNumber(v, 0)))
+        .filter((v) => Number.isFinite(v) && v > 0);
+    if (!nums.length) {
+        return mode === "percent_delta" ? 15 : 1.25;
+    }
+    nums.sort((a, b) => a - b);
+    const idx = Math.min(nums.length - 1, Math.floor(nums.length * 0.9));
+    const p90 = nums[idx];
+    if (mode === "percent_delta") {
+        return Math.min(30, Math.max(8, p90));
+    }
+    return Math.min(3, Math.max(0.5, p90));
+}
+
+function heatmapDistance(v1, v2) {
+    let sum = 0;
+    let seen = 0;
+    for (let i = 0; i < v1.length; i += 1) {
+        const a = v1[i];
+        const b = v2[i];
+        if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+        const d = a - b;
+        sum += d * d;
+        seen += 1;
+    }
+    if (!seen) return Number.POSITIVE_INFINITY;
+    return Math.sqrt(sum / seen);
+}
+
+function clusterColumnsGreedy(defenders, attackers, byKey, minN) {
+    if (defenders.length < 3 || attackers.length < 2) return defenders.slice();
+    const vectors = new Map();
+    for (const d of defenders) {
+        vectors.set(d, attackers.map((a) => {
+            const c = byKey.get(`${a}|||${d}`);
+            if (!c) return NaN;
+            const n = toNumber(c.n_rounds, 0);
+            if (n < minN) return NaN;
+            return toNumber(c.lift, 0);
+        }));
+    }
+    const sampleVolume = new Map(defenders.map((d) => [d, attackers.reduce((acc, a) => {
+        const c = byKey.get(`${a}|||${d}`);
+        return acc + (c ? toNumber(c.n_rounds, 0) : 0);
+    }, 0)]));
+    const remaining = new Set(defenders);
+    let current = defenders
+        .slice()
+        .sort((a, b) => toNumber(sampleVolume.get(b), 0) - toNumber(sampleVolume.get(a), 0))[0];
+    const ordered = [current];
+    remaining.delete(current);
+    while (remaining.size) {
+        let best = null;
+        let bestDist = Number.POSITIVE_INFINITY;
+        for (const candidate of remaining) {
+            const dist = heatmapDistance(vectors.get(current) || [], vectors.get(candidate) || []);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+        if (!best) {
+            const fallback = Array.from(remaining)[0];
+            ordered.push(fallback);
+            remaining.delete(fallback);
+            current = fallback;
+            continue;
+        }
+        ordered.push(best);
+        remaining.delete(best);
+        current = best;
+    }
+    return ordered;
+}
+
+function initHeatmapInteractions() {
+    const grid = document.getElementById("atk-def-heatmap-grid");
+    if (!grid) return;
+    let locked = false;
+    let lockedRow = null;
+    let lockedCol = null;
+    const cells = Array.from(grid.querySelectorAll(".heatmap-cell"));
+    const clear = () => {
+        for (const el of cells) {
+            el.classList.remove("is-row-highlight", "is-col-highlight", "is-focus");
+        }
+    };
+    const apply = (row, col) => {
+        clear();
+        if (row == null && col == null) return;
+        for (const el of cells) {
+            const cellRow = Number.parseInt(el.dataset.row || "-999", 10);
+            const cellCol = Number.parseInt(el.dataset.col || "-999", 10);
+            if (row != null && cellRow === row) el.classList.add("is-row-highlight");
+            if (col != null && cellCol === col) el.classList.add("is-col-highlight");
+            if (row != null && col != null && cellRow === row && cellCol === col) el.classList.add("is-focus");
+        }
+    };
+    grid.addEventListener("mouseover", (event) => {
+        if (locked) return;
+        const cell = event.target?.closest(".heatmap-cell");
+        if (!cell) return;
+        const row = Number.parseInt(cell.dataset.row || "-999", 10);
+        const col = Number.parseInt(cell.dataset.col || "-999", 10);
+        apply(Number.isNaN(row) || row < 0 ? null : row, Number.isNaN(col) || col < 0 ? null : col);
+    });
+    grid.addEventListener("mouseleave", () => {
+        if (!locked) clear();
+    });
+    grid.addEventListener("click", (event) => {
+        const cell = event.target?.closest(".heatmap-cell");
+        if (!cell) return;
+        const row = Number.parseInt(cell.dataset.row || "-999", 10);
+        const col = Number.parseInt(cell.dataset.col || "-999", 10);
+        if (locked && lockedRow === row && lockedCol === col) {
+            locked = false;
+            lockedRow = null;
+            lockedCol = null;
+            clear();
+            return;
+        }
+        locked = true;
+        lockedRow = Number.isNaN(row) || row < 0 ? null : row;
+        lockedCol = Number.isNaN(col) || col < 0 ? null : col;
+        apply(lockedRow, lockedCol);
+    });
+}
+
+function renderAtkDefHeatmap(analysis) {
+    if (!analysis || analysis.error) {
+        return `<div class="insights-empty">${escapeHtml(analysis?.error || "No ATK/DEF matchup data available.")}</div>`;
+    }
+    let attackers = Array.isArray(analysis.attackers) ? analysis.attackers.slice() : [];
+    let defenders = Array.isArray(analysis.defenders) ? analysis.defenders.slice() : [];
+    const cells = Array.isArray(analysis.cells) ? analysis.cells : [];
+    const metricMode = String(analysis.lift_mode || "percent_delta");
+    if (!attackers.length || !defenders.length) {
+        return `<div class="insights-empty">Not enough operator overlap to build heatmap.</div>`;
+    }
+    const minN = toNumber(analysis?.filters?.min_n, 0);
+    const topN = toNumber(document.getElementById("heatmap-top-n")?.value, 20);
+    const rowSort = String(document.getElementById("heatmap-sort-rows")?.value || "threat");
+    const colSort = String(document.getElementById("heatmap-sort-cols")?.value || "threat");
+    const clusterCols = Boolean(document.getElementById("heatmap-cluster-cols")?.checked);
+    const searchRaw = String(document.getElementById("heatmap-search-op")?.value || "").trim().toLowerCase();
+    const byKey = new Map(cells.map((c) => [`${c.attacker}|||${c.defender}`, c]));
+
+    if (searchRaw) {
+        attackers = attackers.filter((op) => String(op).toLowerCase().includes(searchRaw));
+        defenders = defenders.filter((op) => String(op).toLowerCase().includes(searchRaw));
+    }
+
+    const rowSample = (a) => defenders.reduce((acc, d) => {
+        const c = byKey.get(`${a}|||${d}`);
+        return acc + (c ? toNumber(c.n_rounds, 0) : 0);
+    }, 0);
+    const colSample = (d) => attackers.reduce((acc, a) => {
+        const c = byKey.get(`${a}|||${d}`);
+        return acc + (c ? toNumber(c.n_rounds, 0) : 0);
+    }, 0);
+    const rowMeanLift = (a) => {
+        let w = 0;
+        let s = 0;
+        for (const d of defenders) {
+            const c = byKey.get(`${a}|||${d}`);
+            if (!c) continue;
+            const n = toNumber(c.n_rounds, 0);
+            if (n < minN) continue;
+            w += n;
+            s += toNumber(c.lift, 0) * n;
+        }
+        return w > 0 ? s / w : -9999;
+    };
+    const colThreat = (d) => {
+        let w = 0;
+        let s = 0;
+        for (const a of attackers) {
+            const c = byKey.get(`${a}|||${d}`);
+            if (!c) continue;
+            const n = toNumber(c.n_rounds, 0);
+            if (n < minN) continue;
+            w += n;
+            s += (-toNumber(c.lift, 0)) * n;
+        }
+        return w > 0 ? s / w : -9999;
+    };
+
+    if (rowSort === "alpha") attackers.sort((a, b) => String(a).localeCompare(String(b)));
+    else if (rowSort === "sample") attackers.sort((a, b) => rowSample(b) - rowSample(a));
+    else attackers.sort((a, b) => rowMeanLift(b) - rowMeanLift(a));
+
+    if (colSort === "alpha") defenders.sort((a, b) => String(a).localeCompare(String(b)));
+    else if (colSort === "sample") defenders.sort((a, b) => colSample(b) - colSample(a));
+    else defenders.sort((a, b) => colThreat(b) - colThreat(a));
+
+    if (topN > 0) {
+        attackers = attackers.slice(0, topN);
+        defenders = defenders.slice(0, topN);
+    }
+    if (clusterCols) {
+        defenders = clusterColumnsGreedy(defenders, attackers, byKey, minN);
+    }
+    if (!attackers.length || !defenders.length) {
+        return `<div class="insights-empty">No operators match the current filter set.</div>`;
+    }
+
+    const visibleLifts = [];
+    for (const a of attackers) {
+        for (const d of defenders) {
+            const c = byKey.get(`${a}|||${d}`);
+            if (!c) continue;
+            if (toNumber(c.n_rounds, 0) < minN) continue;
+            const lift = toNumber(c.lift, NaN);
+            if (Number.isFinite(lift)) visibleLifts.push(lift);
+        }
+    }
+    const colorBound = computeHeatmapBound(visibleLifts, metricMode);
+    const tickFormat = (v) => metricMode === "percent_delta" ? `${v.toFixed(0)}%` : v.toFixed(2);
+    const leftTick = tickFormat(-colorBound);
+    const midTick = metricMode === "percent_delta" ? "0%" : "0.00";
+    const rightTick = tickFormat(colorBound);
+
+    const header = [
+        `<div class="heatmap-cell heatmap-head heatmap-corner" data-row="-1" data-col="-1">ATK \\ DEF</div>`,
+        ...defenders.map((d, colIdx) => `<div class="heatmap-cell heatmap-head" data-row="-1" data-col="${colIdx}">${escapeHtml(d)}</div>`),
+    ];
+    const rows = attackers.flatMap((a, rowIdx) => {
+        const out = [`<div class="heatmap-cell heatmap-rowhead" data-row="${rowIdx}" data-col="-1">${escapeHtml(a)}</div>`];
+        for (let colIdx = 0; colIdx < defenders.length; colIdx += 1) {
+            const d = defenders[colIdx];
+            const cell = byKey.get(`${a}|||${d}`);
+            if (!cell) {
+                out.push(`<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" title="No shared rounds">-</div>`);
+                continue;
+            }
+            const n = toNumber(cell.n_rounds, 0);
+            if (n < minN) {
+                out.push(`<div class="heatmap-cell heatmap-data-cell heatmap-hidden" data-row="${rowIdx}" data-col="${colIdx}" title="Hidden by sample-size filter (n=${n} < ${minN})">n&lt;${minN}</div>`);
+                continue;
+            }
+            const winPct = toNumber(cell.win_pct, 0);
+            const baselineWr = toNumber(cell.baseline_wr, 0);
+            const winCiLow = toNumber(cell.win_ci_low, 0);
+            const winCiHigh = toNumber(cell.win_ci_high, 0);
+            const lift = toNumber(cell.lift, 0);
+            const ciLow = toNumber(cell.ci_low, 0);
+            const ciHigh = toNumber(cell.ci_high, 0);
+            const sign = lift >= 0 ? "+" : "";
+            const metricLabel = metricMode === "percent_delta" ? `${sign}${lift.toFixed(1)}%` : `${sign}${lift.toFixed(2)}`;
+            const intervalLabel = metricMode === "percent_delta"
+                ? `[${ciLow.toFixed(3)}, ${ciHigh.toFixed(3)}]`
+                : `[${ciLow.toFixed(4)}, ${ciHigh.toFixed(4)}]`;
+            const ciMethod = String(analysis.interval_method || "wilson").toLowerCase();
+            const title = `${a} vs ${d}\n` +
+                `n=${n}\n` +
+                `ATK win%=${winPct.toFixed(3)}\n` +
+                `95% CI for ATK win% (${ciMethod})=[${winCiLow.toFixed(3)}, ${winCiHigh.toFixed(3)}]\n` +
+                `Baseline WR=${baselineWr.toFixed(3)}\n` +
+                `lift=${lift.toFixed(metricMode === "percent_delta" ? 3 : 4)}${metricMode === "percent_delta" ? "%" : ""}\n` +
+                `${metricMode === "log_odds_ratio" ? "95% CI for lift (log OR, normal approx)" : "95% approx CI for lift"}=${intervalLabel}`;
+            out.push(
+                `<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" title="${escapeHtml(title)}" style="background:${heatmapCellColor(lift, n, metricMode, colorBound)};">${metricLabel}</div>`
+            );
+        }
+        return out;
+    });
+    const stackInfo = analysis.stack_context?.enabled
+        ? (
+            analysis.stack_context?.applied
+                ? `Stack filter enabled (${toNumber((analysis.stack_context?.matched_teammates || []).length, 0)} teammate matches found)`
+                : `Stack filter requested (${analysis.stack_context?.reason || "not applied"})`
+        )
+        : "Stack filter disabled";
+    const normLabel = analysis.normalization === "attacker" ? "attacker-row baseline" : "global ATK baseline";
+    const ciLabel = String(analysis.interval_method || "wilson").toLowerCase();
+    const metricLabel = metricMode === "percent_delta" ? "percent delta" : (metricMode === "logit_lift" ? "logit lift" : "log-odds ratio");
+    const diagnostics = analysis.diagnostics;
+    const hideLabel = minN > 0 ? `n<${toNumber(minN, 0)}` : "none";
+    let diagnosticsSummary = "";
+    if (diagnostics) {
+        const nanInf = toNumber(diagnostics?.pathology_counters?.nan_or_inf_cells_count, 0);
+        const rowChecks = Array.isArray(diagnostics?.row_checks) ? diagnostics.row_checks : [];
+        const rowsOutsideTol = rowChecks.filter((r) => Math.abs(toNumber(r?.weighted_mean_lift, 0)) > 0.5).length;
+        const pass = nanInf === 0 && rowsOutsideTol === 0;
+        diagnosticsSummary = `
+            <div class="heatmap-debug-summary ${pass ? "ok" : "warn"}">
+                Debug ${pass ? "PASS" : "WARN"} • nan/inf=${nanInf} • rows_outside_tol=${rowsOutsideTol}
+            </div>
+        `;
+    }
+    const diagnosticsHtml = diagnostics
+        ? `<details class="heatmap-diagnostics"><summary>Diagnostics</summary><pre>${escapeHtml(JSON.stringify(diagnostics, null, 2))}</pre></details>`
+        : "";
+    return `
+        <div class="dashboard-graph-summary">
+            <span>ATK baseline <strong>${formatPct(analysis.baseline_atk_win_rate)}</strong></span>
+            <span>Normalization <strong>${escapeHtml(normLabel)}</strong></span>
+            <span>Metric <strong>${escapeHtml(metricLabel)}</strong></span>
+            <span>Interval <strong>${escapeHtml(ciLabel)} 95%</strong></span>
+            <span>Rounds <strong>${toNumber(analysis.total_rounds, 0)}</strong></span>
+            <span>Cells <strong>${toNumber(cells.length, 0)}</strong></span>
+            <span>${escapeHtml(stackInfo)}</span>
+        </div>
+        <div class="heatmap-method-badge">Lift: ${escapeHtml(metricLabel)} | CI: ${escapeHtml(ciLabel)} | Norm: ${escapeHtml(normLabel)} | Hide: ${hideLabel}</div>
+        <div class="heatmap-legend">
+            Color = lift (centered at 0). Hatching = low-sample hidden. Opacity = sample size. Hover to crosshair, click to lock.
+            <span class="heatmap-opacity-scale">
+                <span class="heatmap-opacity-chip o10">n=10</span>
+                <span class="heatmap-opacity-chip o50">n=50</span>
+                <span class="heatmap-opacity-chip o200">n=200</span>
+            </span>
+        </div>
+        <div class="heatmap-color-scale">
+            <div class="heatmap-color-bar"></div>
+            <div class="heatmap-color-ticks">
+                <span>${escapeHtml(leftTick)}</span>
+                <span>${escapeHtml(midTick)}</span>
+                <span>${escapeHtml(rightTick)}</span>
+            </div>
+        </div>
+        ${diagnosticsSummary}
+        <div class="heatmap-wrap">
+            <div id="atk-def-heatmap-grid" class="heatmap-grid" style="grid-template-columns: 180px repeat(${defenders.length}, minmax(72px, 1fr));">
+                ${header.join("")}
+                ${rows.join("")}
+            </div>
+        </div>
+        ${diagnosticsHtml}
+    `;
+}
+
+function updateHeatmapMapOptions(analysis) {
+    const select = document.getElementById("heatmap-map");
+    if (!select) return;
+    const maps = Array.isArray(analysis?.available_maps) ? analysis.available_maps : [];
+    const current = String(select.value || "");
+    const options = [`<option value="">All Maps</option>`]
+        .concat(maps.map((m) => `<option value="${escapeHtml(String(m))}">${escapeHtml(String(m))}</option>`));
+    select.innerHTML = options.join("");
+    if (maps.includes(current)) {
+        select.value = current;
+    }
+}
+
+async function loadAtkDefHeatmap(username) {
+    const heatmapMode = document.getElementById("heatmap-mode");
+    const heatmapDays = document.getElementById("heatmap-days");
+    const heatmapNormalization = document.getElementById("heatmap-normalization");
+    const heatmapLiftMode = document.getElementById("heatmap-lift-mode");
+    const heatmapMinN = document.getElementById("heatmap-min-n");
+    const heatmapMap = document.getElementById("heatmap-map");
+    const heatmapStackOnly = document.getElementById("heatmap-stack-only");
+    const heatmapDebug = document.getElementById("heatmap-debug");
+    const mode = heatmapMode ? heatmapMode.value : "ranked";
+    const days = heatmapDays ? heatmapDays.value : "90";
+    const normalization = heatmapNormalization ? heatmapNormalization.value : "global";
+    const liftMode = heatmapLiftMode ? heatmapLiftMode.value : "percent_delta";
+    const minN = heatmapMinN ? heatmapMinN.value : "0";
+    const mapName = heatmapMap ? heatmapMap.value : "";
+    const stackOnly = heatmapStackOnly ? heatmapStackOnly.checked : false;
+    const debug = heatmapDebug ? heatmapDebug.checked : false;
+    const qs = new URLSearchParams({
+        mode,
+        days,
+        normalization,
+        lift_mode: liftMode,
+        interval_method: "wilson",
+        min_n: minN,
+        map_name: mapName,
+        stack_only: stackOnly ? "true" : "false",
+        debug: debug ? "true" : "false",
+    });
+    const res = await fetch(`/api/atk-def-heatmap/${encodeURIComponent(username)}?${qs.toString()}`);
+    if (!res.ok) {
+        throw new Error(`ATK/DEF heatmap HTTP ${res.status}`);
+    }
+    const payload = await res.json();
+    computeReportState.atkDefHeatmap = payload?.analysis || null;
+    updateHeatmapMapOptions(computeReportState.atkDefHeatmap);
+}
+
+function renderDashboardGraphs() {
+    const wrap = document.getElementById("dashboard-graphs-content");
+    const heatWrap = document.getElementById("dashboard-heatmap-content");
+    if (!wrap) return;
+    if (heatWrap) {
+        heatWrap.innerHTML = renderAtkDefHeatmap(computeReportState.atkDefHeatmap);
+        initHeatmapInteractions();
+    }
+    const analysis = computeReportState.enemyThreat;
+    if (!analysis || analysis.error) {
+        wrap.innerHTML = `<div class="insights-empty">${escapeHtml(analysis?.error || "No graph data available. Run Dashboard first.")}</div>`;
+        return;
+    }
+    wrap.innerHTML = `
+        <div class="dashboard-graph-summary">
+            <span>Baseline WR <strong>${formatPct(analysis.baseline_win_rate)}</strong></span>
+            <span>Total rounds <strong>${toNumber(analysis.total_rounds, 0)}</strong></span>
+            <span>Death rounds <strong>${toNumber(analysis.total_death_rounds, 0)}</strong></span>
+            <span>Operators tracked <strong>${toNumber(Array.isArray(analysis.threats) ? analysis.threats.length : 0, 0)}</strong></span>
+        </div>
+        ${renderEnemyThreatScatter(analysis)}
+        <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+    `;
+}
+
+function getWorkspaceFiltersFromUI() {
+    const f = {
+        days: document.getElementById("ws-days")?.value || "90",
+        queue: document.getElementById("ws-queue")?.value || "all",
+        playlist: document.getElementById("ws-playlist")?.value || "",
+        map_name: (document.getElementById("ws-map-name")?.value || "").trim(),
+        stack_only: document.getElementById("ws-stack-only")?.checked ? "true" : "false",
+        search: (document.getElementById("ws-search")?.value || "").trim(),
+        normalization: document.getElementById("ws-normalization")?.value || "global",
+        lift_mode: document.getElementById("ws-lift-mode")?.value || "percent_delta",
+        interval_method: document.getElementById("ws-interval-method")?.value || "wilson",
+        min_n: document.getElementById("ws-min-n")?.value || "25",
+        weighting: document.getElementById("ws-weighting")?.value || "rounds",
+        clamp_mode: document.getElementById("ws-clamp-mode")?.value || "percentile",
+        clamp_abs: document.getElementById("ws-clamp-abs")?.value || "15",
+        clamp_p_low: "5",
+        clamp_p_high: "95",
+        debug: document.getElementById("ws-debug")?.checked ? "true" : "false",
+    };
+    computeReportState.workspace.filters = f;
+    return f;
+}
+
+function persistWorkspaceState() {
+    const filters = getWorkspaceFiltersFromUI();
+    const params = new URLSearchParams(window.location.search);
+    params.set("ws_panel", computeReportState.workspace.panel || "overview");
+    ["days", "queue", "playlist", "map_name", "stack_only", "search"].forEach((k) => {
+        if (filters[k] && String(filters[k]).trim() !== "") params.set(`ws_${k}`, filters[k]);
+        else params.delete(`ws_${k}`);
+    });
+    const url = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, "", url);
+    const prefs = {
+        normalization: filters.normalization,
+        lift_mode: filters.lift_mode,
+        interval_method: filters.interval_method,
+        min_n: filters.min_n,
+        weighting: filters.weighting,
+        clamp_mode: filters.clamp_mode,
+        clamp_abs: filters.clamp_abs,
+        labels: document.getElementById("ws-labels")?.checked ? "1" : "0",
+    };
+    localStorage.setItem("jakal_workspace_prefs_v1", JSON.stringify(prefs));
+}
+
+function restoreWorkspaceState() {
+    const params = new URLSearchParams(window.location.search);
+    const panel = params.get("ws_panel") || "overview";
+    computeReportState.workspace.panel = panel;
+    const map = {
+        ws_days: "ws-days",
+        ws_queue: "ws-queue",
+        ws_playlist: "ws-playlist",
+        ws_map_name: "ws-map-name",
+        ws_stack_only: "ws-stack-only",
+        ws_search: "ws-search",
+    };
+    Object.entries(map).forEach(([p, id]) => {
+        const v = params.get(p);
+        const el = document.getElementById(id);
+        if (!el || v == null) return;
+        if (el.type === "checkbox") el.checked = v === "true";
+        else el.value = v;
+    });
+    try {
+        const prefs = JSON.parse(localStorage.getItem("jakal_workspace_prefs_v1") || "{}");
+        const prefMap = {
+            normalization: "ws-normalization",
+            lift_mode: "ws-lift-mode",
+            interval_method: "ws-interval-method",
+            min_n: "ws-min-n",
+            weighting: "ws-weighting",
+            clamp_mode: "ws-clamp-mode",
+            clamp_abs: "ws-clamp-abs",
+        };
+        Object.entries(prefMap).forEach(([k, id]) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            if (prefs[k] != null) el.value = String(prefs[k]);
+        });
+        if (prefs.labels != null && document.getElementById("ws-labels")) {
+            document.getElementById("ws-labels").checked = String(prefs.labels) === "1";
+        }
+    } catch (_) {
+        // ignore persisted view parse failures
+    }
+}
+
+function setWorkspacePanel(panel) {
+    const next = ["overview", "operators", "matchups", "team"].includes(panel) ? panel : "overview";
+    computeReportState.workspace.panel = next;
+    document.querySelectorAll("[data-ws-panel]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.wsPanel === next);
+    });
+    document.querySelectorAll(".workspace-panel").forEach((p) => p.classList.remove("active"));
+    const active = document.getElementById(`workspace-panel-${next}`);
+    if (active) active.classList.add("active");
+    persistWorkspaceState();
+}
+
+function renderWorkspaceOverview(payload) {
+    const meta = payload?.meta || {};
+    const diag = payload?.diagnostics?.integrity || {};
+    return `
+        <div class="dashboard-graph-summary">
+            <span>API v<strong>${toNumber(meta.api_version, 1)}</strong></span>
+            <span>Ordering <strong>${escapeHtml(meta.ordering_mode || "-")}</strong></span>
+            <span>DB Rev <strong>${escapeHtml(meta.db_rev || "-")}</strong></span>
+            <span>Hash <strong>${escapeHtml((meta.hash || "").slice(0, 10))}</strong></span>
+        </div>
+        <div class="insights-findings">
+            <div class="insights-finding info"><strong>Workspace summary</strong> rows integrity counters are available when debug is on.</div>
+            <div class="insights-finding info">rounds_total=${toNumber(diag.rounds_total, 0)} missing_players=${toNumber(diag.rounds_missing_players, 0)} not_5v5=${toNumber(diag.rounds_not_5v5, 0)}</div>
+        </div>
+    `;
+}
+
+function renderWorkspaceOperatorScatter(operators) {
+    const points = Array.isArray(operators?.scatter?.points) ? operators.scatter.points : [];
+    if (!points.length) return `<div class="compute-value">No operator points for current filters.</div>`;
+    const maxX = Math.max(1, ...points.map((p) => toNumber(p.presence_pct, 0)));
+    const minY = Math.min(0, ...points.map((p) => toNumber(p.win_delta, 0)));
+    const maxY = Math.max(0, ...points.map((p) => toNumber(p.win_delta, 0)));
+    const yPad = Math.max(2, (maxY - minY) * 0.12);
+    const yLo = minY - yPad;
+    const yHi = maxY + yPad;
+    const labelsOn = document.getElementById("ws-labels")?.checked;
+    const dots = points.map((p) => {
+        const x = (toNumber(p.presence_pct, 0) / maxX) * 100;
+        const y = ((toNumber(p.win_delta, 0) - yLo) / (yHi - yLo || 1)) * 100;
+        const color = p.side === "attacker" ? "#22c55e" : "#fb7185";
+        const alpha = Math.min(1, 0.3 + (toNumber(p.n_rounds, 0) / 120));
+        const op = String(p.operator || "");
+        const label = labelsOn ? `<span class="ws-scatter-label">${escapeHtml(op)}</span>` : "";
+        return `<button class="ws-scatter-dot" data-op="${escapeHtml(op)}" style="left:${x.toFixed(3)}%;top:${(100-y).toFixed(3)}%;background:${color};opacity:${alpha.toFixed(3)}" title="${escapeHtml(`${op} • ${p.side} • n=${p.n_rounds} • win%=${toNumber(p.win_pct, 0).toFixed(2)} • delta=${toNumber(p.win_delta, 0).toFixed(2)}`)}">${label}</button>`;
+    }).join("");
+    return `
+        <div class="ws-scatter-wrap">
+            <div class="ws-scatter-y">Win Delta</div>
+            <div class="ws-scatter-plot">${dots}<div class="ws-scatter-axis-x"></div><div class="ws-scatter-axis-y"></div></div>
+            <div class="ws-scatter-x">Presence %</div>
+        </div>
+    `;
+}
+
+function renderThreatBars(matchups) {
+    const block = matchups?.threat_index || {};
+    const defBars = Array.isArray(block.defender_threat) ? block.defender_threat.slice(0, 10) : [];
+    const atkBars = Array.isArray(block.attacker_vulnerability) ? block.attacker_vulnerability.slice(0, 10) : [];
+    const renderBars = (rows, type) => {
+        if (!rows.length) return `<div class="compute-value">No ${type} threat bars.</div>`;
+        const maxVal = Math.max(0.0001, ...rows.map((r) => Math.abs(toNumber(r.index, 0))));
+        return rows.map((r) => {
+            const pct = (Math.abs(toNumber(r.index, 0)) / maxVal) * 100;
+            const cov = toNumber(r.coverage_pct_visible, 0).toFixed(1);
+            return `<button class="ws-threat-row" data-type="${type}" data-op="${escapeHtml(String(r.operator || ""))}">
+                <span>${escapeHtml(String(r.operator || ""))}</span>
+                <span class="ws-threat-bar"><span style="width:${pct.toFixed(2)}%"></span></span>
+                <span>${toNumber(r.index, 0).toFixed(2)}</span>
+                <span>${cov}%</span>
+            </button>`;
+        }).join("");
+    };
+    return `
+        <div class="ws-threat-grid">
+            <div>
+                <div class="compute-label">Defender Threat Index</div>
+                ${renderBars(defBars, "matchup_col")}
+            </div>
+            <div>
+                <div class="compute-label">Attacker Vulnerability Index</div>
+                ${renderBars(atkBars, "matchup_row")}
+            </div>
+        </div>
+    `;
+}
+
+function renderWorkspaceMatchups(payload) {
+    const m = payload?.matchups || {};
+    if (m.error) return `<div class="compute-value">${escapeHtml(m.error)}</div>`;
+    return `${renderAtkDefHeatmap(m)}${renderThreatBars(m)}`;
+}
+
+function renderWorkspaceTeam(payload) {
+    return `<div class="compute-value">${escapeHtml(payload?.team?.message || "Team workspace ready.")}</div>`;
+}
+
+function renderWorkspacePanel(panel, payload) {
+    const el = document.getElementById(`workspace-panel-${panel}`);
+    if (!el) return;
+    if (panel === "overview") el.innerHTML = renderWorkspaceOverview(payload);
+    if (panel === "operators") el.innerHTML = renderWorkspaceOperatorScatter(payload?.operators);
+    if (panel === "matchups") el.innerHTML = renderWorkspaceMatchups(payload);
+    if (panel === "team") el.innerHTML = renderWorkspaceTeam(payload);
+    if (panel === "operators") {
+        el.querySelectorAll(".ws-scatter-dot").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const op = btn.dataset.op || "";
+                const sel = { type: "operator", operator: op };
+                setWorkspaceSelection(sel);
+                try {
+                    await loadWorkspaceOperatorInspector(op);
+                    computeReportState.workspace.evidenceCursor = "";
+                    computeReportState.workspace.evidenceRows = [];
+                    await loadWorkspaceEvidence(true);
+                } catch (err) {
+                    logCompute(`Workspace operator inspector failed: ${err}`, "error");
+                }
+            });
+        });
+    }
+    if (panel === "matchups") {
+        el.querySelectorAll(".ws-threat-row").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const type = btn.dataset.type || "";
+                const op = btn.dataset.op || "";
+                const sel = type === "matchup_col"
+                    ? { type, col_def_op: op }
+                    : { type, row_atk_op: op };
+                setWorkspaceSelection(sel);
+                computeReportState.workspace.evidenceCursor = "";
+                computeReportState.workspace.evidenceRows = [];
+                try {
+                    await loadWorkspaceEvidence(true);
+                } catch (err) {
+                    logCompute(`Workspace evidence failed: ${err}`, "error");
+                }
+            });
+        });
+    }
+}
+
+function renderWorkspacePanelError(panel, err) {
+    const el = document.getElementById(`workspace-panel-${panel}`);
+    if (!el) return;
+    el.innerHTML = `<div class="compute-value">Workspace ${escapeHtml(panel)} failed: ${escapeHtml(String(err))}</div>`;
+}
+
+function setWorkspaceSelection(nextSelection) {
+    computeReportState.workspace.selection = nextSelection || { type: null };
+    const ins = document.getElementById("workspace-inspector");
+    if (!ins) return;
+    if (!nextSelection || !nextSelection.type) {
+        ins.innerHTML = `<div class="compute-label">Inspector</div><div class="compute-value">Click a chart item to inspect.</div>`;
+        return;
+    }
+    if (nextSelection.type === "operator") {
+        ins.innerHTML = `<div class="compute-label">Inspector</div><div class="compute-value">Loading operator ${escapeHtml(nextSelection.operator)}...</div>`;
+    } else {
+        ins.innerHTML = `<div class="compute-label">Inspector</div><div class="compute-value">Selection: ${escapeHtml(nextSelection.type)}</div>`;
+    }
+}
+
+async function loadWorkspaceOperatorInspector(operatorName) {
+    const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+    if (!username || !operatorName) return;
+    const f = getWorkspaceFiltersFromUI();
+    const qs = new URLSearchParams({
+        days: f.days,
+        queue: f.queue,
+        playlist: f.playlist,
+        map_name: f.map_name,
+        stack_only: f.stack_only,
+        search: f.search,
+        weighting: f.weighting,
+        side: "all",
+        recent_n_rounds: "300",
+        previous_window: "true",
+    });
+    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}/operator/${encodeURIComponent(operatorName)}?${qs.toString()}`);
+    if (!res.ok) throw new Error(`Operator inspector HTTP ${res.status}`);
+    const payload = await res.json();
+    const ins = document.getElementById("workspace-inspector");
+    if (!ins) return;
+    const s = payload.summary || {};
+    const i = payload.impact_metrics || {};
+    const rw = payload.recent_windows || {};
+    ins.innerHTML = `
+        <div class="compute-label">Inspector: ${escapeHtml(operatorName)}</div>
+        <div class="dashboard-graph-summary">
+            <span>Rounds <strong>${toNumber(s.n_rounds, 0)}</strong></span>
+            <span>Win% <strong>${toNumber(s.win_pct, 0).toFixed(2)}</strong></span>
+            <span>Presence <strong>${toNumber(s.presence_pct, 0).toFixed(2)}%</strong></span>
+            <span>CI <strong>[${toNumber(s.win_ci_low, 0).toFixed(2)}, ${toNumber(s.win_ci_high, 0).toFixed(2)}]</strong></span>
+        </div>
+        <div class="dashboard-graph-summary">
+            <span>OKR <strong>${toNumber(i.opening_kill_rate, 0).toFixed(2)}%</strong></span>
+            <span>ODR <strong>${toNumber(i.opening_death_rate, 0).toFixed(2)}%</strong></span>
+            <span>Survival <strong>${toNumber(i.survival_rate, 0).toFixed(2)}%</strong></span>
+            <span>Clutch <strong>${toNumber(i.clutch_rate, 0).toFixed(2)}%</strong></span>
+        </div>
+        <div class="dashboard-graph-summary">
+            <span>Recent ${toNumber(rw.recent_n_rounds, 0)} <strong>${toNumber(rw.recent?.win_pct, 0).toFixed(2)}%</strong></span>
+            <span>Prev window <strong>${toNumber(rw.previous?.win_pct, 0).toFixed(2)}%</strong></span>
+        </div>
+    `;
+}
+
+function renderWorkspaceEvidenceTable() {
+    const table = document.getElementById("workspace-evidence-table");
+    const meta = document.getElementById("workspace-evidence-meta");
+    if (!table || !meta) return;
+    const rows = computeReportState.workspace.evidenceRows || [];
+    if (!rows.length) {
+        table.innerHTML = `<div class="compute-value">No evidence rows.</div>`;
+        meta.textContent = "No evidence loaded.";
+        return;
+    }
+    meta.textContent = `Rows loaded: ${rows.length}`;
+    const header = `<div class="stored-match-row"><strong>Match</strong><strong>Round</strong><strong>Map</strong><strong>User</strong><strong>Side</strong><strong>Op</strong><strong>Result</strong><strong>K/D/A</strong></div>`;
+    const body = rows.map((r) => `<div class="stored-match-row"><span>${escapeHtml(String(r.match_id || ""))}</span><span>${toNumber(r.round_id, 0)}</span><span>${escapeHtml(String(r.map_name || ""))}</span><span>${escapeHtml(String(r.username || ""))}</span><span>${escapeHtml(String(r.side || ""))}</span><span>${escapeHtml(String(r.operator || ""))}</span><span>${escapeHtml(String(r.result || ""))}</span><span>${toNumber(r.kills, 0)}/${toNumber(r.deaths, 0)}/${toNumber(r.assists, 0)}</span></div>`).join("");
+    table.innerHTML = header + body;
+}
+
+async function loadWorkspaceEvidence(reset = true) {
+    const selection = computeReportState.workspace.selection || { type: null };
+    if (!selection.type) return;
+    const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+    if (!username) return;
+    const f = getWorkspaceFiltersFromUI();
+    const qs = new URLSearchParams({
+        days: f.days,
+        queue: f.queue,
+        playlist: f.playlist,
+        map_name: f.map_name,
+        stack_only: f.stack_only,
+        search: f.search,
+        selection_version: "1",
+        selection_type: selection.type,
+        evidence_limit: "200",
+    });
+    if (selection.operator) qs.set("operator", selection.operator);
+    if (selection.atk_op) qs.set("atk_op", selection.atk_op);
+    if (selection.def_op) qs.set("def_op", selection.def_op);
+    if (selection.row_atk_op) qs.set("row_atk_op", selection.row_atk_op);
+    if (selection.col_def_op) qs.set("col_def_op", selection.col_def_op);
+    if (!reset && computeReportState.workspace.evidenceCursor) qs.set("evidence_cursor", computeReportState.workspace.evidenceCursor);
+    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}/evidence?${qs.toString()}`);
+    if (!res.ok) throw new Error(`Evidence HTTP ${res.status}`);
+    const payload = await res.json();
+    computeReportState.workspace.evidenceCursor = payload.next_cursor || "";
+    if (reset) computeReportState.workspace.evidenceRows = Array.isArray(payload.rows) ? payload.rows : [];
+    else computeReportState.workspace.evidenceRows = (computeReportState.workspace.evidenceRows || []).concat(Array.isArray(payload.rows) ? payload.rows : []);
+    renderWorkspaceEvidenceTable();
+    const more = document.getElementById("workspace-evidence-more");
+    if (more) more.disabled = !payload.has_more;
+}
+
+async function loadWorkspacePanel(panel, force = false) {
+    const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+    if (!username) return;
+    const panelKey = panel || computeReportState.workspace.panel || "overview";
+    const target = document.getElementById(`workspace-panel-${panelKey}`);
+    if (target) {
+        target.innerHTML = `<div class="compute-value">Loading workspace ${escapeHtml(panelKey)}...</div>`;
+    }
+    if (!force && computeReportState.workspace.dataByPanel[panelKey]) {
+        renderWorkspacePanel(panelKey, computeReportState.workspace.dataByPanel[panelKey]);
+        return;
+    }
+    const f = getWorkspaceFiltersFromUI();
+    persistWorkspaceState();
+    const qs = new URLSearchParams({ ...f, panel: panelKey });
+    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}?${qs.toString()}`);
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Workspace HTTP ${res.status}: ${text}`);
+    }
+    const payload = await res.json();
+    computeReportState.workspace.dataByPanel[panelKey] = payload;
+    computeReportState.workspace.meta = payload.meta || null;
+    renderWorkspacePanel(panelKey, payload);
+}
+
+function setDashboardView(view) {
+    const next = view === "graphs" ? "graphs" : "insights";
+    computeReportState.dashboardView = next;
+    const insightsPanel = document.getElementById("dashboard-insights-panel");
+    const graphsPanel = document.getElementById("dashboard-graphs-panel");
+    if (insightsPanel) insightsPanel.classList.toggle("active", next === "insights");
+    if (graphsPanel) graphsPanel.classList.toggle("active", next === "graphs");
+    // Only toggle top-level Dashboard subtabs; workspace subtabs are managed separately.
+    document.querySelectorAll(".dashboard-subtab[data-dashboard-view]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.dashboardView === next);
+    });
+}
+
+function refreshDashboardSectionLayout() {
+    const layout = document.querySelector(".dashboard-insights-layout");
+    const left = document.getElementById("dashboard-section-insight-cards");
+    const right = document.getElementById("dashboard-section-performance-focus");
+    if (!layout || !left || !right) return;
+    const leftVisible = !left.classList.contains("hidden");
+    const rightVisible = !right.classList.contains("hidden");
+    layout.classList.toggle("single-column", leftVisible !== rightVisible);
+}
+
+function initDashboardSectionToggles() {
+    const map = {
+        "dashboard-section-playbook": "playbook",
+        "dashboard-section-deep-stats": "deepStats",
+        "dashboard-section-insight-cards": "insightCards",
+        "dashboard-section-performance-focus": "performanceFocus",
+    };
+    document.querySelectorAll(".dashboard-toggle-chip").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const targetId = btn.dataset.targetId || "";
+            const section = document.getElementById(targetId);
+            if (!section) return;
+            const nowVisible = section.classList.contains("hidden");
+            section.classList.toggle("hidden", !nowVisible);
+            btn.classList.toggle("active", nowVisible);
+            const key = map[targetId];
+            if (key) computeReportState.sectionVisibility[key] = nowVisible;
+            refreshDashboardSectionLayout();
+        });
+    });
+}
+
+function applyDashboardSectionVisibility() {
+    const visibility = computeReportState.sectionVisibility || {};
+    const sections = [
+        ["dashboard-section-playbook", "toggle-playbook", visibility.playbook !== false],
+        ["dashboard-section-deep-stats", "toggle-deep-stats", visibility.deepStats !== false],
+        ["dashboard-section-insight-cards", "toggle-insight-cards", visibility.insightCards !== false],
+        ["dashboard-section-performance-focus", "toggle-performance-focus", visibility.performanceFocus !== false],
+    ];
+    for (const [sectionId, toggleId, isVisible] of sections) {
+        const section = document.getElementById(sectionId);
+        const toggle = document.getElementById(toggleId);
+        if (section) section.classList.toggle("hidden", !isVisible);
+        if (toggle) toggle.classList.toggle("active", isVisible);
+    }
+    refreshDashboardSectionLayout();
+}
+
 function renderComputeReport() {
     const stats = computeReportState.stats;
     if (!stats) return;
@@ -2333,9 +3338,12 @@ function renderComputeReport() {
     if (fbText) fbText.textContent = `${fb >= 0 ? "+" : ""}${formatFixed(fb, 1)}%`;
 
     computeDashboardSortedData();
+    applyDashboardSectionVisibility();
+    setDashboardView(computeReportState.dashboardView || "insights");
     renderPlaybook();
     renderDeepStats(round);
     renderDashboardInsightCards();
+    renderDashboardGraphs();
 }
 
 function formatPct(value) {
@@ -2868,6 +3876,99 @@ function renderTeamReportCard(analysis, lastUpdated) {
     `;
 }
 
+function renderEnemyThreatScatter(analysis) {
+    const points = Array.isArray(analysis?.scatter?.points) ? analysis.scatter.points : [];
+    if (!points.length) {
+        return `<div class="insights-empty">No threat points to plot.</div>`;
+    }
+    const rawMaxPresence = Math.max(...points.map((p) => toNumber(p.presence_pct, 0)), 1);
+    const minDelta = Math.min(...points.map((p) => toNumber(p.win_delta, 0)));
+    const maxDelta = Math.max(...points.map((p) => toNumber(p.win_delta, 0)));
+    const xMin = 0;
+    const xMax = Math.max(1, rawMaxPresence * 1.1);
+    const yPadding = 5;
+    const yMin = minDelta - yPadding;
+    const yMax = maxDelta + yPadding;
+    const spanX = Math.max(xMax - xMin, 1);
+    const spanY = Math.max(yMax - yMin, 1);
+    const zeroYRaw = ((yMax - 0) / spanY) * 100;
+    const zeroY = Math.max(0, Math.min(100, zeroYRaw));
+    const chartHeightPx = Math.max(420, Math.min(700, Math.round(420 + spanY * 6)));
+
+    const markers = points.slice(0, 20).map((point) => {
+        const operator = extractOperatorName(point.operator) || "Unknown";
+        const rawX = ((toNumber(point.presence_pct, 0) - xMin) / spanX) * 100;
+        const rawY = ((yMax - toNumber(point.win_delta, 0)) / spanY) * 100;
+        const x = Math.max(2, Math.min(98, rawX));
+        const y = Math.max(2, Math.min(98, rawY));
+        const icon = resolveOperatorImageUrl(operator);
+        const tooltip = `${operator}: presence ${toNumber(point.presence_pct, 0).toFixed(1)}%, delta ${toNumber(point.win_delta, 0).toFixed(1)}%, killed by ${toNumber(point.times_killed_by, 0)}`;
+        const fallback = operatorFallbackBadge(operator);
+        const marker = icon
+            ? `<img src="${icon}" alt="${escapeHtml(operator)}" loading="lazy" />`
+            : fallback;
+        return `
+            <div class="threat-scatter-point" title="${escapeHtml(tooltip)}" style="left:${x.toFixed(1)}%;top:${y.toFixed(1)}%;">
+                ${marker}
+            </div>
+        `;
+    }).join("");
+
+    return `
+        <div class="threat-scatter-wrap" style="--threat-chart-height:${chartHeightPx}px;">
+            <div class="threat-scatter-y-label">${escapeHtml(analysis?.scatter?.y_label || "Win delta vs baseline (%)")}</div>
+            <div class="threat-scatter">
+                <div class="threat-scatter-plot">
+                    <div class="threat-scatter-axis threat-scatter-axis-x"></div>
+                    <div class="threat-scatter-axis threat-scatter-axis-y"></div>
+                    <div class="threat-scatter-axis threat-scatter-axis-zero" style="top:${zeroY.toFixed(1)}%;"></div>
+                    ${markers}
+                </div>
+            </div>
+            <div class="threat-scatter-x-label">
+                ${escapeHtml(analysis?.scatter?.x_label || "Presence (% of rounds)")} 0.0-${xMax.toFixed(1)}%
+            </div>
+        </div>
+    `;
+}
+
+function renderEnemyThreatReportCard(analysis, lastUpdated) {
+    if (!analysis || analysis.error) {
+        return `
+            <section class="insights-card">
+                <header class="insights-card-head">
+                    <div>
+                        <div class="insights-card-title">Enemy Operator Threat</div>
+                        <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                    </div>
+                </header>
+                <div class="insights-empty">${escapeHtml(analysis?.error || "No enemy operator threat data available.")}</div>
+            </section>
+        `;
+    }
+    const top = analysis.threats?.[0]?.operator || "N/A";
+    return `
+        <section class="insights-card">
+            <header class="insights-card-head">
+                <div>
+                    <div class="insights-card-title">Enemy Operator Threat</div>
+                    <div class="insights-card-updated">Last updated ${escapeHtml(lastUpdated)}</div>
+                </div>
+                <div class="insights-stat-strip">
+                    <span>Baseline WR <strong>${formatPct(analysis.baseline_win_rate)}</strong></span>
+                    <span>Death rounds <strong>${toNumber(analysis.total_death_rounds, 0)}</strong></span>
+                </div>
+            </header>
+            <div class="insights-callout insights-negative">
+                <span class="insights-callout-label">Top Killer Operator</span>
+                <strong>${escapeHtml(top)}</strong>
+            </div>
+            ${renderEnemyThreatScatter(analysis)}
+            <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+        </section>
+    `;
+}
+
 function renderOperatorReportCard(analysis, lastUpdated) {
     if (!analysis || analysis.error) {
         return `
@@ -2946,7 +4047,7 @@ function renderMapReportCard(analysis, lastUpdated) {
     `;
 }
 
-function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, operatorStats, mapStats) {
+function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, enemyThreat, operatorStats, mapStats) {
     const el = document.getElementById("insights-results");
     if (!el) return;
     const lastUpdated = new Date().toLocaleString();
@@ -2956,6 +4057,7 @@ function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tra
         ...(Array.isArray(lobbyQuality?.findings) ? lobbyQuality.findings : []),
         ...(Array.isArray(tradeAnalysis?.findings) ? tradeAnalysis.findings : []),
         ...(Array.isArray(teamAnalysis?.findings) ? teamAnalysis.findings : []),
+        ...(Array.isArray(enemyThreat?.findings) ? enemyThreat.findings : []),
         ...(Array.isArray(operatorStats?.findings) ? operatorStats.findings : []),
         ...(Array.isArray(mapStats?.findings) ? mapStats.findings : []),
     ];
@@ -2976,6 +4078,7 @@ function renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tra
             ${renderLobbyReportCard(lobbyQuality, lastUpdated)}
             ${renderTradeReportCard(tradeAnalysis, lastUpdated)}
             ${renderTeamReportCard(teamAnalysis, lastUpdated)}
+            ${renderEnemyThreatReportCard(enemyThreat, lastUpdated)}
             ${renderOperatorReportCard(operatorStats, lastUpdated)}
             ${renderMapReportCard(mapStats, lastUpdated)}
         </div>
@@ -2989,12 +4092,13 @@ async function runInsights(explicitUsername = "") {
         return;
     }
     try {
-        const [roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, operatorRes, mapRes] = await Promise.all([
+        const [roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, enemyThreatRes, operatorRes, mapRes] = await Promise.all([
             fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
             fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
             fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
             fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
             fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/enemy-operator-threat/${encodeURIComponent(username)}`),
             fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
             fetch(`/api/map-stats/${encodeURIComponent(username)}`),
         ]);
@@ -3004,6 +4108,7 @@ async function runInsights(explicitUsername = "") {
         let lobbyQuality = null;
         let tradeAnalysis = null;
         let teamAnalysis = null;
+        let enemyThreat = null;
         let operatorStats = null;
         let mapStats = null;
         if (roundRes.ok) {
@@ -3021,6 +4126,9 @@ async function runInsights(explicitUsername = "") {
         if (teamRes.ok) {
             teamAnalysis = (await teamRes.json())?.analysis || null;
         }
+        if (enemyThreatRes.ok) {
+            enemyThreat = (await enemyThreatRes.json())?.analysis || null;
+        }
         if (operatorRes.ok) {
             operatorStats = (await operatorRes.json())?.analysis || null;
         }
@@ -3028,13 +4136,14 @@ async function runInsights(explicitUsername = "") {
             mapStats = (await mapRes.json())?.analysis || null;
         }
 
-        renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, operatorStats, mapStats);
+        renderInsightsCards(roundAnalysis, teammateChemistry, lobbyQuality, tradeAnalysis, teamAnalysis, enemyThreat, operatorStats, mapStats);
         logInsights(`Ran insight plugins for ${username}.`, "success");
         if (!roundRes.ok) logInsights(`Round analysis unavailable (HTTP ${roundRes.status}).`, "error");
         if (!chemistryRes.ok) logInsights(`Teammate chemistry unavailable (HTTP ${chemistryRes.status}).`, "error");
         if (!lobbyRes.ok) logInsights(`Lobby quality unavailable (HTTP ${lobbyRes.status}).`, "error");
         if (!tradeRes.ok) logInsights(`Trade analysis unavailable (HTTP ${tradeRes.status}).`, "error");
         if (!teamRes.ok) logInsights(`Team analysis unavailable (HTTP ${teamRes.status}).`, "error");
+        if (!enemyThreatRes.ok) logInsights(`Enemy operator threat unavailable (HTTP ${enemyThreatRes.status}).`, "error");
         if (!operatorRes.ok) logInsights(`Operator stats unavailable (HTTP ${operatorRes.status}).`, "error");
         if (!mapRes.ok) logInsights(`Map stats unavailable (HTTP ${mapRes.status}).`, "error");
     } catch (err) {
@@ -3048,14 +4157,16 @@ async function runStatComputation(explicitUsername = "") {
         logCompute("Enter a username before computing stats.", "error");
         return;
     }
+    computeReportState.username = username;
     try {
-        const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, operatorRes, mapRes] = await Promise.all([
+        const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, enemyThreatRes, operatorRes, mapRes] = await Promise.all([
             fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=2000`),
             fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
             fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
             fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
             fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
             fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
+            fetch(`/api/enemy-operator-threat/${encodeURIComponent(username)}`),
             fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
             fetch(`/api/map-stats/${encodeURIComponent(username)}`),
         ]);
@@ -3084,6 +4195,17 @@ async function runStatComputation(explicitUsername = "") {
         let teamAnalysis = null;
         if (teamRes.ok) {
             teamAnalysis = (await teamRes.json())?.analysis || null;
+        }
+        let enemyThreat = null;
+        if (enemyThreatRes.ok) {
+            enemyThreat = (await enemyThreatRes.json())?.analysis || null;
+        }
+        let atkDefHeatmap = null;
+        try {
+            await loadAtkDefHeatmap(username);
+            atkDefHeatmap = computeReportState.atkDefHeatmap;
+        } catch (err) {
+            atkDefHeatmap = { error: String(err) };
         }
         let operatorStats = null;
         if (operatorRes.ok) {
@@ -3138,11 +4260,20 @@ async function runStatComputation(explicitUsername = "") {
                 lobby: lobbyQuality,
                 trade: tradeAnalysis,
                 team: teamAnalysis,
+                enemyThreat,
+                atkDefHeatmap,
                 operator: operatorStats,
                 map: mapStats,
                 sorted: { operatorRows: [], mapRows: [] },
+                playbookFindings: [],
             };
             renderComputeCards(stats);
+            try {
+                await loadWorkspacePanel(computeReportState.workspace.panel || "overview", true);
+            } catch (err) {
+                logCompute(`Workspace load failed: ${err}`, "error");
+                renderWorkspacePanelError(computeReportState.workspace.panel || "overview", err);
+            }
             logCompute(`No stored matches found for ${username}.`, "info");
             return;
         }
@@ -3160,11 +4291,20 @@ async function runStatComputation(explicitUsername = "") {
                 lobby: lobbyQuality,
                 trade: tradeAnalysis,
                 team: teamAnalysis,
+                enemyThreat,
+                atkDefHeatmap,
                 operator: operatorStats,
                 map: mapStats,
                 sorted: { operatorRows: [], mapRows: [] },
+                playbookFindings: [],
             };
             renderComputeCards(stats);
+            try {
+                await loadWorkspacePanel(computeReportState.workspace.panel || "overview", true);
+            } catch (err) {
+                logCompute(`Workspace load failed: ${err}`, "error");
+                renderWorkspacePanelError(computeReportState.workspace.panel || "overview", err);
+            }
             logCompute("Dashboard filters excluded all matches for this username.", "info");
             return;
         }
@@ -3227,14 +4367,23 @@ async function runStatComputation(explicitUsername = "") {
             lobby: lobbyQuality,
             trade: tradeAnalysis,
             team: teamAnalysis,
+            enemyThreat,
+            atkDefHeatmap,
             operator: operatorStats,
             map: mapStats,
             sorted: {
                 operatorRows: Array.isArray(computeReportState.sorted?.operatorRows) ? computeReportState.sorted.operatorRows : [],
                 mapRows: sortedMapRows,
             },
+            playbookFindings: buildFilteredPlaybookFindings(filteredMatches, stats),
         };
         renderComputeCards(stats);
+        try {
+            await loadWorkspacePanel(computeReportState.workspace.panel || "overview", true);
+        } catch (err) {
+            logCompute(`Workspace load failed: ${err}`, "error");
+            renderWorkspacePanelError(computeReportState.workspace.panel || "overview", err);
+        }
         logCompute(
             `Computed stats for ${username} (after dashboard type filters): overall ${buckets.overall.matches}, ` +
             `ranked ${buckets.ranked.matches}, unranked ${buckets.unranked.matches}. ` +
@@ -3255,6 +4404,9 @@ async function runStatComputation(explicitUsername = "") {
         }
         if (!teamRes.ok) {
             logCompute(`Team analysis unavailable (HTTP ${teamRes.status}).`, "error");
+        }
+        if (!enemyThreatRes.ok) {
+            logCompute(`Enemy operator threat unavailable (HTTP ${enemyThreatRes.status}).`, "error");
         }
         if (!operatorRes.ok) {
             logCompute(`Operator stats unavailable (HTTP ${operatorRes.status}).`, "error");
@@ -3285,7 +4437,104 @@ document.getElementById("tab-scanner").addEventListener("click", () => setActive
 document.getElementById("tab-matches").addEventListener("click", () => setActiveTab("matches"));
 document.getElementById("tab-stored").addEventListener("click", () => setActiveTab("stored"));
 document.getElementById("tab-dashboard").addEventListener("click", () => setActiveTab("dashboard"));
+document.getElementById("dashboard-tab-insights").addEventListener("click", () => setDashboardView("insights"));
+document.getElementById("dashboard-tab-graphs").addEventListener("click", () => setDashboardView("graphs"));
+document.getElementById("open-settings").addEventListener("click", openSettingsModal);
+document.getElementById("close-settings").addEventListener("click", closeSettingsModal);
+document.getElementById("run-db-standardizer").addEventListener("click", runDbStandardizerFromSettings);
 document.getElementById("run-stat-compute").addEventListener("click", () => runStatComputation(""));
+const heatmapRefresh = document.getElementById("heatmap-refresh");
+if (heatmapRefresh) {
+    heatmapRefresh.addEventListener("click", async () => {
+        const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+        if (!username) return;
+        try {
+            await loadAtkDefHeatmap(username);
+            renderDashboardGraphs();
+        } catch (err) {
+            computeReportState.atkDefHeatmap = { error: String(err) };
+            renderDashboardGraphs();
+            logCompute(`Heatmap refresh failed: ${err}`, "error");
+        }
+    });
+}
+["heatmap-mode", "heatmap-days", "heatmap-normalization", "heatmap-lift-mode", "heatmap-map", "heatmap-stack-only", "heatmap-min-n", "heatmap-debug"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", async () => {
+        const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+        if (!username) return;
+        try {
+            await loadAtkDefHeatmap(username);
+        } catch (err) {
+            computeReportState.atkDefHeatmap = { error: String(err) };
+        }
+        renderDashboardGraphs();
+    });
+});
+["heatmap-top-n", "heatmap-sort-rows", "heatmap-sort-cols", "heatmap-cluster-cols"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => {
+        renderDashboardGraphs();
+    });
+});
+const heatmapSearch = document.getElementById("heatmap-search-op");
+if (heatmapSearch) {
+    heatmapSearch.addEventListener("input", () => {
+        renderDashboardGraphs();
+    });
+}
+["ws-tab-overview", "ws-tab-operators", "ws-tab-matchups", "ws-tab-team"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", async () => {
+        const panel = el.dataset.wsPanel || "overview";
+        setWorkspacePanel(panel);
+        try {
+            await loadWorkspacePanel(panel, false);
+        } catch (err) {
+            logCompute(`Workspace load failed: ${err}`, "error");
+            renderWorkspacePanelError(panel, err);
+        }
+    });
+});
+const wsRefresh = document.getElementById("ws-refresh");
+if (wsRefresh) {
+    wsRefresh.addEventListener("click", async () => {
+        try {
+            await loadWorkspacePanel(computeReportState.workspace.panel || "overview", true);
+        } catch (err) {
+            logCompute(`Workspace refresh failed: ${err}`, "error");
+            renderWorkspacePanelError(computeReportState.workspace.panel || "overview", err);
+        }
+    });
+}
+["ws-queue", "ws-playlist", "ws-days", "ws-map-name", "ws-search", "ws-stack-only", "ws-normalization", "ws-lift-mode", "ws-interval-method", "ws-min-n", "ws-weighting", "ws-debug", "ws-clamp-mode", "ws-clamp-abs", "ws-labels"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const evt = el.tagName === "INPUT" && el.type === "text" ? "input" : "change";
+    el.addEventListener(evt, () => {
+        persistWorkspaceState();
+        if (["ws-labels", "ws-clamp-mode", "ws-clamp-abs"].includes(id)) {
+            const panel = computeReportState.workspace.panel || "overview";
+            const payload = computeReportState.workspace.dataByPanel[panel];
+            if (payload) renderWorkspacePanel(panel, payload);
+            return;
+        }
+        computeReportState.workspace.dataByPanel = {};
+    });
+});
+const wsEvidenceMore = document.getElementById("workspace-evidence-more");
+if (wsEvidenceMore) {
+    wsEvidenceMore.addEventListener("click", async () => {
+        try {
+            await loadWorkspaceEvidence(false);
+        } catch (err) {
+            logCompute(`Workspace evidence paging failed: ${err}`, "error");
+        }
+    });
+}
 document.getElementById("matches-run-forever").addEventListener("change", syncContinuousControls);
 document.getElementById("matches-newest-only").addEventListener("change", syncScrapeModeControls);
 document.getElementById("matches-full-backfill").addEventListener("change", syncScrapeModeControls);
@@ -3304,7 +4553,25 @@ window.addEventListener("unhandledrejection", (event) => {
     log(`Promise error: ${event.reason}`, "error");
 });
 
+window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const modal = document.getElementById("settings-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    closeSettingsModal();
+});
+
+document.getElementById("settings-modal").addEventListener("click", (event) => {
+    if (event.target?.id === "settings-modal") {
+        closeSettingsModal();
+    }
+});
+
 loadOperatorImageIndex();
+initDashboardSectionToggles();
+applyDashboardSectionVisibility();
+setDashboardView("insights");
+restoreWorkspaceState();
+setWorkspacePanel(computeReportState.workspace.panel || "overview");
 syncScrapeModeControls();
 initNetwork();
 log("Ready to scan. Enter a username and click Start Scan.");
