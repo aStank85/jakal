@@ -2968,7 +2968,11 @@ function renderWorkspaceOverview(payload) {
 }
 
 function renderWorkspaceOperatorScatter(operators) {
-    const points = Array.isArray(operators?.scatter?.points) ? operators.scatter.points : [];
+    const rawPoints = Array.isArray(operators?.scatter?.points) ? operators.scatter.points : [];
+    const points = rawPoints.filter((p) => {
+        const name = String(p?.operator || "").trim().toLowerCase();
+        return name && !["unknown", "n/a", "none", "null", "-", "operator", "undefined"].includes(name);
+    });
     if (!points.length) return `<div class="compute-value">No operator points for current filters.</div>`;
     const maxX = Math.max(1, ...points.map((p) => toNumber(p.presence_pct, 0)));
     const minY = Math.min(0, ...points.map((p) => toNumber(p.win_delta, 0)));
@@ -2976,21 +2980,39 @@ function renderWorkspaceOperatorScatter(operators) {
     const yPad = Math.max(2, (maxY - minY) * 0.12);
     const yLo = minY - yPad;
     const yHi = maxY + yPad;
+    const zeroY = ((0 - yLo) / (yHi - yLo || 1)) * 100;
     const labelsOn = document.getElementById("ws-labels")?.checked;
+    const labelOps = new Set(
+        points
+            .slice()
+            .sort((a, b) => toNumber(b.n_rounds, 0) - toNumber(a.n_rounds, 0))
+            .slice(0, 12)
+            .map((p) => String(p.operator || ""))
+    );
     const dots = points.map((p) => {
         const x = (toNumber(p.presence_pct, 0) / maxX) * 100;
         const y = ((toNumber(p.win_delta, 0) - yLo) / (yHi - yLo || 1)) * 100;
         const color = p.side === "attacker" ? "#22c55e" : "#fb7185";
         const alpha = Math.min(1, 0.3 + (toNumber(p.n_rounds, 0) / 120));
         const op = String(p.operator || "");
-        const label = labelsOn ? `<span class="ws-scatter-label">${escapeHtml(op)}</span>` : "";
-        return `<button class="ws-scatter-dot" data-op="${escapeHtml(op)}" style="left:${x.toFixed(3)}%;top:${(100-y).toFixed(3)}%;background:${color};opacity:${alpha.toFixed(3)}" title="${escapeHtml(`${op} • ${p.side} • n=${p.n_rounds} • win%=${toNumber(p.win_pct, 0).toFixed(2)} • delta=${toNumber(p.win_delta, 0).toFixed(2)}`)}">${label}</button>`;
+        const icon = resolveOperatorImageUrl(op);
+        const fallback = operatorFallbackBadge(op);
+        const marker = icon
+            ? `<img src="${icon}" alt="${escapeHtml(op)}" loading="lazy" />`
+            : fallback;
+        const label = labelsOn && labelOps.has(op) ? `<span class="ws-scatter-label">${escapeHtml(op)}</span>` : "";
+        return `<button class="ws-scatter-dot ${p.side === "attacker" ? "atk" : "def"}" data-op="${escapeHtml(op)}" style="left:${x.toFixed(3)}%;top:${(100-y).toFixed(3)}%;opacity:${alpha.toFixed(3)}" title="${escapeHtml(`${op} • ${p.side} • n=${p.n_rounds} • win%=${toNumber(p.win_pct, 0).toFixed(2)} • delta=${toNumber(p.win_delta, 0).toFixed(2)}`)}">${marker}${label}</button>`;
     }).join("");
     return `
         <div class="ws-scatter-wrap">
             <div class="ws-scatter-y">Win Delta</div>
-            <div class="ws-scatter-plot">${dots}<div class="ws-scatter-axis-x"></div><div class="ws-scatter-axis-y"></div></div>
-            <div class="ws-scatter-x">Presence %</div>
+            <div class="ws-scatter-plot">
+                <div class="ws-scatter-axis-x"></div>
+                <div class="ws-scatter-axis-y"></div>
+                <div class="ws-scatter-axis-zero" style="bottom:${Math.max(0, Math.min(100, zeroY)).toFixed(2)}%"></div>
+                ${dots}
+            </div>
+            <div class="ws-scatter-x">Presence % (0 - ${maxX.toFixed(1)}%)</div>
         </div>
     `;
 }
@@ -3877,7 +3899,10 @@ function renderTeamReportCard(analysis, lastUpdated) {
 }
 
 function renderEnemyThreatScatter(analysis) {
-    const points = Array.isArray(analysis?.scatter?.points) ? analysis.scatter.points : [];
+    const points = (Array.isArray(analysis?.scatter?.points) ? analysis.scatter.points : []).filter((p) => {
+        const name = String(extractOperatorName(p?.operator) || "").trim().toLowerCase();
+        return name && !["unknown", "n/a", "none", "null", "-", "operator", "undefined"].includes(name);
+    });
     if (!points.length) {
         return `<div class="insights-empty">No threat points to plot.</div>`;
     }
@@ -3895,7 +3920,11 @@ function renderEnemyThreatScatter(analysis) {
     const zeroY = Math.max(0, Math.min(100, zeroYRaw));
     const chartHeightPx = Math.max(420, Math.min(700, Math.round(420 + spanY * 6)));
 
-    const markers = points.slice(0, 20).map((point) => {
+    const markers = points
+        .slice()
+        .sort((a, b) => toNumber(b.times_killed_by, 0) - toNumber(a.times_killed_by, 0))
+        .slice(0, 35)
+        .map((point) => {
         const operator = extractOperatorName(point.operator) || "Unknown";
         const rawX = ((toNumber(point.presence_pct, 0) - xMin) / spanX) * 100;
         const rawY = ((yMax - toNumber(point.win_delta, 0)) / spanY) * 100;

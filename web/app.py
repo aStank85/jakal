@@ -429,6 +429,25 @@ def _pctile_abs_bound(values: list[float], fallback: float = 15.0) -> float:
     return hi
 
 
+def _is_unknown_operator_name(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    bad = {
+        "unknown",
+        "unk",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "-",
+        "?",
+        "operator",
+        "undefined",
+    }
+    return text in bad
+
+
 def _encode_evidence_cursor(ordering_mode: str, primary_order: float, match_id: str, round_id: int, pr_id: int) -> str:
     payload = {
         "v": 1,
@@ -704,6 +723,8 @@ def _compute_matchup_block(
         key = (str(r["match_id"]), int(r["round_id"]))
         b = rounds.setdefault(key, {"winner_side": str(r.get("winner_side") or "").lower(), "atk_ops": set(), "def_ops": set()})
         op = str(r.get("operator") or "").strip()
+        if _is_unknown_operator_name(op):
+            continue
         side = str(r.get("side") or "").strip().lower()
         if side == "attacker":
             b["atk_ops"].add(op)
@@ -924,6 +945,8 @@ def _compute_operator_scatter(
         key = (str(r["match_id"]), int(r["round_id"]))
         b = rounds.setdefault(key, {"winner_side": str(r.get("winner_side") or "").lower(), "atk_ops": set(), "def_ops": set()})
         op = str(r.get("operator") or "").strip()
+        if _is_unknown_operator_name(op):
+            continue
         side = str(r.get("side") or "").strip().lower()
         if side == "attacker":
             b["atk_ops"].add(op)

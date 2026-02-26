@@ -1156,24 +1156,61 @@ button:focus-visible {
     border-left: 1px solid #273244;
 }
 
+.ws-scatter-axis-zero {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px dashed rgba(226, 232, 240, 0.35);
+}
+
 .ws-scatter-dot {
     position: absolute;
     transform: translate(-50%, -50%);
-    border: 1px solid rgba(15, 23, 42, 0.9);
-    border-radius: 999px;
-    width: 14px;
-    height: 14px;
+    border: 1px solid rgba(15, 23, 42, 0.95);
+    border-radius: 6px;
+    width: 18px;
+    height: 18px;
     cursor: pointer;
     padding: 0;
+    overflow: visible;
+    background: rgba(15, 23, 42, 0.9);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ws-scatter-dot.atk {
+    box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.6);
+}
+
+.ws-scatter-dot.def {
+    box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.6);
+}
+
+.ws-scatter-dot img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 5px;
+}
+
+.ws-scatter-dot .stored-op-fallback {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border-radius: 5px;
+    font-size: 8px;
 }
 
 .ws-scatter-label {
     position: absolute;
-    top: 14px;
-    left: 8px;
+    top: 16px;
+    left: 10px;
     color: #dbe7fb;
-    font-size: 10px;
+    font-size: 9px;
     white-space: nowrap;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+    pointer-events: none;
 }
 
 .ws-threat-grid {
