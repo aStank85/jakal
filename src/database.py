@@ -7,9 +7,92 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 import json
 import time
+import unicodedata
+import re
 
 class Database:
     """Handle all database operations."""
+    OPERATOR_DISPLAY_BY_KEY: Dict[str, str] = {
+        "ace": "Ace",
+        "alibi": "Alibi",
+        "amaru": "Amaru",
+        "aruni": "Aruni",
+        "ash": "Ash",
+        "azami": "Azami",
+        "bandit": "Bandit",
+        "blackbeard": "Blackbeard",
+        "blitz": "Blitz",
+        "brava": "Brava",
+        "buck": "Buck",
+        "capitao": "Capitao",
+        "castle": "Castle",
+        "caveira": "Caveira",
+        "clash": "Clash",
+        "deimos": "Deimos",
+        "denari": "Denari",
+        "doc": "Doc",
+        "dokkaebi": "Dokkaebi",
+        "echo": "Echo",
+        "ela": "Ela",
+        "fenrir": "Fenrir",
+        "finka": "Finka",
+        "flores": "Flores",
+        "frost": "Frost",
+        "fuze": "Fuze",
+        "glaz": "Glaz",
+        "goyo": "Goyo",
+        "gridlock": "Gridlock",
+        "grim": "Grim",
+        "hibana": "Hibana",
+        "iana": "Iana",
+        "iq": "IQ",
+        "jackal": "Jackal",
+        "jager": "Jager",
+        "kaid": "Kaid",
+        "kali": "Kali",
+        "kapkan": "Kapkan",
+        "lesion": "Lesion",
+        "lion": "Lion",
+        "maestro": "Maestro",
+        "maverick": "Maverick",
+        "melusi": "Melusi",
+        "mira": "Mira",
+        "montagne": "Montagne",
+        "mozzie": "Mozzie",
+        "mute": "Mute",
+        "nokk": "Nokk",
+        "nomad": "Nomad",
+        "oryx": "Oryx",
+        "osa": "Osa",
+        "pulse": "Pulse",
+        "ram": "Ram",
+        "rauora": "Rauora",
+        "rook": "Rook",
+        "sens": "Sens",
+        "sentry": "Sentry",
+        "skopos": "Skopos",
+        "sledge": "Sledge",
+        "smoke": "Smoke",
+        "solis": "Solis",
+        "striker": "Striker",
+        "tachanka": "Tachanka",
+        "thatcher": "Thatcher",
+        "thermite": "Thermite",
+        "thorn": "Thorn",
+        "thunderbird": "Thunderbird",
+        "tubarao": "Tubarao",
+        "twitch": "Twitch",
+        "valkyrie": "Valkyrie",
+        "vigil": "Vigil",
+        "wamai": "Wamai",
+        "warden": "Warden",
+        "ying": "Ying",
+        "zero": "Zero",
+        "zofia": "Zofia",
+    }
+    OPERATOR_ALIAS_TO_KEY: Dict[str, str] = {
+        "jaeger": "jager",
+    }
     
     def __init__(self, db_path: str = 'data/jakal.db'):
         self.db_path = self._resolve_db_path(db_path)
@@ -41,6 +124,57 @@ class Database:
         if key in {"casual", "quick match", "quickmatch", "quick_match"}:
             return "Quick Match"
         return text
+
+    @staticmethod
+    def _canonicalize_queue_key(raw_mode: Any) -> str:
+        """Canonical queue key used for durable filtering and diagnostics."""
+        text = str(raw_mode or "").strip().lower()
+        if not text:
+            return "other"
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        if not tokens:
+            return "other"
+        if "unranked" in tokens or ("pvp" in tokens and "unranked" in tokens):
+            return "standard"
+        if "ranked" in tokens or ("pvp" in tokens and "ranked" in tokens):
+            return "ranked"
+        if "standard" in tokens:
+            return "standard"
+        if "quickmatch" in tokens or "casual" in tokens or ("quick" in tokens and "match" in tokens):
+            return "quickmatch"
+        if "event" in tokens or "arcade" in tokens:
+            return "event"
+        return "other"
+
+    @staticmethod
+    def _normalize_operator_key(raw_operator: Any) -> str:
+        text = str(raw_operator or "").strip().lower()
+        if not text:
+            return ""
+        # Strip accents/diacritics and normalize to alnum+space key.
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        text = "".join(ch if ch.isalnum() else " " for ch in text)
+        return " ".join(text.split())
+
+    @classmethod
+    def _canonicalize_operator_key(cls, raw_operator: Any) -> str:
+        key = cls._normalize_operator_key(raw_operator)
+        if not key:
+            return "unknown"
+        key = cls.OPERATOR_ALIAS_TO_KEY.get(key, key)
+        if key in cls.OPERATOR_DISPLAY_BY_KEY:
+            return key
+        if key == "unknown":
+            return "unknown"
+        return "unknown"
+
+    @classmethod
+    def _canonicalize_operator_name(cls, raw_operator: Any) -> str:
+        key = cls._canonicalize_operator_key(raw_operator)
+        if key == "unknown":
+            return "UNKNOWN"
+        return cls.OPERATOR_DISPLAY_BY_KEY.get(key, "UNKNOWN")
     
     def init_database(self):
         """Create tables if they don't exist."""
@@ -386,6 +520,7 @@ class Database:
                     player_id           INTEGER NOT NULL,
                     match_id            TEXT NOT NULL,
                     match_type          TEXT,
+                    match_type_key      TEXT,
                     player_id_tracker   TEXT,
                     username            TEXT,
                     team_id             INTEGER,
@@ -432,6 +567,7 @@ class Database:
                     player_id       INTEGER NOT NULL,
                     match_id        TEXT NOT NULL,
                     match_type      TEXT,
+                    match_type_key  TEXT,
                     round_id        INTEGER NOT NULL,
                     end_reason      TEXT,
                     winner_side     TEXT,
@@ -447,12 +583,15 @@ class Database:
                     player_id           INTEGER NOT NULL,
                     match_id            TEXT NOT NULL,
                     match_type          TEXT,
+                    match_type_key      TEXT,
                     round_id            INTEGER NOT NULL,
                     player_id_tracker   TEXT,
                     killed_by_player_id TEXT,
                     username            TEXT,
                     team_id             INTEGER,
                     side                TEXT,
+                    operator_raw        TEXT,
+                    operator_key        TEXT,
                     operator            TEXT,
                     killed_by_operator  TEXT,
                     result              TEXT,
@@ -480,6 +619,7 @@ class Database:
                     match_id        TEXT,
                     map_name        TEXT,
                     mode            TEXT,
+                    mode_key        TEXT,
                     score_team_a    INTEGER,
                     score_team_b    INTEGER,
                     duration        TEXT,
@@ -489,6 +629,8 @@ class Database:
                     summary_json    TEXT,
                     round_data_json TEXT,
                     round_data_source TEXT,
+                    has_rounds      INTEGER DEFAULT 0,
+                    has_outcomes    INTEGER DEFAULT 0,
                     scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -672,6 +814,18 @@ class Database:
             ON player_rounds (player_id_tracker, match_id)
         """)
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_operator_key
+            ON player_rounds (operator_key)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_match_type_key
+            ON player_rounds (match_type_key, match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_round_outcomes_match_type_key
+            ON round_outcomes (match_type_key, match_id, round_id)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_match_scraped
             ON scraped_match_cards (match_id, scraped_at DESC)
         """)
@@ -680,8 +834,16 @@ class Database:
             ON scraped_match_cards (username, match_id)
         """)
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_mode_key
+            ON scraped_match_cards (mode_key, match_date DESC)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_match_detail_players_username_match_type
             ON match_detail_players (username, match_type)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_detail_players_match_type_key
+            ON match_detail_players (match_type_key, match_id)
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_match_detail_players_match_id
@@ -870,11 +1032,19 @@ class Database:
 
     def _migrate_match_analysis_tables(self) -> None:
         self._add_column_if_missing("match_detail_players", "match_type TEXT", "match_type")
+        self._add_column_if_missing("match_detail_players", "match_type_key TEXT", "match_type_key")
         self._add_column_if_missing("round_outcomes", "match_type TEXT", "match_type")
+        self._add_column_if_missing("round_outcomes", "match_type_key TEXT", "match_type_key")
         self._add_column_if_missing("player_rounds", "match_type TEXT", "match_type")
+        self._add_column_if_missing("player_rounds", "match_type_key TEXT", "match_type_key")
         self._add_column_if_missing("player_rounds", "killed_by_player_id TEXT", "killed_by_player_id")
         self._add_column_if_missing("player_rounds", "killed_by_operator TEXT", "killed_by_operator")
+        self._add_column_if_missing("player_rounds", "operator_raw TEXT", "operator_raw")
+        self._add_column_if_missing("player_rounds", "operator_key TEXT", "operator_key")
         self._add_column_if_missing("scraped_match_cards", "round_data_source TEXT", "round_data_source")
+        self._add_column_if_missing("scraped_match_cards", "mode_key TEXT", "mode_key")
+        self._add_column_if_missing("scraped_match_cards", "has_rounds INTEGER DEFAULT 0", "has_rounds")
+        self._add_column_if_missing("scraped_match_cards", "has_outcomes INTEGER DEFAULT 0", "has_outcomes")
 
         cursor = self.conn.cursor()
         cursor.execute(
@@ -884,6 +1054,35 @@ class Database:
             WHERE (round_data_source IS NULL OR TRIM(round_data_source) = '')
               AND round_data_json IS NOT NULL
               AND TRIM(round_data_json) NOT IN ('', '{}', 'null')
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE scraped_match_cards AS smc
+            SET has_rounds = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM player_rounds pr
+                    WHERE pr.match_id = smc.match_id
+                      AND LOWER(TRIM(COALESCE(pr.username, ''))) = LOWER(TRIM(COALESCE(smc.username, '')))
+                ) THEN 1
+                ELSE 0
+            END
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE scraped_match_cards AS smc
+            SET has_outcomes = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM round_outcomes ro
+                    JOIN players p ON p.player_id = ro.player_id
+                    WHERE ro.match_id = smc.match_id
+                      AND LOWER(TRIM(COALESCE(p.username, ''))) = LOWER(TRIM(COALESCE(smc.username, '')))
+                ) THEN 1
+                ELSE 0
+            END
             """
         )
 
@@ -971,6 +1170,53 @@ class Database:
                 WHERE (match_type IS NULL OR TRIM(match_type) = '')
                 """
             )
+
+        # Backfill canonical queue keys for reliable filtering.
+        cursor.execute("SELECT id, mode, mode_key FROM scraped_match_cards")
+        for row in cursor.fetchall():
+            canonical = self._canonicalize_queue_key(row["mode"])
+            if str(row["mode_key"] or "").strip() != canonical:
+                cursor.execute(
+                    "UPDATE scraped_match_cards SET mode_key = ? WHERE id = ?",
+                    (canonical, row["id"]),
+                )
+        for table_name in ("match_detail_players", "round_outcomes", "player_rounds"):
+            cursor.execute(f"SELECT id, match_type, match_type_key FROM {table_name}")
+            for row in cursor.fetchall():
+                canonical = self._canonicalize_queue_key(row["match_type"])
+                if str(row["match_type_key"] or "").strip() != canonical:
+                    cursor.execute(
+                        f"UPDATE {table_name} SET match_type_key = ? WHERE id = ?",
+                        (canonical, row["id"]),
+                    )
+
+        # Preserve raw operator labels and normalize canonical operator values.
+        cursor.execute(
+            """
+            UPDATE player_rounds
+            SET operator_raw = operator
+            WHERE (operator_raw IS NULL OR TRIM(operator_raw) = '')
+              AND operator IS NOT NULL
+              AND TRIM(operator) != ''
+            """
+        )
+        cursor.execute("SELECT id, operator, operator_key FROM player_rounds WHERE operator IS NOT NULL")
+        unknown_before = 0
+        for row in cursor.fetchall():
+            raw = str(row["operator"] or "").strip()
+            if not raw:
+                continue
+            operator_key = self._canonicalize_operator_key(raw)
+            canonical = self._canonicalize_operator_name(raw)
+            if self._normalize_operator_key(raw) not in {"", "unknown"} and operator_key == "unknown":
+                unknown_before += 1
+            if canonical != raw or str(row["operator_key"] or "").strip() != operator_key:
+                cursor.execute(
+                    "UPDATE player_rounds SET operator = ?, operator_key = ? WHERE id = ?",
+                    (canonical, operator_key, row["id"]),
+                )
+        if unknown_before > 0:
+            print(f"[DB] Operator canonicalization: {unknown_before} distinct raw values mapped to UNKNOWN.")
 
     def refresh_aggregates_for_matches(self, match_ids: List[str]) -> int:
         """Incrementally refresh aggregate tables for trackers present in these matches."""
@@ -2643,6 +2889,8 @@ class Database:
         self,
         username: Optional[str] = None,
         limit: Optional[int] = None,
+        queue_key: Optional[str] = None,
+        since_date: Optional[str] = None,
     ) -> Dict[str, int]:
         """
         Unpack scraped match cards with summary_json that have not yet been normalized.
@@ -2661,10 +2909,30 @@ class Database:
               AND LOWER(TRIM(summary_json)) != 'null'
               AND match_id IS NOT NULL
               AND TRIM(match_id) != ''
+              AND (
+                    COALESCE(has_rounds, 0) = 0
+                 OR COALESCE(has_outcomes, 0) = 0
+              )
         """
         if username:
             query += " AND username = ?"
             params.append(username)
+        if since_date:
+            query += " AND COALESCE(match_date, scraped_at) >= ?"
+            params.append(str(since_date).strip())
+        if queue_key:
+            qk = self._canonicalize_queue_key(queue_key)
+            query += """
+             AND COALESCE(NULLIF(TRIM(mode_key), ''), CASE
+                    WHEN LOWER(TRIM(COALESCE(mode, ''))) LIKE '%ranked%' THEN 'ranked'
+                    WHEN LOWER(TRIM(COALESCE(mode, ''))) LIKE '%unranked%' THEN 'standard'
+                    WHEN LOWER(TRIM(COALESCE(mode, ''))) LIKE '%standard%' THEN 'standard'
+                    WHEN LOWER(TRIM(COALESCE(mode, ''))) LIKE '%quick%' OR LOWER(TRIM(COALESCE(mode, ''))) LIKE '%casual%' THEN 'quickmatch'
+                    WHEN LOWER(TRIM(COALESCE(mode, ''))) LIKE '%event%' OR LOWER(TRIM(COALESCE(mode, ''))) LIKE '%arcade%' THEN 'event'
+                    ELSE 'other'
+                END) = ?
+            """
+            params.append(qk)
         query += " ORDER BY id DESC"
         if isinstance(limit, int) and limit > 0:
             query += " LIMIT ?"
@@ -2744,6 +3012,12 @@ class Database:
                 if not detail_rows and not round_rows and not player_round_rows:
                     stats["skipped"] += 1
                     continue
+                if len(player_round_rows) == 0 or len(round_rows) == 0:
+                    print(
+                        "[DB] Ingest completeness warning: "
+                        f"match_id={match_id} user={owner_username} "
+                        f"player_rounds={len(player_round_rows)} round_outcomes={len(round_rows)}"
+                    )
 
                 # Replace per-match normalized rows for this owner to keep data consistent.
                 self.save_match_detail_players(owner_player_id, match_id, detail_rows, match_type=match_type)
@@ -2759,8 +3033,14 @@ class Database:
                 if round_data_source == "summary":
                     update_round_data_json = json.dumps(parsed_summary_round_payload)
                 cursor.execute(
-                    "UPDATE scraped_match_cards SET round_data_source = ?, round_data_json = ? WHERE id = ?",
-                    (round_data_source, update_round_data_json, row["id"]),
+                    "UPDATE scraped_match_cards SET round_data_source = ?, round_data_json = ?, has_rounds = ?, has_outcomes = ? WHERE id = ?",
+                    (
+                        round_data_source,
+                        update_round_data_json,
+                        1 if len(player_round_rows) > 0 else 0,
+                        1 if len(round_rows) > 0 else 0,
+                        row["id"],
+                    ),
                 )
                 self.conn.commit()
 
@@ -2807,7 +3087,7 @@ class Database:
                 cursor.execute(
                     """
                     SELECT id, map_name, mode, score_team_a, score_team_b, duration, match_date,
-                           players_json, rounds_json, summary_json, round_data_json, round_data_source
+                           players_json, rounds_json, summary_json, round_data_json, round_data_source, mode_key
                     FROM scraped_match_cards
                     WHERE username = ? AND match_id = ?
                     ORDER BY id DESC
@@ -2855,11 +3135,15 @@ class Database:
                         map_name = item.get("map")
                         updated = True
                     mode = self._canonicalize_match_type(existing["mode"])
+                    mode_key = self._canonicalize_queue_key(mode or existing["mode"])
+                    if str(existing["mode_key"] or "").strip() != mode_key:
+                        updated = True
                     if mode != str(existing["mode"] or "").strip():
                         updated = True
                     new_mode = self._canonicalize_match_type(item.get("mode"))
                     if (not str(mode or "").strip()) and str(new_mode or "").strip():
                         mode = new_mode
+                        mode_key = self._canonicalize_queue_key(new_mode)
                         updated = True
                     match_date = existing["match_date"]
                     if (not str(match_date or "").strip()) and str(item.get("date") or "").strip():
@@ -2885,7 +3169,7 @@ class Database:
                             UPDATE scraped_match_cards
                             SET map_name = ?, mode = ?, score_team_a = ?, score_team_b = ?,
                                 duration = ?, match_date = ?, players_json = ?, rounds_json = ?,
-                                summary_json = ?, round_data_json = ?, round_data_source = ?
+                                summary_json = ?, round_data_json = ?, round_data_source = ?, mode_key = ?
                             WHERE id = ?
                             """,
                             (
@@ -2900,20 +3184,22 @@ class Database:
                                 summary_json,
                                 round_data_json,
                                 round_data_source,
+                                mode_key,
                                 existing["id"],
                             ),
                         )
                     continue
             cursor.execute("""
                 INSERT INTO scraped_match_cards (
-                    username, match_id, map_name, mode, score_team_a, score_team_b,
+                    username, match_id, map_name, mode, mode_key, score_team_a, score_team_b,
                     duration, match_date, players_json, rounds_json, summary_json, round_data_json, round_data_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 username,
                 item.get("match_id"),
                 item.get("map"),
                 self._canonicalize_match_type(item.get("mode")),
+                self._canonicalize_queue_key(item.get("mode")),
                 item.get("score_team_a"),
                 item.get("score_team_b"),
                 item.get("duration"),
@@ -3192,18 +3478,7 @@ class Database:
 
     @staticmethod
     def _normalize_match_mode_key(raw_mode: Any) -> str:
-        text = str(raw_mode or "").strip().lower()
-        if "unranked" in text:
-            return "unranked"
-        if "ranked" in text:
-            return "ranked"
-        if "quick" in text:
-            return "quick"
-        if "standard" in text:
-            return "standard"
-        if "event" in text:
-            return "event"
-        return "other"
+        return Database._canonicalize_queue_key(raw_mode)
 
     def count_fully_scraped_match_ids(self, username: str, allowed_mode_keys: Optional[set[str]] = None) -> int:
         """
@@ -3479,6 +3754,7 @@ class Database:
     ) -> None:
         """Persist parsed API player overviews for one match."""
         match_type = self._canonicalize_match_type(match_type)
+        match_type_key = self._canonicalize_queue_key(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM match_detail_players WHERE player_id = ? AND match_id = ?",
@@ -3489,6 +3765,7 @@ class Database:
                 player_id,
                 match_id,
                 match_type,
+                match_type_key,
                 p.get("player_id_tracker"),
                 p.get("username"),
                 p.get("team_id"),
@@ -3530,14 +3807,14 @@ class Database:
             cursor.executemany(
                 """
                 INSERT INTO match_detail_players (
-                    player_id, match_id, match_type, player_id_tracker, username, team_id, result,
+                    player_id, match_id, match_type, match_type_key, player_id_tracker, username, team_id, result,
                     kills, deaths, assists, headshots, first_bloods, first_deaths,
                     clutches_won, clutches_lost, clutches_1v1, clutches_1v2, clutches_1v3,
                     clutches_1v4, clutches_1v5, kills_1k, kills_2k, kills_3k, kills_4k,
                     kills_5k, rounds_won, rounds_lost, rank_points, rank_points_delta,
                     rank_points_previous, kd_ratio, hs_pct, esr, kills_per_round,
                     time_played_ms, elo, elo_delta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -3578,6 +3855,7 @@ class Database:
     ) -> None:
         """Persist parsed API round outcomes for one match."""
         match_type = self._canonicalize_match_type(match_type)
+        match_type_key = self._canonicalize_queue_key(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM round_outcomes WHERE player_id = ? AND match_id = ?",
@@ -3588,6 +3866,7 @@ class Database:
                 player_id,
                 match_id,
                 match_type,
+                match_type_key,
                 r.get("round_id"),
                 r.get("end_reason"),
                 r.get("winner_side"),
@@ -3597,8 +3876,8 @@ class Database:
         if rows:
             cursor.executemany(
                 """
-                INSERT INTO round_outcomes (player_id, match_id, match_type, round_id, end_reason, winner_side)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO round_outcomes (player_id, match_id, match_type, match_type_key, round_id, end_reason, winner_side)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -3631,6 +3910,7 @@ class Database:
     ) -> None:
         """Persist parsed API player-round rows for one match."""
         match_type = self._canonicalize_match_type(match_type)
+        match_type_key = self._canonicalize_queue_key(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM player_rounds WHERE player_id = ? AND match_id = ?",
@@ -3646,12 +3926,15 @@ class Database:
                     player_id,
                     match_id,
                     match_type,
+                    match_type_key,
                     pr.get("round_id"),
                     tracker_id,
                     usernames_by_tracker_id.get(tracker_id),
                     pr.get("team_id"),
                     pr.get("side"),
                     pr.get("operator"),
+                    self._canonicalize_operator_key(pr.get("operator")),
+                    self._canonicalize_operator_name(pr.get("operator")),
                     pr.get("killed_by_player_id"),
                     pr.get("killed_by_operator"),
                     pr.get("result"),
@@ -3672,10 +3955,10 @@ class Database:
             cursor.executemany(
                 """
                 INSERT INTO player_rounds (
-                    player_id, match_id, match_type, round_id, player_id_tracker, username, team_id, side,
-                    operator, killed_by_player_id, killed_by_operator, result, is_disconnected, kills, deaths, assists, headshots,
+                    player_id, match_id, match_type, match_type_key, round_id, player_id_tracker, username, team_id, side,
+                    operator_raw, operator_key, operator, killed_by_player_id, killed_by_operator, result, is_disconnected, kills, deaths, assists, headshots,
                     first_blood, first_death, clutch_won, clutch_lost, hs_pct, esr
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

@@ -1,0 +1,34 @@
+.ui-datatable {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-2);
+    overflow: hidden;
+    background: rgba(21, 26, 36, 0.9);
+}
+
+.ui-datatable thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: rgba(36, 46, 64, 0.95);
+    color: var(--text-strong);
+    text-align: left;
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border-strong);
+}
+
+.ui-datatable th,
+.ui-datatable td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.ui-datatable tbody tr:hover {
+    background: rgba(66, 89, 127, 0.18);
+}
+
+.ui-datatable th.is-sortable {
+    cursor: pointer;
+}

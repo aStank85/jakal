@@ -1,0 +1,18 @@
+.ui-card {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-3);
+    background: linear-gradient(180deg, rgba(31, 37, 49, 0.96), rgba(22, 28, 39, 0.96));
+    box-shadow: var(--shadow-sm);
+}
+
+.ui-card__head {
+    font-size: var(--text-sm);
+    color: var(--text-strong);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: var(--space-3) var(--space-4);
+    letter-spacing: 0.03em;
+}
+
+.ui-card__body {
+    padding: var(--space-4);
+}

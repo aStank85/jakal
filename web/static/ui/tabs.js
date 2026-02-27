@@ -5,6 +5,7 @@ export function setActiveTab(tabName, options = {}) {
         onPlayersActivated = null,
         onTeamBuilderActivated = null,
         onOperatorsActivated = null,
+        onWorkspaceActivated = null,
         onDashboardActivated = null,
     } = options;
     const isScanner = tabName === "scanner";
@@ -13,6 +14,7 @@ export function setActiveTab(tabName, options = {}) {
     const isPlayers = tabName === "players";
     const isTeamBuilder = tabName === "team-builder";
     const isOperators = tabName === "operators";
+    const isWorkspace = tabName === "workspace";
     const isDashboard = tabName === "dashboard";
 
     const tabs = [
@@ -22,6 +24,7 @@ export function setActiveTab(tabName, options = {}) {
         { tab: "tab-players", panel: "panel-players", active: isPlayers },
         { tab: "tab-team-builder", panel: "panel-team-builder", active: isTeamBuilder },
         { tab: "tab-operators", panel: "panel-operators", active: isOperators },
+        { tab: "tab-workspace", panel: "panel-workspace", active: isWorkspace },
         { tab: "tab-dashboard", panel: "panel-dashboard", active: isDashboard },
     ];
 
@@ -53,6 +56,9 @@ export function setActiveTab(tabName, options = {}) {
     }
     if (isOperators && typeof onOperatorsActivated === "function") {
         onOperatorsActivated();
+    }
+    if (isWorkspace && typeof onWorkspaceActivated === "function") {
+        onWorkspaceActivated();
     }
     if (isDashboard && typeof onDashboardActivated === "function") {
         onDashboardActivated();

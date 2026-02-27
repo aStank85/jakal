@@ -3,7 +3,15 @@
 <head>
     <title>JAKAL - R6 Network Scanner</title>
     <script src="/static/vis-network.min.js?v=20260223k"></script>
-    <link rel="stylesheet" href="/static/styles.css?v=20260226b">
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=20260227a">
+    <link rel="stylesheet" href="/static/styles/base.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/button.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/chip.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/card.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/drawer.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/tooltip.css?v=20260227a">
+    <link rel="stylesheet" href="/static/ui/datatable.css?v=20260227a">
+    <link rel="stylesheet" href="/static/styles.css?v=20260227g">
 </head>
 <body>
     <div id="global-scrape-indicator" class="global-scrape-indicator hidden">
@@ -14,6 +22,11 @@
         <header class="app-header">
             <h1>R6 Data Analyzer</h1>
             <p>Visualize player statistics & insights in real time</p>
+            <div class="app-status-chips" id="app-status-chips" aria-live="polite">
+                <span class="panel-chip">Websocket: <strong id="chip-websocket">Idle</strong></span>
+                <span class="panel-chip">DB: <strong id="chip-db">Ready</strong></span>
+                <span class="panel-chip">Scraper: <strong id="chip-scraper">Idle</strong></span>
+            </div>
             <button id="open-settings" class="settings-btn" type="button">Settings</button>
         </header>
         <nav class="tabs app-nav" role="tablist" aria-label="Primary Tabs">
@@ -23,6 +36,7 @@
             <button class="tab-btn" id="tab-players" data-tab="players" role="tab" aria-selected="false" aria-controls="panel-players">Players</button>
             <button class="tab-btn" id="tab-team-builder" data-tab="team-builder" role="tab" aria-selected="false" aria-controls="panel-team-builder">Team Builder</button>
             <button class="tab-btn" id="tab-operators" data-tab="operators" role="tab" aria-selected="false" aria-controls="panel-operators">Operators</button>
+            <button class="tab-btn" id="tab-workspace" data-tab="workspace" role="tab" aria-selected="false" aria-controls="panel-workspace">Workspace</button>
             <button class="tab-btn" id="tab-dashboard" data-tab="dashboard" role="tab" aria-selected="false" aria-controls="panel-dashboard">Dashboard</button>
         </nav>
         <main class="app-main">
@@ -281,21 +295,79 @@
                 <div class="controls">
                     <select id="operators-player"></select>
                     <select id="operators-stack">
-                        <option value="solo" selected>Stack: Solo</option>
+                        <option value="all" selected>Stack: All</option>
+                        <option value="solo">Stack: Solo</option>
                         <option value="duo">Stack: Duo</option>
                         <option value="trio">Stack: Trio</option>
                         <option value="squad">Stack: Squad</option>
                         <option value="full">Stack: Full Stack</option>
                     </select>
+                    <select id="operators-min-rounds">
+                        <option value="3">Min rounds (map+side+operator): 3</option>
+                        <option value="5" selected>Min rounds (map+side+operator): 5</option>
+                        <option value="8">Min rounds (map+side+operator): 8</option>
+                        <option value="15">Min rounds (map+side+operator): 15</option>
+                    </select>
+                    <select id="operators-topk">
+                        <option value="3">Top/Bottom K: 3</option>
+                        <option value="5" selected>Top/Bottom K: 5</option>
+                        <option value="8">Top/Bottom K: 8</option>
+                    </select>
                     <select id="operators-match-type">
                         <option value="Ranked" selected>Match Type: Ranked</option>
                     </select>
+                    <label>
+                        <input type="checkbox" id="operators-advanced">
+                        Advanced visuals
+                    </label>
+                    <label>
+                        <input type="checkbox" id="operators-include-low-sample">
+                        Include low sample
+                    </label>
                 </div>
             </details>
+            <div class="operators-overview-hint" aria-live="polite">
+                <span>Delta axis: <strong>Delta win% vs map baseline</strong></span>
+                <span>Confidence: <strong>dot size + opacity + badge</strong></span>
+            </div>
             <div id="operators-map-grid" class="operators-map-grid">
                 <div class="compute-value">Select filters and refresh.</div>
             </div>
             <div id="operators-low-data" class="operators-low-data"></div>
+            <section id="operators-map-detail" class="operators-map-detail hidden" aria-live="polite">
+                <div class="operators-map-detail-head">
+                    <h3 id="operators-detail-title">Map Detail</h3>
+                    <div class="operators-map-detail-actions">
+                        <select id="operators-detail-side">
+                            <option value="all" selected>Detail Side: All</option>
+                            <option value="atk">Detail Side: ATK</option>
+                            <option value="def">Detail Side: DEF</option>
+                        </select>
+                        <select id="operators-detail-limit">
+                            <option value="10" selected>Detail Limit: 10</option>
+                            <option value="15">Detail Limit: 15</option>
+                        </select>
+                        <button id="operators-detail-close" type="button">Close</button>
+                    </div>
+                </div>
+                <div id="operators-map-detail-body" class="operators-map-detail-body">
+                    <div class="compute-value">Click a map card to inspect top/bottom operator impact.</div>
+                </div>
+            </section>
+        </section>
+
+        <section id="panel-workspace" class="tab-panel" hidden>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Workspace</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Scoped analytics: <strong>Overview | Operators | Matchups | Team</strong></span>
+                    </div>
+                </div>
+            </div>
+            <div id="workspace-top-level-host" class="workspace-top-level-host">
+                <div class="compute-value">Workspace is initializing...</div>
+            </div>
         </section>
 
         <section id="panel-dashboard" class="tab-panel">
@@ -563,6 +635,12 @@
                         </details>
                     </div>
                     <div id="graph-panel-threat" hidden>
+                        <div id="dashboard-flagship-content" class="compute-card dashboard-graph-card">
+                            <div class="compute-label">Flagship Signals</div>
+                            <div class="dashboard-graphs-content">
+                                <div class="compute-value">Run Dashboard to load flagship visuals.</div>
+                            </div>
+                        </div>
                         <div class="compute-card dashboard-graph-card">
                             <div class="compute-label">Map Performance Graph</div>
                             <div class="dashboard-graph-controls map-perf-controls">
@@ -620,6 +698,6 @@
         </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=20260227e"></script>
+    <script type="module" src="/static/app.js?v=20260227h"></script>
 </body>
 </html>

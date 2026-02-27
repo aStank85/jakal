@@ -1,40 +1,40 @@
 # AGENTS.md — Jakal (global)
 
-## Project context
-Jakal is a local-first Rainbow Six Siege analytics tool.
-Key parts:
-- FastAPI backend serves a static web UI from `web/static/`.
-- Data and insights come from SQLite + Python plugins in `src/`.
-- Frontend is currently vanilla HTML/CSS/JS (no build step).
+## Project reality (keep accurate)
+- Backend: FastAPI app in `web/app.py` serving the static UI from `web/static/`.
+- Data: SQLite via `src/database.py` (default path is `data/jakal_fresh.db` unless `JAKAL_DB_PATH` is set).
+- Analytics: Python plugins under `src/plugins/`.
+- Frontend: plain HTML/CSS/JS (no build step). Keep it that way unless explicitly asked.
 
-## Non-negotiables
+## Non‑negotiables
 - Do NOT break existing HTTP endpoints under `/api/*` or websocket behavior.
-- Do NOT introduce a frontend build pipeline (no React/Vite/Webpack/etc.) unless explicitly requested.
-- Keep dependencies minimal. Prefer stdlib and existing deps.
-- Keep UI functional first: redesign must not remove features (scanner, match scraper, stored matches, dashboard).
+- Do NOT add a frontend build pipeline (React/Vite/Webpack/etc.) unless explicitly requested.
+- Keep dependencies minimal (stdlib + existing deps).
+- Redesign must NOT remove features/tabs (Network Scanner, Match Scraper, Stored Matches, Players, Team Builder, Operators, Dashboard).
 
-## Output expectations
-- Prefer small, reviewable changes (multiple commits / PR-sized steps).
-- Avoid giant rewrites in one shot.
-- Refactors must preserve behavior; when changing behavior, document it clearly.
+## Repo hygiene
+- Do NOT commit `.db`, `-wal`, `-shm`, scraped blobs, or large generated assets.
+- If you need sample data, add small fixtures under `tests/fixtures/`.
 
-## Code quality
-- No new global mutable state in JS unless unavoidable.
-- Favor modularization (ES modules) and clear separation:
-  - API client
-  - state/store
-  - UI components/renderers
-  - page controllers (tabs)
+## Change style
+- Prefer small, reviewable PR-sized changes.
+- Mechanical refactor first (no behavior change), then UX changes.
+- When behavior changes, document it in the PR summary + inline comments.
 
-## Performance
-- UI should not freeze on large lists or large heatmaps.
-- Prefer lazy rendering / virtualization for long lists.
-- Avoid expensive DOM reflows in loops.
+## Performance (backend + DB)
+- Avoid per-row commits in ingestion paths; batch with a single transaction.
+- Favor indices aligned to *actual* query filters/sorts.
+- Prefer pre-aggregated/summary tables for dashboards over repeated full scans.
+
+## UI performance
+- Avoid full re-render of large DOM trees on minor state changes.
+- Throttle expensive renders (heatmaps / large lists / graphs).
+- Virtualize long lists (Stored Matches, match cards) when needed.
 
 ## Accessibility
-- Keyboard navigation for tabs, dialogs.
-- Visible focus states.
-- Ensure readable contrast; do not rely on color alone for meaning.
+- Keyboard-navigable tabs and dialogs.
+- Visible focus styles.
+- Don’t rely on color alone for meaning.
 
 ## Local run
 - Web: `uvicorn web.app:app --reload`

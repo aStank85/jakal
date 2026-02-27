@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from itertools import combinations
 import json
 import os
 import random
@@ -41,21 +42,38 @@ def _normalize_asset_key(value: str) -> str:
 
 
 def _normalize_mode_key(raw_mode: object) -> str:
-    text = str(raw_mode or "").strip().lower()
-    if not text:
+    tokens = set(re.findall(r"[a-z0-9]+", str(raw_mode or "").strip().lower()))
+    if not tokens:
         return "other"
-    if "unranked" in text:
+    if "unranked" in tokens:
         return "unranked"
-    if "ranked" in text:
+    if "ranked" in tokens:
         return "ranked"
-    if "standard" in text:
+    if "standard" in tokens:
         return "standard"
-    if "quick" in text:
+    if "quick" in tokens or "quickmatch" in tokens:
         return "quick"
-    if "event" in text:
+    if "event" in tokens:
         return "event"
-    if "arcade" in text:
+    if "arcade" in tokens:
         return "arcade"
+    return "other"
+
+
+def _canonical_queue_key(raw_mode: object) -> str:
+    tokens = set(re.findall(r"[a-z0-9]+", str(raw_mode or "").strip().lower()))
+    if not tokens:
+        return "other"
+    if "unranked" in tokens:
+        return "standard"
+    if "ranked" in tokens:
+        return "ranked"
+    if "standard" in tokens:
+        return "standard"
+    if "quickmatch" in tokens or "casual" in tokens or ("quick" in tokens and "match" in tokens):
+        return "quickmatch"
+    if "event" in tokens or "arcade" in tokens:
+        return "event"
     return "other"
 
 
@@ -154,6 +172,167 @@ error_tracker = {
 WORKSPACE_API_VERSION = 1
 workspace_cache: dict[str, tuple[float, dict]] = {}
 WORKSPACE_CACHE_TTL_SECONDS = 90
+workspace_scope_cache_mem: dict[str, tuple[float, dict]] = {}
+workspace_team_cache_mem: dict[str, tuple[float, dict]] = {}
+WORKSPACE_SCOPE_CACHE_TTL_SECONDS = 180
+WORKSPACE_TEAM_CACHE_TTL_SECONDS = 300
+
+
+def _get_db_cursor():
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        raise RuntimeError("Database connection is not initialized.")
+    return conn.cursor()
+
+
+def _ensure_workspace_cache_tables() -> None:
+    cur = _get_db_cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_scope_cache (
+            scope_key    TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at   REAL NOT NULL,
+            expires_at   REAL NOT NULL,
+            db_rev       TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_team_cache (
+            team_key     TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at   REAL NOT NULL,
+            expires_at   REAL NOT NULL,
+            db_rev       TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_workspace_scope_cache_expires
+        ON workspace_scope_cache (expires_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_workspace_team_cache_expires
+        ON workspace_team_cache (expires_at)
+        """
+    )
+    db.conn.commit()
+
+
+def _workspace_sql_cache_get(table: str, key_col: str, key: str, db_rev: str) -> dict | None:
+    cur = _get_db_cursor()
+    now = time.time()
+    cur.execute(f"DELETE FROM {table} WHERE expires_at <= ?", (now,))
+    cur.execute(
+        f"SELECT payload_json, db_rev FROM {table} WHERE {key_col} = ? AND expires_at > ? LIMIT 1",
+        (key, now),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    if str(row["db_rev"] or "") != str(db_rev or ""):
+        return None
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _workspace_sql_cache_set(table: str, key_col: str, key: str, payload: dict, ttl_seconds: int, db_rev: str) -> None:
+    now = time.time()
+    expires = now + max(1, int(ttl_seconds))
+    cur = _get_db_cursor()
+    cur.execute(
+        f"""
+        INSERT INTO {table} ({key_col}, payload_json, created_at, expires_at, db_rev)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT({key_col}) DO UPDATE SET
+            payload_json = excluded.payload_json,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at,
+            db_rev = excluded.db_rev
+        """,
+        (key, json.dumps(payload, separators=(",", ":"), sort_keys=True), now, expires, str(db_rev or "")),
+    )
+    db.conn.commit()
+
+
+def _workspace_scope_cache_get(scope_key: str, db_rev: str) -> dict | None:
+    now = time.time()
+    item = workspace_scope_cache_mem.get(scope_key)
+    if item:
+        ts, payload = item
+        if now - ts <= WORKSPACE_SCOPE_CACHE_TTL_SECONDS:
+            if str(payload.get("db_rev") or "") == str(db_rev or ""):
+                return payload
+        else:
+            workspace_scope_cache_mem.pop(scope_key, None)
+    payload = _workspace_sql_cache_get("workspace_scope_cache", "scope_key", scope_key, db_rev)
+    if payload is not None:
+        workspace_scope_cache_mem[scope_key] = (now, payload)
+    return payload
+
+
+def _workspace_scope_cache_set(scope_key: str, payload: dict, db_rev: str) -> None:
+    cache_payload = dict(payload or {})
+    cache_payload["db_rev"] = str(db_rev or "")
+    workspace_scope_cache_mem[scope_key] = (time.time(), cache_payload)
+    _workspace_sql_cache_set(
+        "workspace_scope_cache",
+        "scope_key",
+        scope_key,
+        cache_payload,
+        WORKSPACE_SCOPE_CACHE_TTL_SECONDS,
+        db_rev,
+    )
+
+
+def _workspace_team_cache_get(team_key: str, db_rev: str) -> dict | None:
+    now = time.time()
+    item = workspace_team_cache_mem.get(team_key)
+    if item:
+        ts, payload = item
+        if now - ts <= WORKSPACE_TEAM_CACHE_TTL_SECONDS:
+            if str(payload.get("db_rev") or "") == str(db_rev or ""):
+                return payload
+        else:
+            workspace_team_cache_mem.pop(team_key, None)
+    payload = _workspace_sql_cache_get("workspace_team_cache", "team_key", team_key, db_rev)
+    if payload is not None:
+        workspace_team_cache_mem[team_key] = (now, payload)
+    return payload
+
+
+def _workspace_team_cache_set(team_key: str, payload: dict, db_rev: str) -> None:
+    cache_payload = dict(payload or {})
+    cache_payload["db_rev"] = str(db_rev or "")
+    workspace_team_cache_mem[team_key] = (time.time(), cache_payload)
+    _workspace_sql_cache_set(
+        "workspace_team_cache",
+        "team_key",
+        team_key,
+        cache_payload,
+        WORKSPACE_TEAM_CACHE_TTL_SECONDS,
+        db_rev,
+    )
+
+
+def _iter_chunks(values: list[str], size: int = 800):
+    chunk_size = max(1, int(size))
+    for i in range(0, len(values), chunk_size):
+        yield values[i : i + chunk_size]
+
+
+try:
+    _ensure_workspace_cache_tables()
+except Exception as e:
+    print(f"[DB] Warning: workspace cache table init failed: {e}")
 
 
 def track_call(endpoint: str) -> None:
@@ -426,12 +605,18 @@ async def players_list() -> dict:
 
 
 @app.get("/api/operators/map-breakdown")
-async def operators_map_breakdown(username: str, stack: str = "solo", match_type: str = "Ranked") -> dict:
+async def operators_map_breakdown(
+    username: str,
+    stack: str = "all",
+    match_type: str = "Ranked",
+    min_rounds: int = 5,
+) -> dict:
     clean_username = str(username or "").strip()
     if not clean_username:
         raise HTTPException(status_code=400, detail="username is required")
     stack_key = str(stack or "solo").strip().lower()
     stack_to_friend_count = {
+        "all": -1,
         "solo": 0,
         "duo": 1,
         "trio": 2,
@@ -441,13 +626,13 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
         "full_stack": 4,
     }
     if stack_key not in stack_to_friend_count:
-        raise HTTPException(status_code=400, detail="stack must be one of: solo, duo, trio, squad, full")
+        raise HTTPException(status_code=400, detail="stack must be one of: all, solo, duo, trio, squad, full")
     friend_target = int(stack_to_friend_count[stack_key])
-    mode_key = str(match_type or "Ranked").strip().lower()
-    mode_aliases = {"ranked", "pvp_ranked"} if mode_key in {"ranked", "pvp_ranked"} else {mode_key}
+    min_rounds_safe = max(1, min(int(min_rounds), 50))
+    mode_key = _canonical_queue_key(match_type)
 
     try:
-        cursor = db.conn.cursor()
+        cursor = _get_db_cursor()
         cursor.execute(
             """
             SELECT LOWER(TRIM(p.username)) AS username_key
@@ -476,6 +661,7 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
             cursor.execute(
                 """
                 SELECT match_type
+                     , match_type_key
                 FROM match_detail_players
                 WHERE match_id = ?
                   AND LOWER(TRIM(username)) = LOWER(TRIM(?))
@@ -484,8 +670,8 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
                 (mid, clean_username),
             )
             mt = cursor.fetchone()
-            mk = str(mt["match_type"] or "").strip().lower() if mt else ""
-            if mk not in mode_aliases:
+            mk = _canonical_queue_key((mt["match_type_key"] if mt and "match_type_key" in mt.keys() else "") or (mt["match_type"] if mt else ""))
+            if mk != mode_key:
                 continue
             match_team_rows.append((mid, team_id))
 
@@ -506,7 +692,7 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
             )
             teammates = {str(r["teammate_key"] or "").strip().lower() for r in cursor.fetchall() if str(r["teammate_key"] or "").strip()}
             friend_count = sum(1 for t in teammates if t in friend_keys)
-            if friend_count == friend_target:
+            if friend_target < 0 or friend_count == friend_target:
                 eligible_match_ids.append(mid)
 
         if not eligible_match_ids:
@@ -527,7 +713,8 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
                 ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
             )
             SELECT
-                COALESCE(NULLIF(TRIM(pr.operator), ''), 'Unknown') AS operator,
+                COALESCE(NULLIF(TRIM(pr.operator_key), ''), 'unknown') AS operator_key,
+                MAX(COALESCE(NULLIF(TRIM(pr.operator), ''), 'UNKNOWN')) AS operator,
                 LOWER(TRIM(COALESCE(pr.side, 'unknown'))) AS side,
                 COALESCE(lc.map_name, 'Unknown') AS map_name,
                 COUNT(*) AS rounds,
@@ -539,8 +726,7 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
             LEFT JOIN latest_cards lc ON lc.match_id = pr.match_id
             WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
               AND pr.match_id IN ({placeholders})
-            GROUP BY operator, side, map_name
-            HAVING COUNT(*) >= 8
+            GROUP BY operator_key, side, map_name
             ORDER BY map_name, side, win_rate DESC
             """,
             params,
@@ -613,6 +799,7 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
                 "fk_rate": round(fk, 2),
                 "fd_rate": round(fd, 2),
                 "kd": round(kd, 3),
+                "meets_min_rounds": rounds >= min_rounds_safe,
             }
             if side.startswith("atk") or side == "attacker":
                 bucket["atk"].append(item)
@@ -624,6 +811,13 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
         for m in maps.values():
             m["atk"].sort(key=lambda x: (-x["delta_vs_baseline"], -x["rounds"], x["operator"].lower()))
             m["def"].sort(key=lambda x: (-x["delta_vs_baseline"], -x["rounds"], x["operator"].lower()))
+            filtered_out = sum(1 for x in m["atk"] if not x["meets_min_rounds"]) + sum(1 for x in m["def"] if not x["meets_min_rounds"])
+            m["filtered_out_by_min_rounds"] = filtered_out
+            if filtered_out:
+                print(
+                    "[OPERATORS] min-round filter would hide rows: "
+                    f"user={clean_username} map={m.get('map_name')} hidden={filtered_out} min_rounds={min_rounds_safe}"
+                )
             if int(m.get("total_rounds", 0)) < 10:
                 low_data.append({"map_name": m["map_name"], "total_rounds": int(m.get("total_rounds", 0))})
             else:
@@ -635,14 +829,138 @@ async def operators_map_breakdown(username: str, stack: str = "solo", match_type
             "username": clean_username,
             "stack": stack_key,
             "match_type": match_type,
+            "min_rounds": min_rounds_safe,
             "eligible_matches": len(set(eligible_match_ids)),
             "maps": high_data,
             "low_data_maps": low_data,
+            "queue_key": mode_key,
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compute operators map breakdown: {str(e)}")
+
+
+@app.get("/api/dev/operators/diagnostics")
+async def dev_operator_diagnostics(
+    username: str,
+    map_name: str,
+    side: str,
+    match_type: str = "Ranked",
+) -> dict:
+    if str(os.getenv("JAKAL_ENABLE_DEV_DIAGNOSTICS", "1")).strip() not in {"1", "true", "TRUE", "yes", "on"}:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    clean_username = str(username or "").strip()
+    clean_map = str(map_name or "").strip()
+    side_key = str(side or "").strip().lower()
+    queue_key = _canonical_queue_key(match_type)
+    if not clean_username or not clean_map:
+        raise HTTPException(status_code=400, detail="username and map_name are required")
+    if side_key not in {"attacker", "defender", "atk", "def"}:
+        raise HTTPException(status_code=400, detail="side must be attacker/defender/atk/def")
+    side_norm = "attacker" if side_key in {"attacker", "atk"} else "defender"
+
+    try:
+        cursor = _get_db_cursor()
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS baseline_n,
+                AVG(CASE WHEN LOWER(TRIM(COALESCE(pr.result, ''))) IN ('win', 'victory') THEN 1.0 ELSE 0.0 END) AS baseline_wr
+            FROM player_rounds pr
+            LEFT JOIN (
+                SELECT smc.match_id, COALESCE(NULLIF(TRIM(smc.map_name), ''), 'Unknown') AS map_name
+                FROM scraped_match_cards smc
+                JOIN (
+                    SELECT match_id, MAX(id) AS max_id
+                    FROM scraped_match_cards
+                    GROUP BY match_id
+                ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
+            ) lc ON lc.match_id = pr.match_id
+            WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(lc.map_name, 'Unknown'))) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(pr.side, 'unknown'))) IN (?, ?)
+              AND COALESCE(NULLIF(TRIM(pr.match_type_key), ''), ?) = ?
+            """,
+            (clean_username, clean_map, side_norm, "atk" if side_norm == "attacker" else "def", queue_key, queue_key),
+        )
+        base = cursor.fetchone()
+
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(NULLIF(TRIM(pr.operator_key), ''), 'unknown') AS operator_key,
+                MAX(COALESCE(NULLIF(TRIM(pr.operator), ''), 'UNKNOWN')) AS operator,
+                COUNT(*) AS n_rounds,
+                AVG(CASE WHEN LOWER(TRIM(COALESCE(pr.result, ''))) IN ('win', 'victory') THEN 1.0 ELSE 0.0 END) AS win_rate
+            FROM player_rounds pr
+            LEFT JOIN (
+                SELECT smc.match_id, COALESCE(NULLIF(TRIM(smc.map_name), ''), 'Unknown') AS map_name
+                FROM scraped_match_cards smc
+                JOIN (
+                    SELECT match_id, MAX(id) AS max_id
+                    FROM scraped_match_cards
+                    GROUP BY match_id
+                ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
+            ) lc ON lc.match_id = pr.match_id
+            WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(lc.map_name, 'Unknown'))) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(pr.side, 'unknown'))) IN (?, ?)
+              AND COALESCE(NULLIF(TRIM(pr.match_type_key), ''), ?) = ?
+            GROUP BY operator_key
+            ORDER BY n_rounds DESC, operator ASC
+            LIMIT 5
+            """,
+            (clean_username, clean_map, side_norm, "atk" if side_norm == "attacker" else "def", queue_key, queue_key),
+        )
+        top_ops = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            SELECT pr.match_id, pr.round_id, pr.operator, pr.result, pr.kills, pr.deaths, pr.assists
+            FROM player_rounds pr
+            LEFT JOIN (
+                SELECT smc.match_id, COALESCE(NULLIF(TRIM(smc.map_name), ''), 'Unknown') AS map_name
+                FROM scraped_match_cards smc
+                JOIN (
+                    SELECT match_id, MAX(id) AS max_id
+                    FROM scraped_match_cards
+                    GROUP BY match_id
+                ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
+            ) lc ON lc.match_id = pr.match_id
+            WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(lc.map_name, 'Unknown'))) = LOWER(TRIM(?))
+              AND LOWER(TRIM(COALESCE(pr.side, 'unknown'))) IN (?, ?)
+              AND COALESCE(NULLIF(TRIM(pr.match_type_key), ''), ?) = ?
+            ORDER BY pr.match_id DESC, pr.round_id DESC, pr.id DESC
+            LIMIT 10
+            """,
+            (clean_username, clean_map, side_norm, "atk" if side_norm == "attacker" else "def", queue_key, queue_key),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        return {
+            "username": clean_username,
+            "map_name": clean_map,
+            "side": side_norm,
+            "queue_key": queue_key,
+            "baseline_n": int(base["baseline_n"] or 0) if base else 0,
+            "baseline_wr": float(base["baseline_wr"] or 0.0) * 100.0 if base else 0.0,
+            "top_operators_by_n": [
+                {
+                    "operator": str(r.get("operator") or "UNKNOWN"),
+                    "n_rounds": int(r.get("n_rounds") or 0),
+                    "win_rate": float(r.get("win_rate") or 0.0) * 100.0,
+                }
+                for r in top_ops
+            ],
+            "sample_rows": rows,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build operator diagnostics: {str(e)}")
 
 
 @app.post("/api/settings/db-standardize")
@@ -796,7 +1114,7 @@ def _decode_evidence_cursor(value: str) -> dict | None:
 
 
 def _db_revision_token() -> str:
-    cur = db.conn.cursor()
+    cur = _get_db_cursor()
     cur.execute("SELECT MAX(scraped_at) AS mx FROM scraped_match_cards")
     row = cur.fetchone()
     return str(row["mx"] if row and row["mx"] is not None else "")
@@ -828,51 +1146,47 @@ def _load_workspace_rows(
     stack_id: int | None = None,
     search: str = "",
     legacy_mode: str = "",
+    columns_profile: str = "full",
 ) -> tuple[int, list[dict], dict, list[str]]:
-    cur = db.conn.cursor()
-    cur.execute(
-        "SELECT player_id FROM players WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) ORDER BY player_id DESC LIMIT 1",
-        (username,),
+    scope = _build_workspace_scope(
+        username=username,
+        days=days,
+        queue=queue,
+        playlist=playlist,
+        map_name=map_name,
+        stack_only=stack_only,
+        stack_id=stack_id,
+        search=search,
+        legacy_mode=legacy_mode,
     )
-    row = cur.fetchone()
-    if not row:
-        return 0, [], {}, ["Player not found."]
-    player_id = int(row["player_id"])
+    player_id = int(scope.get("player_id") or 0)
+    warnings = list(scope.get("warnings") or [])
+    match_ids = [str(mid or "").strip() for mid in scope.get("match_ids") or [] if str(mid or "").strip()]
+    ctx = {
+        "ordering_mode": "ingestion_fallback",
+        "stack_context": scope.get("stack_context", {}),
+        "scope_key": scope.get("scope_key"),
+        "scope_cache_hit": bool(scope.get("cache_hit", False)),
+        "scope_build_ms": int(scope.get("compute_ms", 0)),
+        "scope_match_ids": len(match_ids),
+    }
+    if player_id <= 0:
+        return 0, [], ctx, warnings
+    if not match_ids:
+        return player_id, [], ctx, warnings
 
-    safe_days = max(1, min(int(days), 3650))
-    warnings: list[str] = []
-    queue_key = str(queue or "").strip().lower()
-    if legacy_mode and queue_key in {"", "all"}:
-        queue_key = str(legacy_mode).strip().lower()
-    if legacy_mode:
-        warnings.append("Legacy 'mode' parameter is deprecated; use 'queue' instead.")
-    if queue_key not in {"all", "ranked", "unranked"}:
-        queue_key = "all"
-    playlist_key = str(playlist or "").strip().lower()
-    if playlist_key in {"", "all"}:
-        playlist_key = ""
-    selected_map = str(map_name or "").strip().lower()
-    search_key = str(search or "").strip().lower()
-
-    sql = """
-        WITH latest_card AS (
-            SELECT
-                smc.match_id,
-                smc.map_name,
-                smc.mode,
-                smc.match_date,
-                smc.summary_json,
-                smc.scraped_at,
-                ROW_NUMBER() OVER (PARTITION BY smc.match_id ORDER BY smc.id DESC) AS rn
-            FROM scraped_match_cards smc
-        )
-        SELECT
+    t0 = time.time()
+    cur = _get_db_cursor()
+    profile = str(columns_profile or "full").strip().lower()
+    if profile in {"operators", "matchups"}:
+        selected_cols = """
             pr.id AS pr_id,
             pr.player_id,
             pr.match_id,
             pr.round_id,
             pr.side,
             pr.operator,
+            pr.operator_key,
             pr.username,
             pr.player_id_tracker,
             pr.kills,
@@ -884,54 +1198,264 @@ def _load_workspace_rows(
             pr.clutch_won,
             pr.clutch_lost,
             pr.match_type,
+            pr.match_type_key,
+            ro.winner_side,
+            lc.map_name,
+            lc.mode AS card_mode,
+            lc.match_date,
+            lc.scraped_at
+        """
+    else:
+        selected_cols = """
+            pr.id AS pr_id,
+            pr.player_id,
+            pr.match_id,
+            pr.round_id,
+            pr.side,
+            pr.operator,
+            pr.operator_key,
+            pr.username,
+            pr.player_id_tracker,
+            pr.kills,
+            pr.deaths,
+            pr.assists,
+            pr.headshots,
+            pr.first_blood,
+            pr.first_death,
+            pr.clutch_won,
+            pr.clutch_lost,
+            pr.match_type,
+            pr.match_type_key,
             ro.winner_side,
             lc.map_name,
             lc.mode AS card_mode,
             lc.match_date,
             lc.summary_json,
             lc.scraped_at
+        """
+    sql_template = """
+        WITH latest_card AS (
+            SELECT match_id, MAX(scraped_at) AS scraped_at
+            FROM scraped_match_cards
+            GROUP BY match_id
+        ),
+        latest_rows AS (
+            SELECT
+                smc.match_id,
+                smc.map_name,
+                smc.mode,
+                smc.match_date,
+                smc.summary_json,
+                lc.scraped_at
+            FROM latest_card lc
+            JOIN scraped_match_cards smc
+              ON smc.match_id = lc.match_id
+             AND smc.scraped_at = lc.scraped_at
+        )
+        SELECT
+            {selected_cols}
         FROM player_rounds pr
-        JOIN latest_card lc
+        JOIN latest_rows lc
           ON lc.match_id = pr.match_id
-         AND lc.rn = 1
         JOIN round_outcomes ro
           ON ro.player_id = pr.player_id
          AND ro.match_id = pr.match_id
          AND ro.round_id = pr.round_id
         WHERE pr.player_id = ?
+          AND pr.match_id IN ({match_id_placeholders})
           AND pr.operator IS NOT NULL
           AND TRIM(pr.operator) != ''
-          AND DATETIME(COALESCE(lc.scraped_at, '1970-01-01 00:00:00')) >= DATETIME('now', ?)
     """
-    cur.execute(sql, (player_id, f"-{safe_days} days"))
-    rows = [dict(r) for r in cur.fetchall()]
-    if not rows:
-        return player_id, [], {}, warnings
-
-    def _row_mode(r: dict) -> str:
-        return _normalize_mode_key(r.get("card_mode") or r.get("match_type"))
-
-    def _queue_ok(r: dict) -> bool:
-        if queue_key == "all":
-            return True
-        return _row_mode(r) == queue_key
-
-    def _playlist_ok(r: dict) -> bool:
-        if not playlist_key:
-            return True
-        return _row_mode(r) == playlist_key
-
-    filtered = [r for r in rows if _queue_ok(r) and _playlist_ok(r)]
-    if selected_map:
-        filtered = [r for r in filtered if str(r.get("map_name") or "").strip().lower() == selected_map]
+    filtered: list[dict] = []
+    for chunk in _iter_chunks(match_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        sql = sql_template.format(selected_cols=selected_cols, match_id_placeholders=placeholders)
+        params: list[object] = [player_id, *chunk]
+        cur.execute(sql, tuple(params))
+        filtered.extend(dict(r) for r in cur.fetchall())
+    search_key = str(search or "").strip().lower()
     if search_key:
         filtered = [
             r for r in filtered
             if search_key in str(r.get("operator") or "").lower() or search_key in str(r.get("username") or "").lower()
         ]
+    for r in filtered:
+        r["_order_primary"] = _parse_iso_datetime(r.get("scraped_at")).timestamp() if _parse_iso_datetime(r.get("scraped_at")) else 0.0
+    filtered.sort(
+        key=lambda r: (
+            float(r.get("_order_primary", 0.0)),
+            str(r.get("match_id") or ""),
+            int(r.get("round_id") or 0),
+            int(r.get("pr_id") or 0),
+        ),
+        reverse=True,
+    )
+    ctx["row_load_ms"] = int((time.time() - t0) * 1000)
+    print(
+        "[WORKSPACE] row-load "
+        f"profile={profile} scope_key={ctx.get('scope_key')} "
+        f"match_ids={len(match_ids)} rows={len(filtered)} "
+        f"scope_ms={ctx.get('scope_build_ms')} row_ms={ctx.get('row_load_ms')}"
+    )
+    return player_id, filtered, ctx, warnings
+
+
+def _parse_workspace_scope_params(
+    *,
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    legacy_mode: str = "",
+) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    safe_days = max(1, min(int(days), 3650))
+    queue_key = str(queue or "").strip().lower()
+    if legacy_mode and queue_key in {"", "all"}:
+        queue_key = str(legacy_mode).strip().lower()
+    if legacy_mode:
+        warnings.append("Legacy 'mode' parameter is deprecated; use 'queue' instead.")
+    if queue_key not in {"all", "ranked", "unranked"}:
+        queue_key = "all"
+    playlist_key = str(playlist or "").strip().lower()
+    if playlist_key in {"", "all"}:
+        playlist_key = ""
+    if playlist_key not in {"", "standard", "quick", "event", "arcade"}:
+        playlist_key = ""
+    selected_map = str(map_name or "").strip().lower()
+    return (
+        {
+            "days": safe_days,
+            "queue": queue_key,
+            "playlist": playlist_key,
+            "map_name": selected_map,
+            "stack_only": bool(stack_only),
+            "stack_id": stack_id,
+            "search": str(search or "").strip().lower(),
+        },
+        warnings,
+    )
+
+
+def _build_workspace_scope(
+    *,
+    username: str,
+    days: int = 90,
+    queue: str = "all",
+    playlist: str = "",
+    map_name: str = "",
+    stack_only: bool = False,
+    stack_id: int | None = None,
+    search: str = "",
+    legacy_mode: str = "",
+) -> dict:
+    t0 = time.time()
+    cur = _get_db_cursor()
+    cur.execute(
+        "SELECT player_id FROM players WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) ORDER BY player_id DESC LIMIT 1",
+        (username,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {
+            "player_id": 0,
+            "match_ids": [],
+            "warnings": ["Player not found."],
+            "stack_context": {"enabled": bool(stack_only), "applied": False, "stack_id": stack_id, "matched_teammates": [], "reason": ""},
+            "cache_hit": False,
+            "scope_key": "",
+            "filters_applied": {},
+            "compute_ms": int((time.time() - t0) * 1000),
+        }
+    player_id = int(row["player_id"])
+    parsed, warnings = _parse_workspace_scope_params(
+        days=days,
+        queue=queue,
+        playlist=playlist,
+        map_name=map_name,
+        stack_only=stack_only,
+        stack_id=stack_id,
+        search=search,
+        legacy_mode=legacy_mode,
+    )
+    safe_days = int(parsed["days"])
+    queue_key = str(parsed["queue"])
+    playlist_key = str(parsed["playlist"])
+    selected_map = str(parsed["map_name"])
+    stack_only = bool(parsed["stack_only"])
+    scope_payload = {
+        "username": str(username or "").strip().lower(),
+        "player_id": player_id,
+        "days": safe_days,
+        "queue": queue_key,
+        "playlist": playlist_key,
+        "map_name": selected_map,
+        "stack_only": stack_only,
+        "stack_id": stack_id,
+    }
+    db_rev = _db_revision_token()
+    scope_key = _hash_payload(scope_payload | {"db_rev": db_rev})
+    cached = _workspace_scope_cache_get(scope_key, db_rev)
+    if cached is not None:
+        cached_out = dict(cached)
+        cached_out["cache_hit"] = True
+        cached_out["compute_ms"] = int((time.time() - t0) * 1000)
+        print(
+            "[WORKSPACE] scope-build "
+            f"scope_key={scope_key} cache_hit=True player={username} "
+            f"match_ids={len(cached_out.get('match_ids') or [])} ms={cached_out['compute_ms']}"
+        )
+        return cached_out
+
+    sql = """
+        WITH latest_card AS (
+            SELECT match_id, MAX(scraped_at) AS scraped_at
+            FROM scraped_match_cards
+            GROUP BY match_id
+        )
+        SELECT DISTINCT
+            me.match_id,
+            me.team_id,
+            COALESCE(NULLIF(TRIM(smc.mode_key), ''), 'other') AS mode_key,
+            CASE
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%unranked%' THEN 'unranked'
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%ranked%' THEN 'ranked'
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%standard%' THEN 'standard'
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%quick%' OR LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%casual%' THEN 'quick'
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%arcade%' THEN 'arcade'
+                WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%event%' THEN 'event'
+                ELSE 'other'
+            END AS mode_norm,
+            LOWER(TRIM(COALESCE(smc.map_name, ''))) AS map_name_norm,
+            lc.scraped_at AS last_scraped_at
+        FROM match_detail_players me
+        JOIN latest_card lc
+          ON lc.match_id = me.match_id
+        JOIN scraped_match_cards smc
+          ON smc.match_id = lc.match_id
+         AND smc.scraped_at = lc.scraped_at
+        WHERE LOWER(TRIM(me.username)) = LOWER(TRIM(?))
+          AND DATETIME(COALESCE(lc.scraped_at, '1970-01-01 00:00:00')) >= DATETIME('now', ?)
+    """
+    params: list[object] = [username, f"-{safe_days} days"]
+    if queue_key == "ranked":
+        sql += " AND LOWER(TRIM(COALESCE(smc.mode_key, ''))) = 'ranked'"
+    elif queue_key == "unranked":
+        sql += " AND LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%unranked%'"
+    if playlist_key:
+        sql += " AND (CASE WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%unranked%' THEN 'unranked' WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%ranked%' THEN 'ranked' WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%standard%' THEN 'standard' WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%quick%' OR LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%casual%' THEN 'quick' WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%arcade%' THEN 'arcade' WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) LIKE '%event%' THEN 'event' ELSE 'other' END) = ?"
+        params.append(playlist_key)
+    if selected_map:
+        sql += " AND LOWER(TRIM(COALESCE(smc.map_name, ''))) = ?"
+        params.append(selected_map)
+    cur.execute(sql, tuple(params))
+    match_rows = [dict(r) for r in cur.fetchall()]
 
     stack_context = {"enabled": stack_only, "applied": False, "stack_id": stack_id, "matched_teammates": [], "reason": ""}
-    if stack_only and filtered:
+    if stack_only and match_rows:
         teammates: set[str] = set()
         chosen_stack_id = stack_id
         if chosen_stack_id is None:
@@ -968,54 +1492,58 @@ def _load_workspace_rows(
         if not teammates:
             stack_context["reason"] = "No stack teammates available; stack filter not applied."
         else:
+            match_ids = [str(r.get("match_id") or "").strip() for r in match_rows if str(r.get("match_id") or "").strip()]
             by_match_users: dict[str, set[str]] = {}
-            for r in filtered:
-                by_match_users.setdefault(str(r["match_id"]), set()).add(str(r.get("username") or "").strip().lower())
+            if match_ids:
+                for chunk in _iter_chunks(match_ids):
+                    placeholders = ",".join("?" for _ in chunk)
+                    cur.execute(
+                        f"""
+                        SELECT tm.match_id, LOWER(TRIM(tm.username)) AS teammate_name
+                        FROM match_detail_players me
+                        JOIN match_detail_players tm
+                          ON tm.match_id = me.match_id
+                         AND tm.team_id = me.team_id
+                         AND LOWER(TRIM(tm.username)) != LOWER(TRIM(me.username))
+                        WHERE LOWER(TRIM(me.username)) = LOWER(TRIM(?))
+                          AND me.match_id IN ({placeholders})
+                        """,
+                        (username, *chunk),
+                    )
+                    for rr in cur.fetchall():
+                        mid = str(rr["match_id"] or "").strip()
+                        nm = str(rr["teammate_name"] or "").strip().lower()
+                        if mid and nm:
+                            by_match_users.setdefault(mid, set()).add(nm)
             allowed = {mid for mid, names in by_match_users.items() if names.intersection(teammates)}
             matched = sorted({n for mid, names in by_match_users.items() if mid in allowed for n in names.intersection(teammates)})
             if allowed:
-                filtered = [r for r in filtered if str(r["match_id"]) in allowed]
+                match_rows = [r for r in match_rows if str(r.get("match_id") or "") in allowed]
                 stack_context["applied"] = True
                 stack_context["matched_teammates"] = matched
             else:
                 stack_context["reason"] = "No matches contained configured stack teammates."
-
-    by_match: dict[str, dict] = {}
-    for r in filtered:
-        mid = str(r["match_id"])
-        info = by_match.setdefault(mid, {})
-        if "end_time" not in info:
-            end_dt, start_dt = _extract_match_times(r)
-            info["end_time"] = end_dt
-            info["start_time"] = start_dt
-            info["scraped_at"] = _parse_iso_datetime(r.get("scraped_at"))
-    ordering_mode = "ingestion_fallback"
-    if any(v.get("end_time") for v in by_match.values()):
-        ordering_mode = "match_end_time"
-    elif any(v.get("start_time") for v in by_match.values()):
-        ordering_mode = "match_start_time"
-
-    def _primary_epoch(mid: str) -> float:
-        info = by_match.get(mid, {})
-        if ordering_mode == "match_end_time" and info.get("end_time"):
-            return float(info["end_time"].timestamp())
-        if ordering_mode == "match_start_time" and info.get("start_time"):
-            return float(info["start_time"].timestamp())
-        dt = info.get("scraped_at")
-        return float(dt.timestamp()) if dt else 0.0
-
-    for r in filtered:
-        r["_order_primary"] = _primary_epoch(str(r["match_id"]))
-    filtered.sort(
-        key=lambda r: (
-            float(r.get("_order_primary", 0.0)),
-            str(r.get("match_id") or ""),
-            int(r.get("round_id") or 0),
-            int(r.get("pr_id") or 0),
-        ),
-        reverse=True,
+    match_ids = sorted({str(r.get("match_id") or "").strip() for r in match_rows if str(r.get("match_id") or "").strip()})
+    scope_result = {
+        "player_id": player_id,
+        "match_ids": match_ids,
+        "filters_applied": parsed,
+        "stack_context": stack_context,
+        "scope_key": scope_key,
+        "warnings": warnings,
+        "cache_hit": False,
+        "time_min": f"-{safe_days} days",
+        "time_max": "now",
+        "compute_ms": int((time.time() - t0) * 1000),
+    }
+    _workspace_scope_cache_set(scope_key, scope_result, db_rev)
+    print(
+        "[WORKSPACE] scope-build "
+        f"scope_key={scope_key} cache_hit=False player={username} "
+        f"match_ids={len(match_ids)} days={safe_days} queue={queue_key} playlist={playlist_key or 'all'} "
+        f"map={selected_map or 'all'} stack_only={stack_only} ms={scope_result['compute_ms']}"
     )
-    return player_id, filtered, {"ordering_mode": ordering_mode, "stack_context": stack_context}, warnings
+    return scope_result
 
 
 def _compute_matchup_block(
@@ -1404,6 +1932,211 @@ def _integrity_counters(rows: list[dict]) -> dict:
     return counters
 
 
+def _compute_workspace_team_pairs(username: str, scope: dict) -> dict:
+    t0 = time.time()
+    player_id = int(scope.get("player_id") or 0)
+    match_ids = [str(mid or "").strip() for mid in scope.get("match_ids") or [] if str(mid or "").strip()]
+    if player_id <= 0:
+        return {
+            "pairs": [],
+            "baseline_win_rate": 0.0,
+            "matches_in_scope": 0,
+            "is_partial": False,
+            "reason": "Player not found.",
+            "compute_ms": int((time.time() - t0) * 1000),
+        }
+    if not match_ids:
+        return {
+            "pairs": [],
+            "baseline_win_rate": 0.0,
+            "matches_in_scope": 0,
+            "is_partial": False,
+            "reason": "No matches in scope.",
+            "compute_ms": int((time.time() - t0) * 1000),
+        }
+
+    limited_match_ids = match_ids
+    is_partial = False
+    partial_reason = ""
+    TEAM_SCOPE_HARD_CAP = 5000
+    if len(limited_match_ids) > TEAM_SCOPE_HARD_CAP:
+        limited_match_ids = limited_match_ids[:TEAM_SCOPE_HARD_CAP]
+        is_partial = True
+        partial_reason = f"Scope reduced to first {TEAM_SCOPE_HARD_CAP} matches for compute safety."
+
+    cur = _get_db_cursor()
+    me_rows: list[dict] = []
+    for chunk in _iter_chunks(limited_match_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        cur.execute(
+            f"""
+            SELECT me.match_id, me.result, me.team_id
+            FROM match_detail_players me
+            WHERE LOWER(TRIM(me.username)) = LOWER(TRIM(?))
+              AND me.match_id IN ({placeholders})
+            """,
+            (username, *chunk),
+        )
+        me_rows.extend(dict(r) for r in cur.fetchall())
+    if not me_rows:
+        return {
+            "pairs": [],
+            "baseline_win_rate": 0.0,
+            "matches_in_scope": len(limited_match_ids),
+            "is_partial": is_partial,
+            "reason": partial_reason or "No player rows in scope.",
+            "compute_ms": int((time.time() - t0) * 1000),
+        }
+    match_meta = {str(r["match_id"]): {"won": str(r.get("result") or "").lower() == "win", "team_id": r.get("team_id")} for r in me_rows}
+    baseline_wr = (sum(1 for r in me_rows if str(r.get("result") or "").lower() == "win") / max(1, len(me_rows))) * 100.0
+
+    by_match_teammates: dict[str, set[str]] = {}
+    for chunk in _iter_chunks(limited_match_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        cur.execute(
+            f"""
+            SELECT tm.match_id, LOWER(TRIM(tm.username)) AS teammate
+            FROM match_detail_players me
+            JOIN match_detail_players tm
+              ON tm.match_id = me.match_id
+             AND tm.team_id = me.team_id
+             AND LOWER(TRIM(tm.username)) != LOWER(TRIM(me.username))
+            WHERE LOWER(TRIM(me.username)) = LOWER(TRIM(?))
+              AND me.match_id IN ({placeholders})
+            """,
+            (username, *chunk),
+        )
+        for r in cur.fetchall():
+            mid = str(r["match_id"] or "").strip()
+            nm = str(r["teammate"] or "").strip().lower()
+            if mid and nm:
+                by_match_teammates.setdefault(mid, set()).add(nm)
+
+    rounds_by_match: dict[str, int] = {}
+    for chunk in _iter_chunks(limited_match_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        cur.execute(
+            f"""
+            SELECT match_id, COUNT(DISTINCT round_id) AS rounds_n
+            FROM player_rounds
+            WHERE player_id = ?
+              AND match_id IN ({placeholders})
+            GROUP BY match_id
+            """,
+            (player_id, *chunk),
+        )
+        for r in cur.fetchall():
+            rounds_by_match[str(r["match_id"])] = int(r["rounds_n"] or 0)
+
+    agg: dict[tuple[str, str], dict] = {}
+    for mid, teammates in by_match_teammates.items():
+        if len(teammates) < 2:
+            continue
+        won = bool(match_meta.get(mid, {}).get("won", False))
+        rounds_n = int(rounds_by_match.get(mid, 0))
+        for a, b in combinations(sorted(teammates), 2):
+            key = (a, b)
+            rec = agg.setdefault(
+                key,
+                {
+                    "pair": f"{a} + {b}",
+                    "teammate_a": a,
+                    "teammate_b": b,
+                    "matches_n": 0,
+                    "wins_n": 0,
+                    "rounds_n": 0,
+                },
+            )
+            rec["matches_n"] += 1
+            rec["wins_n"] += 1 if won else 0
+            rec["rounds_n"] += rounds_n
+
+    pairs = []
+    for rec in agg.values():
+        matches_n = int(rec["matches_n"])
+        wins_n = int(rec["wins_n"])
+        wr = (wins_n / matches_n) * 100.0 if matches_n > 0 else 0.0
+        pairs.append(
+            {
+                **rec,
+                "win_rate": round(wr, 2),
+                "delta_vs_user_baseline": round(wr - baseline_wr, 2),
+            }
+        )
+    pairs.sort(key=lambda x: (-int(x["rounds_n"]), -int(x["matches_n"]), x["pair"]))
+    return {
+        "pairs": pairs,
+        "baseline_win_rate": round(baseline_wr, 2),
+        "matches_in_scope": len(limited_match_ids),
+        "is_partial": is_partial,
+        "reason": partial_reason,
+        "compute_ms": int((time.time() - t0) * 1000),
+    }
+
+
+@app.get("/api/workspace/team/{username}")
+async def workspace_team(
+    username: str,
+    ws_days: int = 90,
+    ws_queue: str = "all",
+    ws_playlist: str = "",
+    ws_map_name: str = "",
+    ws_stack_only: bool = False,
+    ws_stack_id: int | None = None,
+    ws_search: str = "",
+    mode: str = "",
+    force_refresh: bool = False,
+) -> dict:
+    try:
+        scope = _build_workspace_scope(
+            username=username,
+            days=ws_days,
+            queue=ws_queue,
+            playlist=ws_playlist,
+            map_name=ws_map_name,
+            stack_only=ws_stack_only,
+            stack_id=ws_stack_id,
+            search=ws_search,
+            legacy_mode=mode,
+        )
+        db_rev = _db_revision_token()
+        scope_key = str(scope.get("scope_key") or "")
+        team_key = _hash_payload({"scope_key": scope_key, "view": "pairs_v1", "db_rev": db_rev})
+        if not force_refresh:
+            cached = _workspace_team_cache_get(team_key, db_rev)
+            if cached is not None:
+                payload = dict(cached)
+                payload["cache_hit"] = True
+                return payload
+        result = _compute_workspace_team_pairs(username, scope)
+        payload = {
+            "username": username,
+            "scope_key": scope_key,
+            "cache_hit": False,
+            "compute_ms": int(result.get("compute_ms", 0)),
+            "is_partial": bool(result.get("is_partial", False)),
+            "reason": str(result.get("reason") or ""),
+            "scope": {
+                "match_ids": int(result.get("matches_in_scope", 0)),
+                "filters_applied": scope.get("filters_applied", {}),
+                "stack_context": scope.get("stack_context", {}),
+                "scope_cache_hit": bool(scope.get("cache_hit", False)),
+                "scope_build_ms": int(scope.get("compute_ms", 0)),
+            },
+            "baseline_win_rate": float(result.get("baseline_win_rate", 0.0)),
+            "pairs": result.get("pairs", []),
+            "meta": {
+                "api_version": WORKSPACE_API_VERSION,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "db_rev": db_rev,
+            },
+        }
+        _workspace_team_cache_set(team_key, payload, db_rev)
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute workspace team: {str(e)}")
+
+
 @app.get("/api/dashboard-workspace/{username}")
 async def dashboard_workspace(
     username: str,
@@ -1461,6 +2194,43 @@ async def dashboard_workspace(
         if cached is not None:
             return cached
 
+        if panel_key == "team":
+            parsed_scope, scope_warnings = _parse_workspace_scope_params(
+                days=days,
+                queue=queue,
+                playlist=playlist,
+                map_name=map_name,
+                stack_only=stack_only,
+                stack_id=stack_id,
+                search=search,
+                legacy_mode=mode,
+            )
+            response = {
+                "username": username,
+                "filters_effective": {
+                    "panel": panel_key,
+                    "days": parsed_scope["days"],
+                    "queue": parsed_scope["queue"],
+                    "playlist": parsed_scope["playlist"],
+                    "map_name": parsed_scope["map_name"],
+                    "stack_only": bool(parsed_scope["stack_only"]),
+                    "stack_id": parsed_scope["stack_id"],
+                    "search": parsed_scope["search"],
+                },
+                "meta": {
+                    "api_version": WORKSPACE_API_VERSION,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "ordering_mode": "scope_only",
+                    "db_rev": db_rev,
+                    "warnings": scope_warnings,
+                    "panel": panel_key,
+                },
+                "team": {"message": "Workspace Team now loads from /api/workspace/team/{username}."},
+            }
+            response["meta"]["hash"] = _hash_payload({"team": response.get("team"), "filters": response.get("filters_effective")})
+            _workspace_cache_set(cache_key, response)
+            return response
+
         player_id, rows, ctx, warnings = _load_workspace_rows(
             username,
             days=days,
@@ -1471,6 +2241,7 @@ async def dashboard_workspace(
             stack_id=stack_id,
             search=search,
             legacy_mode=mode,
+            columns_profile=panel_key if panel_key in {"operators", "matchups"} else "full",
         )
         if player_id <= 0:
             return {"username": username, "analysis": {"error": "Player not found."}, "meta": {"api_version": WORKSPACE_API_VERSION}}
@@ -1605,6 +2376,7 @@ async def dashboard_workspace_operator(
             stack_id=stack_id,
             search=search,
             legacy_mode=mode,
+            columns_profile="operators",
         )
         op_name = str(operator_name or "").strip().lower()
         side_key = str(side or "all").strip().lower()
@@ -1734,6 +2506,7 @@ async def dashboard_workspace_evidence(
             stack_id=stack_id,
             search=search,
             legacy_mode=mode,
+            columns_profile="matchups",
         )
         ordering_mode = str(ctx.get("ordering_mode") or "ingestion_fallback")
         db_rev = _db_revision_token()
@@ -1868,7 +2641,7 @@ async def atk_def_heatmap(
     debug: bool = False,
 ) -> dict:
     try:
-        cur = db.conn.cursor()
+        cur = _get_db_cursor()
         cur.execute(
             "SELECT player_id FROM players WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) ORDER BY player_id DESC LIMIT 1",
             (username,),
@@ -3249,6 +4022,8 @@ async def scrape_match_history(
                     return (None, None)
                 for seg in segments:
                     if not isinstance(seg, dict):
+                        continue
+                    if str(seg.get("type") or "").lower() != "overview":
                         continue
                     metadata = seg.get("metadata", {})
                     if not isinstance(metadata, dict):

@@ -1,6 +1,11 @@
 import { createApiClient } from "./api/client.js";
 import { createModalController } from "./ui/modal.js";
 import { setActiveTab as setActiveTabUi, initPrimaryTabKeyboardNav } from "./ui/tabs.js";
+import { createChip } from "./ui/chip.js";
+import { createCard } from "./ui/card.js";
+import { enhanceDrawers, attachDrawerResetButton } from "./ui/drawer.js";
+import { initTooltips } from "./ui/tooltip.js";
+import { createDataTable } from "./ui/datatable.js";
 
 let ws = null;
 let wsMatches = null;
@@ -62,7 +67,7 @@ let dashboardRefreshQueued = false;
 let computeReportState = {
     mode: "overall",
     dashboardView: "insights",
-    graphPanel: "workspace",
+    graphPanel: "threat",
     username: "",
     stats: null,
     round: null,
@@ -90,6 +95,16 @@ let computeReportState = {
         dataByPanel: {},
         meta: null,
         selection: { type: null },
+        teamUi: {
+            minMatches: 5,
+            minRounds: 30,
+            polarity: "all",
+            hideNeutral: false,
+            neutralThreshold: 1,
+            sortBy: "rounds",
+            sortDir: "desc",
+            selectedPairKey: "",
+        },
         evidenceCursor: "",
         evidenceRows: [],
         requestSeq: 0,
@@ -100,6 +115,8 @@ const WORKSPACE_REQUEST_TIMEOUT_MS = 45000;
 let encounteredPlayersCache = [];
 let teamBuilderFriendsCache = [];
 let operatorsPlayerListCache = [];
+let operatorsLastPayload = null;
+let operatorsSelectedMap = "";
 const MAP_IMAGE_FILE_BY_KEY = {
     "outback": "r6-maps-outback.avif",
     "oregon": "r6-maps-oregon.avif",
@@ -1326,9 +1343,109 @@ function setActiveTab(tabName) {
         onOperatorsActivated: () => {
             loadOperatorsTab(false);
         },
+        onWorkspaceActivated: () => {
+            const workspaceRoot = document.getElementById("graph-panel-workspace");
+            if (workspaceRoot) workspaceRoot.hidden = false;
+            const panel = computeReportState.workspace.panel || "overview";
+            loadWorkspacePanel(panel, false).catch((err) => {
+                logCompute(`Workspace load failed: ${err}`, "error");
+                renderWorkspacePanelError(panel, err);
+            });
+        },
         onDashboardActivated: () => {
             triggerDashboardAutoRefresh();
         },
+    });
+    const params = new URLSearchParams(window.location.search);
+    params.set("panel", String(tabName || "scanner"));
+    const url = `${window.location.pathname}?${params.toString()}`;
+    window.history.replaceState({}, "", url);
+}
+
+function getFilterInputLabel(el) {
+    if (!el) return "";
+    const id = String(el.id || "");
+    const explicit = String(el.dataset?.filterLabel || "").trim();
+    if (explicit) return explicit;
+    const label = el.closest("label");
+    if (label) {
+        const text = String(label.textContent || "").replace(/\s+/g, " ").trim();
+        if (text) return text.replace(/^Stack only$/i, "Stack");
+    }
+    if (id) {
+        return id.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+    }
+    return el.tagName;
+}
+
+function getFilterInputValue(el) {
+    if (!el || el.disabled) return "";
+    if (el.type === "checkbox") {
+        return el.checked ? "On" : "";
+    }
+    const value = String(el.value || "").trim();
+    if (!value) return "";
+    if (el.tagName === "SELECT") {
+        const option = el.selectedOptions?.[0];
+        return String(option?.textContent || value).trim();
+    }
+    return value;
+}
+
+function renderPanelActiveFilterChips(panel) {
+    if (!panel) return;
+    let host = panel.querySelector(".panel-active-filters");
+    if (!host) {
+        host = document.createElement("div");
+        host.className = "panel-active-filters";
+        const topbar = panel.querySelector(".panel-topbar");
+        if (topbar && topbar.parentElement) {
+            topbar.parentElement.insertBefore(host, topbar.nextSibling);
+        } else {
+            panel.prepend(host);
+        }
+    }
+    const drawer = panel.querySelector(".filter-drawer");
+    if (!drawer) {
+        host.replaceChildren();
+        return;
+    }
+    const chips = [];
+    drawer.querySelectorAll("input, select").forEach((el) => {
+        const label = getFilterInputLabel(el);
+        const value = getFilterInputValue(el);
+        if (!label || !value) return;
+        chips.push(createChip({ label: `${label}: ${value}`, tone: "accent" }));
+    });
+    host.replaceChildren(...chips);
+}
+
+function resetPanelFilters(panel) {
+    if (!panel) return;
+    panel.querySelectorAll(".filter-drawer input, .filter-drawer select").forEach((el) => {
+        if (el.disabled) return;
+        if (el.type === "checkbox") {
+            el.checked = el.defaultChecked;
+        } else {
+            el.value = el.defaultValue || "";
+        }
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    renderPanelActiveFilterChips(panel);
+}
+
+function initFilterDrawersAndChips() {
+    enhanceDrawers(document);
+    document.querySelectorAll(".tab-panel").forEach((panel) => {
+        const drawer = panel.querySelector(".filter-drawer");
+        if (drawer) {
+            attachDrawerResetButton(drawer, () => resetPanelFilters(panel));
+            drawer.querySelectorAll("input, select").forEach((el) => {
+                const evt = el.tagName === "INPUT" && el.type === "text" ? "input" : "change";
+                el.addEventListener(evt, () => renderPanelActiveFilterChips(panel));
+            });
+        }
+        renderPanelActiveFilterChips(panel);
     });
 }
 
@@ -1360,27 +1477,39 @@ function renderPlayersTable(rows) {
         wrap.innerHTML = `<div class="compute-value">No encountered players found.</div>`;
         return;
     }
-    const body = filtered.map((row) => {
+    const tableRows = filtered.map((row) => {
         const tags = Array.isArray(row?.tags) ? row.tags : [];
         const isFriend = Boolean(row?.is_friend) || tags.some((t) => String(t).toLowerCase() === "friend");
-        const btnLabel = isFriend ? "Unfriend" : "Friend";
-        return (
-            `<tr data-username="${escapeHtml(String(row.username || ""))}">` +
-            `<td>${escapeHtml(String(row.username || ""))}</td>` +
-            `<td>${toNumber(row.shared_matches, 0)}</td>` +
-            `<td>${formatFixed(toNumber(row.win_rate_together, 0), 1)}%</td>` +
-            `<td>${escapeHtml(formatMatchAgeLabel(row.last_seen))}</td>` +
-            `<td>${escapeHtml(tags.join(", ") || "-")}</td>` +
-            `<td><button class="players-friend-toggle ${isFriend ? "on" : ""}" type="button" data-username="${escapeHtml(String(row.username || ""))}" data-enabled="${isFriend ? "1" : "0"}">${btnLabel}</button></td>` +
-            `</tr>`
-        );
-    }).join("");
-    wrap.innerHTML = (
-        `<table class="players-table">` +
-        `<thead><tr><th>Username</th><th>Shared Matches</th><th>Win Rate Together</th><th>Last Seen</th><th>Tags</th><th>Friend</th></tr></thead>` +
-        `<tbody>${body}</tbody>` +
-        `</table>`
-    );
+        return {
+            username: String(row?.username || ""),
+            shared_matches: toNumber(row?.shared_matches, 0),
+            win_rate_together: toNumber(row?.win_rate_together, 0),
+            last_seen: formatMatchAgeLabel(row?.last_seen),
+            tags: tags.join(", ") || "-",
+            friend: isFriend ? "Unfriend" : "Friend",
+            friend_enabled: isFriend ? "1" : "0",
+        };
+    });
+    const dt = createDataTable({
+        columns: [
+            { key: "username", label: "Username", sortable: true },
+            { key: "shared_matches", label: "Shared Matches", sortable: true },
+            { key: "win_rate_together", label: "Win Rate Together", sortable: true, render: (row) => `${formatFixed(toNumber(row.win_rate_together, 0), 1)}%` },
+            { key: "last_seen", label: "Last Seen", sortable: true },
+            { key: "tags", label: "Tags", sortable: false },
+            {
+                key: "friend",
+                label: "Friend",
+                sortable: false,
+                render: (row) => {
+                    const tone = row.friend_enabled === "1" ? "primary" : "secondary";
+                    return `<button class="ui-button ui-button--${tone} players-friend-toggle" type="button" data-username="${escapeHtml(row.username)}" data-enabled="${row.friend_enabled}">${escapeHtml(row.friend)}</button>`;
+                },
+            },
+        ],
+        rows: tableRows,
+    });
+    wrap.replaceChildren(dt.element);
     wrap.querySelectorAll(".players-friend-toggle").forEach((btn) => {
         btn.addEventListener("click", async () => {
             const username = String(btn.dataset.username || "").trim();
@@ -1567,29 +1696,79 @@ function operatorTrackerIconUrl(operatorName) {
     return `https://trackercdn.com/cdn/tracker.gg/r6siege/db/images/operators/${encodeURIComponent(slug)}.png`;
 }
 
-function renderOperatorDot(item, baseline, bound = 20) {
+function operatorIconCandidates(operatorName) {
+    const op = String(operatorName || "").trim();
+    const slug = operatorSlug(op);
+    if (!slug) return [];
+    const local = resolveOperatorImageUrl(op);
+    const candidates = [
+        local,
+        `https://trackercdn.com/cdn/tracker.gg/r6siege/db/images/operators/${encodeURIComponent(slug)}.png`,
+        `https://trackercdn.com/cdn/tracker.gg/r6siege/db/images/operators/${encodeURIComponent(slug)}.webp`,
+        `https://trackercdn.com/rainbow6-ubi/assets/images/badge-${encodeURIComponent(slug)}.png`,
+        `https://trackercdn.com/rainbow6-ubi/assets/images/badge-${encodeURIComponent(slug)}.webp`,
+    ].filter(Boolean);
+    return Array.from(new Set(candidates));
+}
+
+function handleOperatorDotIconError(imgEl) {
+    if (!imgEl) return;
+    const raw = String(imgEl.dataset.fallbacks || "");
+    const parts = raw ? raw.split("||").filter(Boolean) : [];
+    if (parts.length) {
+        const [next, ...rest] = parts;
+        imgEl.dataset.fallbacks = rest.join("||");
+        imgEl.src = next;
+        return;
+    }
+    imgEl.style.display = "none";
+    if (imgEl.nextElementSibling) imgEl.nextElementSibling.style.display = "inline-flex";
+}
+
+window.handleOperatorDotIconError = handleOperatorDotIconError;
+
+function operatorsConfidenceBand(rounds) {
+    const n = Math.max(0, toNumber(rounds, 0));
+    if (n >= 20) return "high";
+    if (n >= 10) return "med";
+    return "low";
+}
+
+function operatorsConfidenceLabel(rounds) {
+    const band = operatorsConfidenceBand(rounds);
+    if (band === "high") return "High confidence";
+    if (band === "med") return "Medium confidence";
+    return "Low confidence";
+}
+
+function renderOperatorDot(item, baseline, bound = 20, yOffset = 0) {
     const delta = toNumber(item?.delta_vs_baseline, 0);
     const pct = Math.max(-bound, Math.min(bound, delta));
     const left = 50 + ((pct / bound) * 50);
     const rounds = Math.max(0, toNumber(item?.rounds, 0));
     const size = Math.max(8, Math.min(16, 8 + Math.sqrt(rounds)));
+    const confidence = operatorsConfidenceBand(rounds);
+    const alpha = confidence === "high" ? 1 : (confidence === "med" ? 0.88 : 0.7);
     const color = delta >= 0 ? "#4caf50" : "#f44336";
     const op = String(item?.operator || "Unknown");
-    const iconUrl = operatorTrackerIconUrl(op);
+    const iconCandidates = operatorIconCandidates(op);
+    const primaryIcon = iconCandidates[0] || "";
+    const fallbackIcons = iconCandidates.slice(1).join("||");
     const tooltip =
         `${op}\n` +
         `Rounds: ${rounds}\n` +
         `Win rate: ${formatFixed(toNumber(item?.win_rate, 0), 1)}% (${delta >= 0 ? "+" : ""}${formatFixed(delta, 1)}% vs map baseline)\n` +
+        `Confidence: ${operatorsConfidenceLabel(rounds)}\n` +
         `First kill rate: ${formatFixed(toNumber(item?.fk_rate, 0), 1)}%\n` +
         `First death rate: ${formatFixed(toNumber(item?.fd_rate, 0), 1)}%\n` +
         `KD: ${formatFixed(toNumber(item?.kd, 0), 2)}`;
-    const iconHtml = iconUrl
-        ? `<img class="operators-dot-icon" src="${iconUrl}" alt="${escapeHtml(op)}" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">` +
+    const iconHtml = primaryIcon
+        ? `<img class="operators-dot-icon" src="${escapeHtml(primaryIcon)}" data-fallbacks="${escapeHtml(fallbackIcons)}" alt="${escapeHtml(op)}" onerror="window.handleOperatorDotIconError(this)">` +
           `<span class="operators-dot-fallback" style="display:none">${escapeHtml(op.slice(0, 2).toUpperCase())}</span>`
         : `<span class="operators-dot-fallback">${escapeHtml(op.slice(0, 2).toUpperCase())}</span>`;
     return (
-        `<div class="operators-dot-wrap" style="left:${left.toFixed(2)}%" title="${escapeHtml(tooltip)}">` +
-        `<div class="operators-dot" style="width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:${color};"></div>` +
+        `<div class="operators-dot-wrap" style="left:${left.toFixed(2)}%; top:${(34 + yOffset).toFixed(0)}px" title="${escapeHtml(tooltip)}">` +
+        `<div class="operators-dot ${confidence}" style="width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:${color};opacity:${alpha};"></div>` +
         `<div class="operators-dot-icon-wrap">${iconHtml}</div>` +
         `<div class="operators-dot-label">${escapeHtml(op)}</div>` +
         `</div>`
@@ -1603,29 +1782,209 @@ function renderOperatorSideLine(sideKey, baseline, operators) {
     }
     const maxDelta = list.reduce((acc, row) => Math.max(acc, Math.abs(toNumber(row?.delta_vs_baseline, 0))), 0);
     const bound = Math.max(10, Math.min(35, Math.ceil(maxDelta + 2)));
-    const dots = list.map((row) => renderOperatorDot(row, baseline, bound)).join("");
+    const bins = new Map();
+    const dots = list.map((row) => {
+        const delta = toNumber(row?.delta_vs_baseline, 0);
+        const binKey = (Math.round(delta * 2) / 2).toFixed(1);
+        const used = toNumber(bins.get(binKey), 0);
+        bins.set(binKey, used + 1);
+        const sign = (used % 2 === 0) ? -1 : 1;
+        const layer = Math.floor((used + 1) / 2);
+        const yOffset = sign * layer * 18;
+        return renderOperatorDot(row, baseline, bound, yOffset);
+    }).join("");
     return (
+        `<div class="operators-side-line-wrap">` +
+        `<div class="operators-axis-caption">Delta win% vs map baseline</div>` +
+        `<div class="operators-line-legend"><span class="neg">Negative</span><span class="zero">0 baseline</span><span class="pos">Positive</span></div>` +
         `<div class="operators-side-line">` +
         `<div class="operators-axis-center" aria-hidden="true"></div>` +
         `${dots}` +
+        `</div>` +
+        `<div class="operators-axis-scale"><span>-${bound}%</span><span>0%</span><span>+${bound}%</span></div>` +
         `</div>`
     );
+}
+
+function renderOperatorsTopBottomList(sideKey, operators, topK) {
+    const includeLowSample = document.getElementById("operators-include-low-sample")?.checked === true;
+    const list = (Array.isArray(operators) ? operators : []).filter((row) => includeLowSample || row?.meets_min_rounds !== false);
+    if (!list.length) {
+        const minRounds = toNumber(document.getElementById("operators-min-rounds")?.value, 5);
+        return `<div class="operators-quick-empty">0 operators meet min_rounds=${minRounds} per map+side+operator on ${sideKey.toUpperCase()}. Try lowering threshold or enable "Include low sample".</div>`;
+    }
+    const top = list
+        .slice()
+        .sort((a, b) => toNumber(b?.delta_vs_baseline, 0) - toNumber(a?.delta_vs_baseline, 0))
+        .slice(0, topK);
+    const bottom = list
+        .slice()
+        .sort((a, b) => toNumber(a?.delta_vs_baseline, 0) - toNumber(b?.delta_vs_baseline, 0))
+        .slice(0, topK);
+    const renderRows = (rows, trend) => rows.map((row) => {
+        const rounds = toNumber(row?.rounds, 0);
+        const delta = toNumber(row?.delta_vs_baseline, 0);
+        const confidence = operatorsConfidenceBand(rounds);
+        return (
+            `<div class="operators-quick-row">` +
+            `<span class="operators-quick-op">${escapeHtml(String(row?.operator || "Unknown"))}</span>` +
+            `<span class="operators-quick-delta ${trend === "up" ? "pos" : "neg"}">${delta >= 0 ? "+" : ""}${formatFixed(delta, 1)}%</span>` +
+            `<span class="operators-quick-n ${confidence}">n=${rounds}</span>` +
+            `</div>`
+        );
+    }).join("");
+    return (
+        `<div class="operators-quick-grid">` +
+        `<div class="operators-quick-col">` +
+        `<div class="operators-quick-title">${sideKey.toUpperCase()} Top ${topK}</div>` +
+        `${renderRows(top, "up")}` +
+        `</div>` +
+        `<div class="operators-quick-col">` +
+        `<div class="operators-quick-title">${sideKey.toUpperCase()} Bottom ${topK}</div>` +
+        `${renderRows(bottom, "down")}` +
+        `</div>` +
+        `</div>`
+    );
+}
+
+function renderOperatorsDetailRows(rows, trend, limit) {
+    const sorted = rows
+        .slice()
+        .sort((a, b) => trend === "up"
+            ? toNumber(b?.delta_vs_baseline, 0) - toNumber(a?.delta_vs_baseline, 0)
+            : toNumber(a?.delta_vs_baseline, 0) - toNumber(b?.delta_vs_baseline, 0))
+        .slice(0, limit);
+    if (!sorted.length) return `<div class="operators-quick-empty">No rows.</div>`;
+    return sorted.map((row) => {
+        const rounds = toNumber(row?.rounds, 0);
+        const delta = toNumber(row?.delta_vs_baseline, 0);
+        const confidence = operatorsConfidenceBand(rounds);
+        return (
+            `<div class="operators-detail-row">` +
+            `<div class="operators-detail-op">` +
+            `<span>${escapeHtml(String(row?.operator || "Unknown"))}</span>` +
+            `<span class="operators-detail-confidence ${confidence}">${operatorsConfidenceLabel(rounds)}</span>` +
+            `</div>` +
+            `<div class="operators-detail-metrics">` +
+            `<span class="${delta >= 0 ? "pos" : "neg"}">${delta >= 0 ? "+" : ""}${formatFixed(delta, 1)}%</span>` +
+            `<span>WR ${formatFixed(toNumber(row?.win_rate, 0), 1)}%</span>` +
+            `<span>n=${rounds}</span>` +
+            `<span>FK ${formatFixed(toNumber(row?.fk_rate, 0), 1)}%</span>` +
+            `<span>FD ${formatFixed(toNumber(row?.fd_rate, 0), 1)}%</span>` +
+            `<span>KD ${formatFixed(toNumber(row?.kd, 0), 2)}</span>` +
+            `</div>` +
+            `</div>`
+        );
+    }).join("");
+}
+
+function renderOperatorsMapDetail(mapNameOverride = "") {
+    const panel = document.getElementById("operators-map-detail");
+    const body = document.getElementById("operators-map-detail-body");
+    const title = document.getElementById("operators-detail-title");
+    const sideSel = document.getElementById("operators-detail-side");
+    const limitSel = document.getElementById("operators-detail-limit");
+    if (!panel || !body || !title || !sideSel || !limitSel) return;
+    const maps = Array.isArray(operatorsLastPayload?.maps) ? operatorsLastPayload.maps : [];
+    if (!maps.length) {
+        panel.classList.add("hidden");
+        body.innerHTML = `<div class="compute-value">No map details available.</div>`;
+        return;
+    }
+    const requested = String(mapNameOverride || operatorsSelectedMap || "").trim();
+    const active = maps.find((m) => String(m?.map_name || "") === requested) || maps[0];
+    operatorsSelectedMap = String(active?.map_name || "");
+    const side = String(sideSel.value || "all");
+    const limit = Math.max(1, toNumber(limitSel.value, 10));
+    const sections = [];
+    if (side === "all" || side === "atk") {
+        sections.push(
+            `<section class="operators-detail-side">` +
+            `<h4>ATK Evidence</h4>` +
+            `<div class="operators-detail-columns">` +
+            `<div><div class="operators-detail-subtitle">Top ${limit}</div>${renderOperatorsDetailRows(Array.isArray(active?.atk) ? active.atk : [], "up", limit)}</div>` +
+            `<div><div class="operators-detail-subtitle">Bottom ${limit}</div>${renderOperatorsDetailRows(Array.isArray(active?.atk) ? active.atk : [], "down", limit)}</div>` +
+            `</div>` +
+            `</section>`
+        );
+    }
+    if (side === "all" || side === "def") {
+        sections.push(
+            `<section class="operators-detail-side">` +
+            `<h4>DEF Evidence</h4>` +
+            `<div class="operators-detail-columns">` +
+            `<div><div class="operators-detail-subtitle">Top ${limit}</div>${renderOperatorsDetailRows(Array.isArray(active?.def) ? active.def : [], "up", limit)}</div>` +
+            `<div><div class="operators-detail-subtitle">Bottom ${limit}</div>${renderOperatorsDetailRows(Array.isArray(active?.def) ? active.def : [], "down", limit)}</div>` +
+            `</div>` +
+            `</section>`
+        );
+    }
+    title.textContent = `${operatorsSelectedMap} Detail (n=${toNumber(active?.total_rounds, 0)})`;
+    body.innerHTML = sections.join("") || `<div class="compute-value">No rows for selected side.</div>`;
+    panel.classList.remove("hidden");
 }
 
 function renderOperatorsMapCards(payload) {
     const grid = document.getElementById("operators-map-grid");
     const lowWrap = document.getElementById("operators-low-data");
     if (!grid || !lowWrap) return;
+    operatorsLastPayload = payload || null;
     const maps = Array.isArray(payload?.maps) ? payload.maps : [];
     const low = Array.isArray(payload?.low_data_maps) ? payload.low_data_maps : [];
     if (!maps.length && !low.length) {
         grid.innerHTML = `<div class="compute-value">No operator map data found for current filters.</div>`;
         lowWrap.innerHTML = "";
+        renderOperatorsMapDetail("");
         return;
     }
+    const topK = Math.max(1, toNumber(document.getElementById("operators-topk")?.value, 5));
+    const advanced = document.getElementById("operators-advanced")?.checked === true;
+    const includeLowSample = document.getElementById("operators-include-low-sample")?.checked === true;
+    const recommendationBlock = (sideKey, rows) => {
+        const list = (Array.isArray(rows) ? rows : []).filter((row) => includeLowSample || row?.meets_min_rounds !== false);
+        const top = list
+            .slice()
+            .sort((a, b) => toNumber(b?.delta_vs_baseline, 0) - toNumber(a?.delta_vs_baseline, 0))
+            .slice(0, 3)
+            .map((r) => String(r?.operator || "Unknown"));
+        const bottom = list
+            .slice()
+            .sort((a, b) => toNumber(a?.delta_vs_baseline, 0) - toNumber(b?.delta_vs_baseline, 0))
+            .slice(0, 2)
+            .map((r) => String(r?.operator || "Unknown"));
+        return (
+            `<div class="operators-reco-card">` +
+            `<strong>${sideKey.toUpperCase()} Recommendation</strong>` +
+            `<span>Core: ${escapeHtml(top.join(", ") || "N/A")}</span>` +
+            `<span>Avoid: ${escapeHtml(bottom.join(", ") || "N/A")}</span>` +
+            `</div>`
+        );
+    };
+    if (operatorsSelectedMap && !maps.some((m) => String(m?.map_name || "") === operatorsSelectedMap)) {
+        operatorsSelectedMap = "";
+    }
     grid.innerHTML = maps.map((m) => (
-        `<section class="operators-map-card">` +
-        `<header class="operators-map-head"><strong>${escapeHtml(String(m?.map_name || "Unknown"))}</strong><span>(n=${toNumber(m?.total_rounds, 0)})</span></header>` +
+        `<section class="operators-map-card ${operatorsSelectedMap === String(m?.map_name || "") ? "selected" : ""} ${advanced ? "is-advanced" : ""}" data-operators-map="${escapeHtml(String(m?.map_name || ""))}">` +
+        `<header class="operators-map-head">` +
+        `<strong>${escapeHtml(String(m?.map_name || "Unknown"))}</strong><span>(n=${toNumber(m?.total_rounds, 0)})</span>` +
+        `<button type="button" class="operators-drill-btn" data-operators-map-drill="${escapeHtml(String(m?.map_name || ""))}">Drilldown</button>` +
+        `</header>` +
+        `<div class="operators-map-bias" data-ui-tooltip="Map baseline split: attacker win% versus defender win%.">` +
+        `<span>Map Bias</span>` +
+        `<div class="operators-map-bias-bar">` +
+        `<div class="operators-map-bias-atk" style="width:${Math.max(0, Math.min(100, toNumber(m?.baseline_atk, 0))).toFixed(2)}%"></div>` +
+        `<div class="operators-map-bias-def" style="width:${Math.max(0, Math.min(100, toNumber(m?.baseline_def, 0))).toFixed(2)}%"></div>` +
+        `</div>` +
+        `<span>ATK ${formatFixed(toNumber(m?.baseline_atk, 0), 1)}% | DEF ${formatFixed(toNumber(m?.baseline_def, 0), 1)}%</span>` +
+        `</div>` +
+        `<div class="operators-reco-strip">` +
+        `${recommendationBlock("atk", m?.atk)}` +
+        `${recommendationBlock("def", m?.def)}` +
+        `</div>` +
+        `<div class="operators-quick-wrap">` +
+        `${renderOperatorsTopBottomList("atk", m?.atk, topK)}` +
+        `${renderOperatorsTopBottomList("def", m?.def, topK)}` +
+        `</div>` +
         `<div class="operators-side-block">` +
         `<div class="operators-side-title">ATK baseline ${formatFixed(toNumber(m?.baseline_atk, 0), 1)}%</div>` +
         `${renderOperatorSideLine("atk", toNumber(m?.baseline_atk, 0), m?.atk)}` +
@@ -1644,11 +2003,33 @@ function renderOperatorsMapCards(payload) {
     } else {
         lowWrap.innerHTML = "";
     }
+    if (operatorsSelectedMap) {
+        renderOperatorsMapDetail(operatorsSelectedMap);
+    } else {
+        document.getElementById("operators-map-detail")?.classList.add("hidden");
+    }
+    const apiEntryCount = maps.reduce((acc, m) => acc + (Array.isArray(m?.atk) ? m.atk.length : 0) + (Array.isArray(m?.def) ? m.def.length : 0), 0);
+    const hiddenByThreshold = maps.reduce((acc, m) => acc + toNumber(m?.filtered_out_by_min_rounds, 0), 0);
+    const activeEntryCount = includeLowSample ? apiEntryCount : Math.max(0, apiEntryCount - hiddenByThreshold);
+    if (!includeLowSample && apiEntryCount > 0 && activeEntryCount === 0) {
+        grid.innerHTML = (
+            `<div class="compute-value">0 operators meet the current min-round threshold. ` +
+            `Threshold is applied per map+side+operator. Try lowering min rounds or enable Include low sample.</div>` +
+            `<button id="operators-lower-threshold" class="ui-button ui-button--secondary" type="button">Lower threshold to 3</button>`
+        );
+    }
+    if (hiddenByThreshold > 0) {
+        lowWrap.innerHTML += `<div class="operators-low-row">Why empty? ${hiddenByThreshold} operator rows were hidden by min-round threshold.</div>`;
+    }
+    console.info(
+        `[Operators] API maps=${maps.length} api_entries=${apiEntryCount} hidden_by_min_rounds=${hiddenByThreshold} include_low=${includeLowSample} active_entries=${activeEntryCount}`
+    );
 }
 
 async function loadOperatorsPlayersList() {
     const sel = document.getElementById("operators-player");
     if (!sel) return;
+    const current = String(sel.value || "").trim();
     let names = operatorsPlayerListCache.slice();
     if (!names.length) {
         try {
@@ -1664,19 +2045,36 @@ async function loadOperatorsPlayersList() {
     }
     const fallback = getPrimaryUsernameForPlayers();
     const merged = new Set(names);
+    if (current) merged.add(current);
     if (fallback) merged.add(fallback);
     const finalNames = Array.from(merged).sort((a, b) => a.localeCompare(b));
     sel.innerHTML = finalNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
-    if (fallback && finalNames.includes(fallback)) sel.value = fallback;
+    if (current && finalNames.includes(current)) {
+        sel.value = current;
+    } else if (fallback && finalNames.includes(fallback)) {
+        sel.value = fallback;
+    }
+}
+
+function buildOperatorsScope() {
+    return {
+        username: getOperatorsActiveUsername(),
+        stack: String(document.getElementById("operators-stack")?.value || "all"),
+        matchType: String(document.getElementById("operators-match-type")?.value || "Ranked"),
+        minRounds: toNumber(document.getElementById("operators-min-rounds")?.value, 5),
+        includeLowSample: document.getElementById("operators-include-low-sample")?.checked === true,
+    };
 }
 
 async function loadOperatorsTab(silent = false) {
     const grid = document.getElementById("operators-map-grid");
     if (!grid) return;
     await loadOperatorsPlayersList();
-    const username = getOperatorsActiveUsername();
-    const stack = String(document.getElementById("operators-stack")?.value || "solo");
-    const matchType = String(document.getElementById("operators-match-type")?.value || "Ranked");
+    const scope = buildOperatorsScope();
+    const username = scope.username;
+    const stack = scope.stack;
+    const matchType = scope.matchType;
+    const minRounds = scope.minRounds;
     if (!username) {
         grid.innerHTML = `<div class="compute-value">Select a player to load operator map breakdown.</div>`;
         return;
@@ -1685,7 +2083,7 @@ async function loadOperatorsTab(silent = false) {
         grid.innerHTML = `<div class="compute-value">Loading operator map breakdown...</div>`;
     }
     try {
-        const res = await api.getOperatorsMapBreakdown(username, stack, matchType);
+        const res = await api.getOperatorsMapBreakdown(username, stack, matchType, minRounds);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const payload = await res.json();
         renderOperatorsMapCards(payload);
@@ -1907,12 +2305,10 @@ function renderDashboardActiveFilterChips() {
     if (include.size) chips.push(`Include: ${Array.from(include).join(", ")}`);
     if (exclude.size) chips.push(`Exclude: ${Array.from(exclude).join(", ")}`);
     if (!chips.length) {
-        target.innerHTML = `<span class="dashboard-filter-chip empty">No active dashboard filters</span>`;
+        target.replaceChildren(createChip({ label: "No active dashboard filters", tone: "info", className: "dashboard-filter-chip empty" }));
         return;
     }
-    target.innerHTML = chips
-        .map((label) => `<span class="dashboard-filter-chip">${escapeHtml(label)}</span>`)
-        .join("");
+    target.replaceChildren(...chips.map((label) => createChip({ label, tone: "accent", className: "dashboard-filter-chip" })));
 }
 
 function renderDashboardNeedsUsernamePrompt() {
@@ -3770,9 +4166,28 @@ function renderDashboardGraphs() {
     const wrap = document.getElementById("dashboard-graphs-content");
     const heatWrap = document.getElementById("dashboard-heatmap-content");
     const mapWrap = document.getElementById("dashboard-mapperf-content");
+    const flagshipWrap = document.getElementById("dashboard-flagship-content");
     if (!wrap) return;
     if (mapWrap) {
         mapWrap.innerHTML = renderMapPerformanceGraph(computeReportState.map);
+    }
+    if (flagshipWrap) {
+        const round = computeReportState.round || {};
+        const stats = computeReportState.stats || {};
+        const openingDelta = toNumber(round?.first_blood_win_delta, toNumber(round?.fb_delta, 0));
+        const endReasons = Array.isArray(round?.top_end_reasons) ? round.top_end_reasons : [];
+        const endReasonLabel = endReasons.length ? `${String(endReasons[0]?.reason || "Unknown")} (${toNumber(endReasons[0]?.rounds, 0)})` : "No end-reason data";
+        const rollingRecent = toNumber(stats?.recent_window?.win_pct, toNumber(stats?.recent_win_pct, 0));
+        const card = createCard({
+            title: "Trajectory / Maps / Operators / Sessions / Rounds / Context",
+            bodyHtml:
+                `<div class="dashboard-flagship-grid">` +
+                `<div class="dashboard-flagship-item"><div class="label">Opening Impact</div><div class="value">${openingDelta >= 0 ? "+" : ""}${formatFixed(openingDelta, 1)}%</div></div>` +
+                `<div class="dashboard-flagship-item"><div class="label">End Reasons</div><div class="value">${escapeHtml(endReasonLabel)}</div></div>` +
+                `<div class="dashboard-flagship-item"><div class="label">Rolling Win%</div><div class="value">${formatFixed(rollingRecent, 1)}%</div></div>` +
+                `</div>`,
+        });
+        flagshipWrap.replaceChildren(card);
     }
     if (heatWrap) {
         heatWrap.innerHTML = renderAtkDefHeatmap(computeReportState.atkDefHeatmap);
@@ -3889,14 +4304,16 @@ function renderMapPerformanceGraph(mapAnalysis) {
         const defLabel = def == null ? "N/A" : `${formatFixed(def, 1)}%`;
         return `
             <div class="map-perf-row">
-                <div class="map-perf-label">${escapeHtml(row.map_name)} <span class="map-perf-rounds">(n=${toNumber(row.rounds, 0)})</span></div>
+                <div class="map-perf-label"><span class="map-perf-map-name">${escapeHtml(row.map_name)}</span><span class="map-perf-rounds">n=${toNumber(row.rounds, 0)}</span></div>
                 <div class="map-perf-bars">
                     <div class="map-perf-midline" aria-hidden="true"></div>
                     <div class="map-perf-bar-lane atk">
+                        <span class="map-perf-side-tag atk">ATK</span>
                         <div class="map-perf-bar ${atkTone}" style="width:${atkWidth.toFixed(2)}%"></div>
                         <span class="map-perf-bar-value">${atkLabel}</span>
                     </div>
                     <div class="map-perf-bar-lane def">
+                        <span class="map-perf-side-tag def">DEF</span>
                         <div class="map-perf-bar ${defTone}" style="width:${defWidth.toFixed(2)}%"></div>
                         <span class="map-perf-bar-value">${defLabel}</span>
                     </div>
@@ -3950,6 +4367,7 @@ function persistWorkspaceState() {
     const filters = getWorkspaceFiltersFromUI();
     const params = new URLSearchParams(window.location.search);
     params.set("ws_panel", computeReportState.workspace.panel || "overview");
+    params.set("ws_view", computeReportState.workspace.panel || "overview");
     ["days", "queue", "playlist", "map_name", "stack_only", "search"].forEach((k) => {
         if (filters[k] && String(filters[k]).trim() !== "") params.set(`ws_${k}`, filters[k]);
         else params.delete(`ws_${k}`);
@@ -3969,9 +4387,39 @@ function persistWorkspaceState() {
     localStorage.setItem("jakal_workspace_prefs_v1", JSON.stringify(prefs));
 }
 
+function mountWorkspaceTopLevel() {
+    const source = document.getElementById("graph-panel-workspace");
+    const host = document.getElementById("workspace-top-level-host");
+    if (!source || !host) return;
+    if (host.contains(source)) return;
+    host.innerHTML = "";
+    host.appendChild(source);
+    source.hidden = false;
+    const workspaceGraphTab = document.getElementById("graph-tab-workspace");
+    if (workspaceGraphTab) {
+        workspaceGraphTab.hidden = true;
+        workspaceGraphTab.setAttribute("aria-hidden", "true");
+        workspaceGraphTab.classList.remove("active");
+        workspaceGraphTab.setAttribute("aria-selected", "false");
+    }
+    const threatGraphTab = document.getElementById("graph-tab-threat");
+    if (threatGraphTab) {
+        threatGraphTab.classList.add("active");
+        threatGraphTab.setAttribute("aria-selected", "true");
+    }
+    computeReportState.graphPanel = "threat";
+}
+
+function isWorkspaceMountedTopLevel() {
+    const source = document.getElementById("graph-panel-workspace");
+    const host = document.getElementById("workspace-top-level-host");
+    if (!source || !host) return false;
+    return host.contains(source);
+}
+
 function restoreWorkspaceState() {
     const params = new URLSearchParams(window.location.search);
-    const panel = params.get("ws_panel") || "overview";
+    const panel = params.get("ws_panel") || params.get("ws_view") || "overview";
     computeReportState.workspace.panel = panel;
     const map = {
         ws_days: "ws-days",
@@ -4010,6 +4458,13 @@ function restoreWorkspaceState() {
     } catch (_) {
         // ignore persisted view parse failures
     }
+}
+
+function restorePrimaryTabFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const panel = String(params.get("panel") || "").trim().toLowerCase();
+    const allowed = new Set(["scanner", "matches", "stored", "players", "team-builder", "operators", "workspace", "dashboard"]);
+    return allowed.has(panel) ? panel : "scanner";
 }
 
 function setWorkspacePanel(panel) {
@@ -4131,8 +4586,346 @@ function renderWorkspaceMatchups(payload) {
     return `${renderAtkDefHeatmap(m)}${renderThreatBars(m)}`;
 }
 
+function getWorkspaceTeamUiState() {
+    const ws = computeReportState.workspace || {};
+    if (!ws.teamUi) ws.teamUi = {};
+    ws.teamUi.minMatches = Math.max(1, toNumber(ws.teamUi.minMatches, 5));
+    ws.teamUi.minRounds = Math.max(1, toNumber(ws.teamUi.minRounds, 30));
+    ws.teamUi.polarity = String(ws.teamUi.polarity || "all");
+    ws.teamUi.hideNeutral = ws.teamUi.hideNeutral === true;
+    ws.teamUi.neutralThreshold = Math.max(0.1, toNumber(ws.teamUi.neutralThreshold, 1));
+    ws.teamUi.sortBy = String(ws.teamUi.sortBy || "rounds");
+    ws.teamUi.sortDir = String(ws.teamUi.sortDir || "desc") === "asc" ? "asc" : "desc";
+    ws.teamUi.selectedPairKey = String(ws.teamUi.selectedPairKey || "");
+    return ws.teamUi;
+}
+
+function workspaceTeamPairKey(row) {
+    const a = String(row?.teammate_a || "").trim().toLowerCase();
+    const b = String(row?.teammate_b || "").trim().toLowerCase();
+    if (a && b) return [a, b].sort().join("||");
+    const raw = String(row?.pair || "").trim().toLowerCase();
+    if (!raw) return "";
+    const bits = raw.split("+").map((p) => p.trim()).filter(Boolean);
+    if (bits.length >= 2) return [bits[0], bits[1]].sort().join("||");
+    return raw;
+}
+
+function workspaceTeamConfidence(rounds) {
+    const n = toNumber(rounds, 0);
+    if (n >= 150) return { label: "HIGH", cls: "high" };
+    if (n >= 80) return { label: "MED", cls: "med" };
+    if (n >= 30) return { label: "LOW", cls: "low" };
+    return { label: "VERY LOW", cls: "verylow" };
+}
+
+function workspaceTeamDeltaBucket(delta) {
+    if (delta >= 8) return "strong-pos";
+    if (delta >= 2) return "mild-pos";
+    if (delta <= -8) return "strong-neg";
+    if (delta <= -2) return "mild-neg";
+    return "neutral";
+}
+
+function workspaceTeamSortRows(rows, sortBy, sortDir) {
+    const dir = sortDir === "asc" ? 1 : -1;
+    const cmpNumber = (a, b, k) => (toNumber(a?.[k], 0) - toNumber(b?.[k], 0));
+    const cmpString = (a, b, k) => String(a?.[k] || "").localeCompare(String(b?.[k] || ""));
+    const cmp = (a, b) => {
+        let primary = 0;
+        if (sortBy === "pair") primary = cmpString(a, b, "pair");
+        else if (sortBy === "abs_delta") primary = Math.abs(toNumber(a?.delta_vs_user_baseline, 0)) - Math.abs(toNumber(b?.delta_vs_user_baseline, 0));
+        else primary = cmpNumber(a, b, sortBy);
+        if (primary !== 0) return primary * dir;
+        const t1 = cmpNumber(a, b, "rounds_n");
+        if (t1 !== 0) return -t1;
+        const t2 = Math.abs(toNumber(a?.delta_vs_user_baseline, 0)) - Math.abs(toNumber(b?.delta_vs_user_baseline, 0));
+        if (t2 !== 0) return -t2;
+        const t3 = cmpNumber(a, b, "matches_n");
+        if (t3 !== 0) return -t3;
+        return cmpString(a, b, "pair");
+    };
+    return rows.slice().sort(cmp);
+}
+
+function renderWorkspaceTeamInspector(row, baseline, clampAbs = 15) {
+    const ins = document.getElementById("workspace-inspector");
+    if (!ins) return;
+    if (!row) {
+        ins.innerHTML = `<div class="compute-label">Inspector</div><div class="compute-value">Click a heatmap cell or table row to inspect a teammate pair.</div>`;
+        return;
+    }
+    const delta = toNumber(row?.delta_vs_user_baseline, 0);
+    const c = workspaceTeamConfidence(toNumber(row?.rounds_n, 0));
+    const pair = String(row?.pair || "").trim();
+    const pairKey = workspaceTeamPairKey(row);
+    const leftPct = delta < 0 ? (Math.min(clampAbs, Math.abs(delta)) / clampAbs) * 50 : 0;
+    const rightPct = delta > 0 ? (Math.min(clampAbs, Math.abs(delta)) / clampAbs) * 50 : 0;
+    const deltaTooltip = `Δ vs baseline: ${delta >= 0 ? "+" : ""}${formatFixed(delta, 2)} percentage points`;
+    ins.innerHTML = `
+        <div class="compute-label">Inspector: ${escapeHtml(pair)}</div>
+        <div class="dashboard-graph-summary">
+            <span>Win% <strong>${formatFixed(toNumber(row?.win_rate, 0), 2)}%</strong></span>
+            <span>User baseline (scope win%) <strong>${formatFixed(baseline, 2)}%</strong></span>
+            <span>Matches <strong>${toNumber(row?.matches_n, 0)}</strong></span>
+            <span>Rounds <strong>${toNumber(row?.rounds_n, 0)}</strong></span>
+            <span>Confidence <strong>${c.label}</strong></span>
+        </div>
+        <div class="workspace-team-delta-center">
+            <span class="workspace-team-delta-value ${delta >= 0 ? "pos" : "neg"}" title="${escapeHtml(deltaTooltip)}">${delta >= 0 ? "+" : ""}${formatFixed(delta, 2)}pp</span>
+            <div class="workspace-team-zero-bar" title="${escapeHtml(deltaTooltip)}">
+                <span class="workspace-team-zero-center"></span>
+                <span class="workspace-team-zero-fill neg" style="left:calc(50% - ${leftPct.toFixed(2)}%);width:${leftPct.toFixed(2)}%"></span>
+                <span class="workspace-team-zero-fill pos" style="left:50%;width:${rightPct.toFixed(2)}%"></span>
+            </div>
+        </div>
+        <div class="dashboard-graph-summary">
+            <button id="ws-team-filter-selected" type="button" data-pair-key="${escapeHtml(pairKey)}">Filter to this pair</button>
+            <button id="ws-team-clear-selected" type="button">Clear selection</button>
+        </div>
+    `;
+}
+
 function renderWorkspaceTeam(payload) {
-    return `<div class="compute-value">${escapeHtml(payload?.team?.message || "Team workspace ready.")}</div>`;
+    const pairs = Array.isArray(payload?.pairs) ? payload.pairs : [];
+    const teamUi = getWorkspaceTeamUiState();
+    const isPartial = payload?.is_partial === true;
+    const reason = String(payload?.reason || "").trim();
+    const baseline = toNumber(payload?.baseline_win_rate, 0);
+    const scopeMatches = toNumber(payload?.scope?.match_ids, 0);
+    const clampAbs = Math.max(5, toNumber(document.getElementById("ws-clamp-abs")?.value, 15));
+
+    const withKey = pairs.map((row) => ({ ...row, __pairKey: workspaceTeamPairKey(row) }));
+    const counts = { minMatches: 0, minRounds: 0, polarity: 0, neutral: 0, selected: 0 };
+    const filtered = withKey.filter((row) => {
+        const matchesN = toNumber(row?.matches_n, 0);
+        const roundsN = toNumber(row?.rounds_n, 0);
+        const delta = toNumber(row?.delta_vs_user_baseline, 0);
+        if (matchesN < teamUi.minMatches) {
+            counts.minMatches += 1;
+            return false;
+        }
+        if (roundsN < teamUi.minRounds) {
+            counts.minRounds += 1;
+            return false;
+        }
+        if (teamUi.polarity === "positive" && delta < 0) {
+            counts.polarity += 1;
+            return false;
+        }
+        if (teamUi.polarity === "negative" && delta > 0) {
+            counts.polarity += 1;
+            return false;
+        }
+        if (teamUi.hideNeutral && Math.abs(delta) < teamUi.neutralThreshold) {
+            counts.neutral += 1;
+            return false;
+        }
+        if (teamUi.selectedPairKey && teamUi.selectedPairKey !== row.__pairKey) {
+            counts.selected += 1;
+            return false;
+        }
+        return true;
+    });
+    const sortedRows = workspaceTeamSortRows(filtered, teamUi.sortBy, teamUi.sortDir);
+    const pairCount = sortedRows.length;
+    const reliableCount = sortedRows.filter((p) => toNumber(p?.matches_n, 0) >= 5).length;
+    const avgPairDelta = pairCount
+        ? sortedRows.reduce((acc, p) => acc + toNumber(p?.delta_vs_user_baseline, 0), 0) / pairCount
+        : 0;
+
+    const topPositive = sortedRows
+        .filter((p) => toNumber(p?.matches_n, 0) >= 3)
+        .slice()
+        .sort((a, b) => toNumber(b?.delta_vs_user_baseline, 0) - toNumber(a?.delta_vs_user_baseline, 0))
+        .slice(0, 5);
+    const topNegative = sortedRows
+        .filter((p) => toNumber(p?.matches_n, 0) >= 3)
+        .slice()
+        .sort((a, b) => toNumber(a?.delta_vs_user_baseline, 0) - toNumber(b?.delta_vs_user_baseline, 0))
+        .slice(0, 5);
+
+    const renderQuickList = (rows, tone) => {
+        if (!rows.length) return `<div class="workspace-team-empty">Not enough pairs after current filters.</div>`;
+        return rows.map((row) => {
+            const d = toNumber(row?.delta_vs_user_baseline, 0);
+            return (
+                `<button class="workspace-team-quick-row ${tone}" type="button" data-pair-key="${escapeHtml(String(row.__pairKey || ""))}">` +
+                `<span class="workspace-team-quick-pair">${escapeHtml(String(row?.pair || ""))}</span>` +
+                `<span class="workspace-team-quick-meta">` +
+                `${formatFixed(toNumber(row?.win_rate, 0), 1)}% WR (${d >= 0 ? "+" : ""}${formatFixed(d, 1)}pp) · ${toNumber(row?.matches_n, 0)} matches · ${toNumber(row?.rounds_n, 0)} rounds` +
+                `</span>` +
+                `</button>`
+            );
+        }).join("");
+    };
+
+    const teammateTotals = new Map();
+    sortedRows.forEach((row) => {
+        const roundsN = toNumber(row?.rounds_n, 0);
+        const a = String(row?.teammate_a || "").trim();
+        const b = String(row?.teammate_b || "").trim();
+        if (a) teammateTotals.set(a, toNumber(teammateTotals.get(a), 0) + roundsN);
+        if (b) teammateTotals.set(b, toNumber(teammateTotals.get(b), 0) + roundsN);
+    });
+    const heatNames = [...teammateTotals.entries()]
+        .sort((x, y) => toNumber(y[1], 0) - toNumber(x[1], 0))
+        .slice(0, 12)
+        .map(([name]) => name);
+    const heatNameSet = new Set(heatNames.map((n) => n.toLowerCase()));
+    const pairByKey = new Map(sortedRows.map((r) => [String(r.__pairKey || ""), r]));
+    const heatRows = sortedRows.filter((row) => heatNameSet.has(String(row?.teammate_a || "").toLowerCase()) && heatNameSet.has(String(row?.teammate_b || "").toLowerCase()));
+    heatRows.forEach((row) => pairByKey.set(String(row.__pairKey || ""), row));
+    const heatmap = heatNames.length > 1 ? `
+        <div class="workspace-team-heat-wrap">
+            <div class="workspace-team-heat-head">
+                <h4>Synergy Matrix (delta vs baseline)</h4>
+                <button id="ws-team-clear-selection" type="button">Clear selection</button>
+            </div>
+            <div class="workspace-team-heat-grid" style="grid-template-columns: 130px repeat(${heatNames.length}, minmax(52px, 1fr));">
+                <span class="workspace-team-heat-corner"></span>
+                ${heatNames.map((n) => `<span class="workspace-team-heat-col">${escapeHtml(n)}</span>`).join("")}
+                ${heatNames.map((rowName) => {
+                    const rowKey = rowName.toLowerCase();
+                    const cells = heatNames.map((colName) => {
+                        const colKey = colName.toLowerCase();
+                        if (rowKey === colKey) return `<span class="workspace-team-heat-cell diag">-</span>`;
+                        const pKey = [rowKey, colKey].sort().join("||");
+                        const rec = pairByKey.get(pKey);
+                        if (!rec) return `<button class="workspace-team-heat-cell nodata" type="button" disabled title="No data">-</button>`;
+                        const delta = toNumber(rec?.delta_vs_user_baseline, 0);
+                        const c = workspaceTeamConfidence(toNumber(rec?.rounds_n, 0));
+                        const bucket = workspaceTeamDeltaBucket(delta);
+                        const lowSample = toNumber(rec?.rounds_n, 0) < 80 ? " low-sample" : "";
+                        const tip = `${rec.pair}\n${toNumber(rec.matches_n, 0)} matches · ${toNumber(rec.rounds_n, 0)} rounds\n${formatFixed(toNumber(rec.win_rate, 0), 2)}% WR\nΔ vs baseline: ${delta >= 0 ? "+" : ""}${formatFixed(delta, 2)}pp\nConfidence: ${c.label}`;
+                        return `<button class="workspace-team-heat-cell ${bucket}${lowSample}${teamUi.selectedPairKey === pKey ? " selected" : ""}" type="button" data-pair-key="${escapeHtml(pKey)}" title="${escapeHtml(tip)}">${delta >= 0 ? "+" : ""}${formatFixed(delta, 1)}</button>`;
+                    }).join("");
+                    return `<span class="workspace-team-heat-rowname">${escapeHtml(rowName)}</span>${cells}`;
+                }).join("")}
+            </div>
+        </div>
+    ` : `<div class="workspace-team-empty">Need at least 2 teammates after filters to render synergy matrix.</div>`;
+
+    const sortIcon = (key) => teamUi.sortBy === key ? (teamUi.sortDir === "desc" ? "↓" : "↑") : "";
+    const tableRows = sortedRows.slice(0, 120).map((row, idx) => {
+        const delta = toNumber(row?.delta_vs_user_baseline, 0);
+        const c = workspaceTeamConfidence(toNumber(row?.rounds_n, 0));
+        const absPct = (Math.min(clampAbs, Math.abs(delta)) / clampAbs) * 50;
+        const leftPct = delta < 0 ? absPct : 0;
+        const rightPct = delta > 0 ? absPct : 0;
+        const deltaTip = `Δ vs baseline: ${delta >= 0 ? "+" : ""}${formatFixed(delta, 2)} percentage points`;
+        return (
+            `<button class="workspace-team-row${teamUi.selectedPairKey === row.__pairKey ? " selected" : ""}" type="button" data-pair-key="${escapeHtml(String(row.__pairKey || ""))}">` +
+            `<span class="workspace-team-rank">${idx + 1}</span>` +
+            `<span class="workspace-team-pair">${escapeHtml(String(row?.pair || ""))}</span>` +
+            `<span>${toNumber(row?.matches_n, 0)}</span>` +
+            `<span>${toNumber(row?.rounds_n, 0)}</span>` +
+            `<span>${toNumber(row?.wins_n, 0)}</span>` +
+            `<span>${formatFixed(toNumber(row?.win_rate, 0), 2)}%</span>` +
+            `<span class="workspace-team-delta-center">` +
+            `<span class="workspace-team-delta-value ${delta >= 0 ? "pos" : "neg"}" title="${escapeHtml(deltaTip)}">${delta >= 0 ? "+" : ""}${formatFixed(delta, 2)}pp</span>` +
+            `<span class="workspace-team-zero-bar" title="${escapeHtml(deltaTip)}">` +
+            `<span class="workspace-team-zero-center"></span>` +
+            `<span class="workspace-team-zero-fill neg" style="left:calc(50% - ${leftPct.toFixed(2)}%);width:${leftPct.toFixed(2)}%"></span>` +
+            `<span class="workspace-team-zero-fill pos" style="left:50%;width:${rightPct.toFixed(2)}%"></span>` +
+            `</span>` +
+            `</span>` +
+            `<span class="workspace-team-conf ${c.cls}">${c.label}</span>` +
+            `</button>`
+        );
+    }).join("");
+
+    const meta = `
+        <div class="dashboard-graph-summary">
+            <span>Scope matches <strong>${scopeMatches}</strong></span>
+            <span>User baseline (scope win%) <strong>${formatFixed(baseline, 2)}%</strong></span>
+            <span>Cache <strong>${payload?.cache_hit ? "hit" : "miss"}</strong></span>
+            <span>Compute <strong>${toNumber(payload?.compute_ms, 0)}ms</strong></span>
+        </div>
+    `;
+    const filterBar = `
+        <div class="workspace-team-filters">
+            <label>Min matches
+                <select id="ws-team-min-matches">
+                    <option value="5" ${teamUi.minMatches === 5 ? "selected" : ""}>5</option>
+                    <option value="10" ${teamUi.minMatches === 10 ? "selected" : ""}>10</option>
+                    <option value="20" ${teamUi.minMatches === 20 ? "selected" : ""}>20</option>
+                </select>
+            </label>
+            <label>Min rounds
+                <select id="ws-team-min-rounds">
+                    <option value="30" ${teamUi.minRounds === 30 ? "selected" : ""}>30</option>
+                    <option value="60" ${teamUi.minRounds === 60 ? "selected" : ""}>60</option>
+                    <option value="120" ${teamUi.minRounds === 120 ? "selected" : ""}>120</option>
+                </select>
+            </label>
+            <label>Polarity
+                <select id="ws-team-polarity">
+                    <option value="all" ${teamUi.polarity === "all" ? "selected" : ""}>All</option>
+                    <option value="positive" ${teamUi.polarity === "positive" ? "selected" : ""}>Positive</option>
+                    <option value="negative" ${teamUi.polarity === "negative" ? "selected" : ""}>Negative</option>
+                </select>
+            </label>
+            <label class="settings-check"><input id="ws-team-hide-neutral" type="checkbox" ${teamUi.hideNeutral ? "checked" : ""}>Hide near-neutral (|delta| &lt; 1pp)</label>
+        </div>
+    `;
+    const partialBanner = isPartial
+        ? `<div class="insights-finding warning"><strong>Partial result</strong> ${escapeHtml(reason || "Scope trimmed for responsiveness.")}<br>` +
+          `<button id="ws-team-quick-30d" type="button">Narrow to 30d</button> ` +
+          `<button id="ws-team-quick-ranked" type="button">Ranked only</button> ` +
+          `<button id="ws-team-force-refresh" type="button">Refresh</button></div>`
+        : "";
+    if (!pairs.length) {
+        return `${meta}${filterBar}${partialBanner}<div class="compute-value">No teammate pairs found for current scope.</div>`;
+    }
+    const emptyReasons = [
+        counts.minMatches ? `${counts.minMatches} removed by min matches` : "",
+        counts.minRounds ? `${counts.minRounds} removed by min rounds` : "",
+        counts.polarity ? `${counts.polarity} removed by polarity` : "",
+        counts.neutral ? `${counts.neutral} removed as near-neutral` : "",
+        counts.selected ? `${counts.selected} hidden by pair selection` : "",
+    ].filter(Boolean).join(" · ");
+    const emptyState = pairCount === 0
+        ? `<div class="insights-finding warning"><strong>Why empty?</strong> ${escapeHtml(emptyReasons || "All rows were filtered out.")}<br>` +
+          `<button id="ws-team-reset-filters" type="button">Reset filters</button> ` +
+          `<button id="ws-team-clear-selection-quick" type="button">Clear selection</button>` +
+          `</div>`
+        : "";
+    return (
+        `${meta}${filterBar}${partialBanner}${emptyState}` +
+        `<div class="workspace-team-kpis">` +
+        `<div class="workspace-team-kpi"><span>Visible pairs</span><strong>${pairCount}</strong></div>` +
+        `<div class="workspace-team-kpi"><span>Reliable pairs (>=5 matches)</span><strong>${reliableCount}</strong></div>` +
+        `<div class="workspace-team-kpi"><span>Avg pair delta</span><strong class="${avgPairDelta >= 0 ? "pos" : "neg"}">${avgPairDelta >= 0 ? "+" : ""}${formatFixed(avgPairDelta, 2)}pp</strong></div>` +
+        `</div>` +
+        `<div class="workspace-team-quick-grid">` +
+        `<section><h4>Top Synergy</h4>${renderQuickList(topPositive, "positive")}</section>` +
+        `<section><h4>Risk Pairs</h4>${renderQuickList(topNegative, "negative")}</section>` +
+        `</div>` +
+        `${heatmap}` +
+        `<div class="workspace-team-table">` +
+        `<div class="workspace-team-header">` +
+        `<strong>#</strong>` +
+        `<button type="button" class="workspace-team-sort" data-sort="pair">Pair ${sortIcon("pair")}</button>` +
+        `<button type="button" class="workspace-team-sort" data-sort="matches_n">Matches ${sortIcon("matches_n")}</button>` +
+        `<button type="button" class="workspace-team-sort" data-sort="rounds_n">Rounds ${sortIcon("rounds_n")}</button>` +
+        `<button type="button" class="workspace-team-sort" data-sort="wins_n">Wins ${sortIcon("wins_n")}</button>` +
+        `<button type="button" class="workspace-team-sort" data-sort="win_rate">Win% ${sortIcon("win_rate")}</button>` +
+        `<button type="button" class="workspace-team-sort" data-sort="delta_vs_user_baseline">Delta vs Baseline ${sortIcon("delta_vs_user_baseline")}</button>` +
+        `<strong>Conf</strong>` +
+        `</div>` +
+        tableRows +
+        `</div>`
+    );
+}
+
+function syncWorkspaceTeamInspectorFromState(payload) {
+    const teamUi = getWorkspaceTeamUiState();
+    const pairs = Array.isArray(payload?.pairs) ? payload.pairs : [];
+    const withKey = pairs.map((row) => ({ ...row, __pairKey: workspaceTeamPairKey(row) }));
+    const selected = withKey.find((row) => String(row.__pairKey || "") === String(teamUi.selectedPairKey || ""));
+    const clampAbs = Math.max(5, toNumber(document.getElementById("ws-clamp-abs")?.value, 15));
+    renderWorkspaceTeamInspector(selected || null, toNumber(payload?.baseline_win_rate, 0), clampAbs);
 }
 
 function renderWorkspacePanel(panel, payload) {
@@ -4176,6 +4969,84 @@ function renderWorkspacePanel(panel, payload) {
                     logCompute(`Workspace evidence failed: ${err}`, "error");
                 }
             });
+        });
+    }
+    if (panel === "team") {
+        const rerenderTeam = () => {
+            const cached = computeReportState.workspace.dataByPanel?.team || payload;
+            if (cached) renderWorkspacePanel("team", cached);
+        };
+        el.querySelector("#ws-team-min-matches")?.addEventListener("change", (ev) => {
+            getWorkspaceTeamUiState().minMatches = Math.max(1, toNumber(ev?.target?.value, 5));
+            rerenderTeam();
+        });
+        el.querySelector("#ws-team-min-rounds")?.addEventListener("change", (ev) => {
+            getWorkspaceTeamUiState().minRounds = Math.max(1, toNumber(ev?.target?.value, 30));
+            rerenderTeam();
+        });
+        el.querySelector("#ws-team-polarity")?.addEventListener("change", (ev) => {
+            getWorkspaceTeamUiState().polarity = String(ev?.target?.value || "all");
+            rerenderTeam();
+        });
+        el.querySelector("#ws-team-hide-neutral")?.addEventListener("change", (ev) => {
+            getWorkspaceTeamUiState().hideNeutral = ev?.target?.checked === true;
+            rerenderTeam();
+        });
+        el.querySelectorAll(".workspace-team-sort").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const sort = String(btn.dataset.sort || "rounds_n");
+                const ui = getWorkspaceTeamUiState();
+                if (ui.sortBy === sort) ui.sortDir = ui.sortDir === "desc" ? "asc" : "desc";
+                else {
+                    ui.sortBy = sort;
+                    ui.sortDir = "desc";
+                }
+                rerenderTeam();
+            });
+        });
+        const selectPairKey = (pairKey) => {
+            const ui = getWorkspaceTeamUiState();
+            ui.selectedPairKey = String(pairKey || "").trim();
+            rerenderTeam();
+        };
+        el.querySelectorAll("[data-pair-key]").forEach((btn) => {
+            btn.addEventListener("click", () => selectPairKey(String(btn.dataset.pairKey || "")));
+        });
+        el.querySelector("#ws-team-clear-selection")?.addEventListener("click", () => selectPairKey(""));
+        el.querySelector("#ws-team-clear-selection-quick")?.addEventListener("click", () => selectPairKey(""));
+        el.querySelector("#ws-team-reset-filters")?.addEventListener("click", () => {
+            const ui = getWorkspaceTeamUiState();
+            ui.minMatches = 5;
+            ui.minRounds = 30;
+            ui.polarity = "all";
+            ui.hideNeutral = false;
+            rerenderTeam();
+        });
+        el.querySelector("#ws-team-quick-30d")?.addEventListener("click", async () => {
+            const daysEl = document.getElementById("ws-days");
+            if (daysEl) daysEl.value = "30";
+            computeReportState.workspace.dataByPanel = {};
+            await loadWorkspacePanel("team", true);
+        });
+        el.querySelector("#ws-team-quick-ranked")?.addEventListener("click", async () => {
+            const queueEl = document.getElementById("ws-queue");
+            if (queueEl) queueEl.value = "ranked";
+            computeReportState.workspace.dataByPanel = {};
+            await loadWorkspacePanel("team", true);
+        });
+        el.querySelector("#ws-team-force-refresh")?.addEventListener("click", async () => {
+            computeReportState.workspace.dataByPanel = {};
+            await loadWorkspacePanel("team", true);
+        });
+        syncWorkspaceTeamInspectorFromState(payload);
+        document.getElementById("ws-team-filter-selected")?.addEventListener("click", () => {
+            const key = String(document.getElementById("ws-team-filter-selected")?.dataset?.pairKey || "");
+            getWorkspaceTeamUiState().selectedPairKey = key;
+            rerenderTeam();
+        });
+        document.getElementById("ws-team-clear-selected")?.addEventListener("click", () => {
+            getWorkspaceTeamUiState().selectedPairKey = "";
+            rerenderTeam();
         });
     }
 }
@@ -4312,6 +5183,41 @@ async function loadWorkspacePanel(panel, force = false) {
     computeReportState.workspace.requestSeq = requestSeq;
     const f = getWorkspaceFiltersFromUI();
     persistWorkspaceState();
+    if (panelKey === "team") {
+        if (target) target.innerHTML = `<div class="compute-value">Building scope...</div>`;
+        const teamQs = new URLSearchParams({
+            ws_days: f.days,
+            ws_queue: f.queue,
+            ws_playlist: f.playlist,
+            ws_map_name: f.map_name,
+            ws_stack_only: f.stack_only,
+            ws_search: f.search,
+            force_refresh: force ? "true" : "false",
+        });
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);
+        let res;
+        try {
+            if (target) target.innerHTML = `<div class="compute-value">Loading cached results...</div>`;
+            res = await api.getWorkspaceTeam(username, teamQs, { signal: ctrl.signal });
+        } catch (err) {
+            if (String(err?.name || "").toLowerCase() === "aborterror") {
+                throw new Error("Team request timed out after 10s");
+            }
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Workspace Team HTTP ${res.status}: ${text}`);
+        }
+        const payload = await res.json();
+        if (requestSeq !== computeReportState.workspace.requestSeq) return;
+        computeReportState.workspace.dataByPanel[panelKey] = payload;
+        renderWorkspacePanel(panelKey, payload);
+        return;
+    }
     const qs = new URLSearchParams({ ...f, panel: panelKey });
     const fetchWorkspace = async (timeoutMs) => {
         const ctrl = new AbortController();
@@ -4402,7 +5308,14 @@ function setGraphPanel(panel) {
     });
     const workspacePanel = document.getElementById("graph-panel-workspace");
     const threatPanel = document.getElementById("graph-panel-threat");
-    if (workspacePanel) workspacePanel.hidden = next !== "workspace";
+    if (workspacePanel) {
+        if (isWorkspaceMountedTopLevel()) {
+            // Top-level Workspace must stay visible independent of dashboard graph tab state.
+            workspacePanel.hidden = false;
+        } else {
+            workspacePanel.hidden = next !== "workspace";
+        }
+    }
     if (threatPanel) threatPanel.hidden = next !== "threat";
 }
 
@@ -4411,6 +5324,8 @@ function initStatusChipMirrors() {
         { sourceId: "scan-status", targetId: "scan-status-chip" },
         { sourceId: "match-status", targetId: "match-status-chip" },
         { sourceId: "stored-total", targetId: "stored-list-chip", prefix: "Items " },
+        { sourceId: "scan-status", targetId: "chip-websocket" },
+        { sourceId: "match-status", targetId: "chip-scraper" },
     ];
     mirrors.forEach(({ sourceId, targetId, prefix = "" }) => {
         const source = document.getElementById(sourceId);
@@ -4424,6 +5339,8 @@ function initStatusChipMirrors() {
         const observer = new MutationObserver(sync);
         observer.observe(source, { childList: true, characterData: true, subtree: true });
     });
+    const dbChip = document.getElementById("chip-db");
+    if (dbChip) dbChip.textContent = "Ready";
 }
 
 function syncFilterDrawerDefaults() {
@@ -5654,6 +6571,7 @@ document.getElementById("tab-stored")?.addEventListener("click", () => setActive
 document.getElementById("tab-players")?.addEventListener("click", () => setActiveTab("players"));
 document.getElementById("tab-team-builder")?.addEventListener("click", () => setActiveTab("team-builder"));
 document.getElementById("tab-operators")?.addEventListener("click", () => setActiveTab("operators"));
+document.getElementById("tab-workspace")?.addEventListener("click", () => setActiveTab("workspace"));
 document.getElementById("tab-dashboard")?.addEventListener("click", () => setActiveTab("dashboard"));
 document.getElementById("dashboard-tab-insights")?.addEventListener("click", () => setDashboardView("insights"));
 document.getElementById("dashboard-tab-graphs")?.addEventListener("click", () => setDashboardView("graphs"));
@@ -5805,10 +6723,50 @@ document.getElementById("players-primary-username")?.addEventListener("blur", ()
 });
 document.getElementById("team-builder-analyze")?.addEventListener("click", analyzeSelectedStack);
 document.getElementById("operators-refresh")?.addEventListener("click", () => loadOperatorsTab(false));
-["operators-player", "operators-stack", "operators-match-type"].forEach((id) => {
+["operators-player", "operators-stack", "operators-match-type", "operators-min-rounds"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("change", () => loadOperatorsTab(true));
+});
+document.getElementById("operators-topk")?.addEventListener("change", () => {
+    if (operatorsLastPayload) {
+        renderOperatorsMapCards(operatorsLastPayload);
+        return;
+    }
+    loadOperatorsTab(true);
+});
+document.getElementById("operators-advanced")?.addEventListener("change", () => {
+    if (operatorsLastPayload) {
+        renderOperatorsMapCards(operatorsLastPayload);
+    }
+});
+document.getElementById("operators-include-low-sample")?.addEventListener("change", () => {
+    if (operatorsLastPayload) {
+        renderOperatorsMapCards(operatorsLastPayload);
+    }
+});
+document.getElementById("operators-detail-side")?.addEventListener("change", () => renderOperatorsMapDetail(operatorsSelectedMap));
+document.getElementById("operators-detail-limit")?.addEventListener("change", () => renderOperatorsMapDetail(operatorsSelectedMap));
+document.getElementById("operators-detail-close")?.addEventListener("click", () => {
+    operatorsSelectedMap = "";
+    document.getElementById("operators-map-detail")?.classList.add("hidden");
+    if (operatorsLastPayload) renderOperatorsMapCards(operatorsLastPayload);
+});
+document.getElementById("operators-map-grid")?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (target.id === "operators-lower-threshold") {
+        const minEl = document.getElementById("operators-min-rounds");
+        if (minEl) minEl.value = "3";
+        loadOperatorsTab(true);
+        return;
+    }
+    const card = target.closest(".operators-map-card");
+    if (!card) return;
+    const mapName = String(card.getAttribute("data-operators-map") || "").trim();
+    if (!mapName) return;
+    operatorsSelectedMap = mapName;
+    if (operatorsLastPayload) renderOperatorsMapCards(operatorsLastPayload);
 });
 
 window.addEventListener("error", (event) => {
@@ -5820,16 +6778,20 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 loadOperatorImageIndex();
-setActiveTab("scanner");
+mountWorkspaceTopLevel();
+restoreWorkspaceState();
+setWorkspacePanel(computeReportState.workspace.panel || "overview");
+const initialPrimaryTab = restorePrimaryTabFromUrl();
+setActiveTab(initialPrimaryTab);
 initDashboardSectionToggles();
 applyDashboardSectionVisibility();
 setDashboardView("insights");
-setGraphPanel(computeReportState.graphPanel || "workspace");
-restoreWorkspaceState();
-setWorkspacePanel(computeReportState.workspace.panel || "overview");
+setGraphPanel(computeReportState.graphPanel || "threat");
 syncScrapeModeControls();
 initPrimaryTabKeyboardNav();
 initStatusChipMirrors();
+initFilterDrawersAndChips();
+initTooltips(document);
 renderDashboardActiveFilterChips();
 settingsModalController.bindDismissHandlers();
 syncFilterDrawerDefaults();

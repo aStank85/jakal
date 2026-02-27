@@ -82,6 +82,10 @@ export function createApiClient() {
             const qs = queryString(params);
             return this.request(`/api/dashboard-workspace/${encodeSegment(username)}/evidence?${qs}`);
         },
+        getWorkspaceTeam(username, params, options = {}) {
+            const qs = queryString(params);
+            return this.request(`/api/workspace/team/${encodeSegment(username)}?${qs}`, options);
+        },
         getRoundAnalysis(username) {
             return this.request(`/api/round-analysis/${encodeSegment(username)}`);
         },
@@ -130,8 +134,8 @@ export function createApiClient() {
         getPlayersList() {
             return this.request("/api/players/list");
         },
-        getOperatorsMapBreakdown(username, stack = "solo", matchType = "Ranked") {
-            const qs = queryString({ username, stack, match_type: matchType });
+        getOperatorsMapBreakdown(username, stack = "all", matchType = "Ranked", minRounds = 5) {
+            const qs = queryString({ username, stack, match_type: matchType, min_rounds: minRounds });
             return this.request(`/api/operators/map-breakdown?${qs}`);
         },
     };
