@@ -1,3 +1,7 @@
+import { createApiClient } from "./api/client.js";
+import { createModalController } from "./ui/modal.js";
+import { setActiveTab as setActiveTabUi, initPrimaryTabKeyboardNav } from "./ui/tabs.js";
+
 let ws = null;
 let wsMatches = null;
 let network = null;
@@ -18,15 +22,47 @@ let storedMatchesSource = [];
 let storedMatchesCache = [];
 let selectedStoredMatchIndex = -1;
 let selectedStoredRoundIndex = -1;
+let storedVirtualCleanup = null;
+const STORED_VIRTUALIZE_THRESHOLD = 220;
+const STORED_VIRTUAL_CARD_MIN_WIDTH = 240;
+const STORED_VIRTUAL_CARD_GAP = 12;
+const STORED_VIRTUAL_ROW_HEIGHT = 154;
+const MATCH_RESULTS_VIRTUALIZE_THRESHOLD = 220;
+const MATCH_RESULTS_CARD_MIN_WIDTH = 320;
+const MATCH_RESULTS_CARD_GAP = 6;
+const MATCH_RESULTS_ROW_HEIGHT = 188;
+let matchResultsVirtualCleanup = null;
+let matchResultsRenderTick = null;
+let matchResultsStickToBottom = false;
+const matchResultsById = new Map();
+const matchResultsOrder = [];
 const MAP_IMAGE_BASE = "/map-images";
 const OPERATOR_IMAGE_BASE = "/operator-images";
+const TRACKER_MAP_IMAGE_BASE = "https://trackercdn.com/cdn/tracker.gg/r6siege/db/images/maps";
+const TRACKER_MAP_SLUG_OVERRIDES = {
+    "club house": "clubhouse",
+    "hereford base": "hereford",
+    "theme park": "theme-park",
+    "kafe dostoyevsky": "kafe-dostoyevsky",
+    "nighthaven labs": "nighthaven-labs",
+    "stadium alpha": "stadium-alpha",
+    "stadium bravo": "stadium-bravo",
+};
 let operatorImageFileByKey = {};
 let operatorImageIndexLoaded = false;
 let operatorImageIndexEnabled = false;
 let operatorImageIndexCount = 0;
+let filterDrawerCompactMode = null;
+const api = createApiClient();
+const settingsModalController = createModalController("settings-modal");
+let dashboardGraphRenderTimer = null;
+let dashboardComputeInFlight = false;
+let dashboardLastRequestSignature = "";
+let dashboardRefreshQueued = false;
 let computeReportState = {
     mode: "overall",
     dashboardView: "insights",
+    graphPanel: "workspace",
     username: "",
     stats: null,
     round: null,
@@ -56,8 +92,14 @@ let computeReportState = {
         selection: { type: null },
         evidenceCursor: "",
         evidenceRows: [],
+        requestSeq: 0,
     },
 };
+let workspaceAutoRefreshTimer = null;
+const WORKSPACE_REQUEST_TIMEOUT_MS = 45000;
+let encounteredPlayersCache = [];
+let teamBuilderFriendsCache = [];
+let operatorsPlayerListCache = [];
 const MAP_IMAGE_FILE_BY_KEY = {
     "outback": "r6-maps-outback.avif",
     "oregon": "r6-maps-oregon.avif",
@@ -189,6 +231,116 @@ function resolveMapImageUrl(mapName) {
     return "";
 }
 
+function normalizeMapSlug(mapName) {
+    const key = normalizeMapKey(mapName);
+    if (!key) return "unknown-map";
+    const forced = TRACKER_MAP_SLUG_OVERRIDES[key];
+    if (forced) return forced;
+    return key
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
+function trackerMapImageUrl(mapName) {
+    const slug = normalizeMapSlug(mapName);
+    return `${TRACKER_MAP_IMAGE_BASE}/${encodeURIComponent(slug)}.png`;
+}
+
+function localStaticMapImageUrl(mapName) {
+    const slug = normalizeMapSlug(mapName);
+    return `/static/maps/${encodeURIComponent(slug)}.jpg`;
+}
+
+function attachMatchCardImageFallback(imgEl, placeholderEl, mapName) {
+    if (!imgEl) return;
+    const chain = [
+        trackerMapImageUrl(mapName),
+        localStaticMapImageUrl(mapName),
+    ];
+    let idx = 0;
+    const showPlaceholder = () => {
+        imgEl.hidden = true;
+        if (placeholderEl) {
+            placeholderEl.hidden = false;
+            placeholderEl.textContent = String(mapName || "Unknown map");
+        }
+        console.warn(
+            `[match-card] Placeholder map image used for "${mapName}" (normalized: "${normalizeMapSlug(mapName)}").`
+        );
+    };
+    const tryNext = () => {
+        if (idx >= chain.length) {
+            showPlaceholder();
+            return;
+        }
+        const nextUrl = chain[idx];
+        idx += 1;
+        imgEl.src = nextUrl;
+    };
+    imgEl.addEventListener("error", tryNext);
+    imgEl.addEventListener("load", () => {
+        imgEl.hidden = false;
+        if (placeholderEl) placeholderEl.hidden = true;
+    });
+    tryNext();
+}
+
+function matchTypeBadgeMeta(modeRaw) {
+    const mode = String(modeRaw || "").trim().toLowerCase();
+    if (mode.includes("unranked")) return { label: "Unranked", cls: "unranked" };
+    if (mode.includes("ranked")) return { label: "Ranked", cls: "ranked" };
+    if (mode.includes("quick")) return { label: "Quick", cls: "quick" };
+    return { label: modeRaw || "Other", cls: "other" };
+}
+
+function extractRpDelta(matchData) {
+    const candidates = [
+        matchData?.rank_points_delta,
+        matchData?.rp_delta,
+        matchData?.rp_change,
+        matchData?.mmr_delta,
+    ];
+    for (const value of candidates) {
+        if (value == null || value === "") continue;
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+    }
+    return null;
+}
+
+function formatMatchAgeLabel(rawDate) {
+    const text = String(rawDate || "").trim();
+    if (!text) return "Unknown time";
+    let ms = Date.parse(text);
+    if (!Number.isFinite(ms)) {
+        ms = Date.parse(text.replace(" ", "T"));
+    }
+    if (!Number.isFinite(ms)) return text;
+    const dt = new Date(ms);
+    const diff = Date.now() - dt.getTime();
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    if (diff >= 0 && diff < hour) {
+        return `${Math.max(1, Math.floor(diff / minute))}m ago`;
+    }
+    if (diff >= 0 && diff < day) {
+        return `${Math.max(1, Math.floor(diff / hour))}h ago`;
+    }
+    if (diff >= 0 && diff < (7 * day)) {
+        return `${Math.max(1, Math.floor(diff / day))}d ago`;
+    }
+    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatPerspectiveScoreLabel(perspective) {
+    const mine = toNumber(perspective?.myScore, 0);
+    const opp = toNumber(perspective?.oppScore, 0);
+    if (perspective?.result === "Win") return `W ${mine}-${opp}`;
+    if (perspective?.result === "Loss") return `L ${opp}-${mine}`;
+    return mine === opp ? `D ${mine}-${opp}` : `${mine}-${opp}`;
+}
+
 function normalizeOperatorKey(value) {
     return String(value || "")
         .toLowerCase()
@@ -213,7 +365,7 @@ function extractOperatorName(raw) {
 
 async function loadOperatorImageIndex() {
     try {
-        const res = await fetch("/api/operator-image-index");
+        const res = await api.getOperatorImageIndex();
         if (!res.ok) return;
         const payload = await res.json();
         operatorImageIndexLoaded = true;
@@ -380,7 +532,7 @@ function startScan() {
     document.getElementById("start-scan").disabled = true;
     document.getElementById("stop-scan").disabled = false;
 
-    ws = new WebSocket("ws://localhost:5000/ws/scan");
+    ws = api.openScanWebSocket();
 
     ws.onopen = () => {
         log("Connected to server");
@@ -545,7 +697,7 @@ function startMatchScrape(autoRestart = false) {
     setGlobalScrapeRunning(true);
     currentMatchUsername = username;
 
-    wsMatches = new WebSocket("ws://localhost:5000/ws/scrape-matches");
+    wsMatches = api.openMatchScrapeWebSocket();
     wsMatches.onopen = () => {
         logMatch("Connected to match scraper");
         if (debugBrowser) {
@@ -901,32 +1053,64 @@ function rankFromRP(rp) {
     };
 }
 
+const logBufferByTarget = new Map();
+let logFlushTick = null;
+
+function queueLogEntry(targetId, message, type = "info") {
+    const key = String(targetId || "");
+    if (!key) return;
+    if (!logBufferByTarget.has(key)) {
+        logBufferByTarget.set(key, []);
+    }
+    logBufferByTarget.get(key).push({
+        text: `[${new Date().toLocaleTimeString()}] ${message}`,
+        type: String(type || "info"),
+    });
+    if (logFlushTick != null) return;
+    logFlushTick = window.requestAnimationFrame(() => {
+        logFlushTick = null;
+        for (const [id, entries] of logBufferByTarget.entries()) {
+            const logDiv = document.getElementById(id);
+            if (!logDiv || !entries.length) continue;
+            const shouldStick = (logDiv.scrollHeight - logDiv.scrollTop - logDiv.clientHeight) < 40;
+            const frag = document.createDocumentFragment();
+            for (const entryData of entries.splice(0, entries.length)) {
+                const entry = document.createElement("div");
+                entry.className = `log-entry log-${entryData.type}`;
+                entry.textContent = entryData.text;
+                frag.appendChild(entry);
+            }
+            logDiv.appendChild(frag);
+            if (shouldStick) {
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+        }
+    });
+}
+
 function log(message, type = "info") {
-    const logDiv = document.getElementById("log");
-    const entry = document.createElement("div");
-    entry.className = `log-entry log-${type}`;
-    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    logDiv.appendChild(entry);
-    logDiv.scrollTop = logDiv.scrollHeight;
+    queueLogEntry("log", message, type);
 }
 
 function logMatch(message, type = "info") {
-    const logDiv = document.getElementById("match-log");
-    const entry = document.createElement("div");
-    entry.className = `log-entry log-${type}`;
-    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    logDiv.appendChild(entry);
-    logDiv.scrollTop = logDiv.scrollHeight;
+    queueLogEntry("match-log", message, type);
 }
 
 function appendMatchResult(matchData, status = "captured") {
     appendMatchResultRow(matchData, status);
 }
 
-function appendMatchResultRow(matchData, status = "captured") {
-    const resultsDiv = document.getElementById("match-results");
+function cleanupMatchResultsVirtualization() {
+    if (typeof matchResultsVirtualCleanup === "function") {
+        matchResultsVirtualCleanup();
+    }
+    matchResultsVirtualCleanup = null;
+}
+
+function buildMatchResultCardElement(entry, cardWidthPx = null) {
+    const matchData = entry?.matchData || {};
+    const status = String(entry?.status || "captured");
     const matchId = String(matchData?.match_id || "unknown-id");
-    const existing = resultsDiv.querySelector(`[data-match-id="${matchId}"]`);
     const statusClass =
         status === "filtered" ? "match-results-filtered" :
         status === "skipped_complete" ? "match-results-skipped" :
@@ -935,84 +1119,578 @@ function appendMatchResultRow(matchData, status = "captured") {
         status === "filtered" ? "filtered" :
         status === "skipped_complete" ? "skipped" :
         "captured";
-    if (existing) {
-        existing.classList.remove("match-results-captured", "match-results-skipped", "match-results-filtered");
-        existing.classList.add(statusClass);
-        const meta = existing.querySelector(".stored-match-meta");
-        if (meta) {
-            const shortExistingId =
-                matchId.length > 14
-                    ? `${matchId.slice(0, 8)}...${matchId.slice(-4)}`
-                    : matchId;
-            meta.textContent = `${matchData?.date || "No date"} | ${shortExistingId} | ${statusLabel}`;
-        }
-        return;
-    }
-    const entry = document.createElement("div");
-    entry.className = `stored-match-card match-results-card ${statusClass}`;
-    entry.dataset.matchId = matchId;
     const shortMatchId =
         matchId.length > 14
             ? `${matchId.slice(0, 8)}...${matchId.slice(-4)}`
             : matchId;
     const map = matchData?.map || "Unknown map";
     const perspective = inferTeamPerspective(matchData, currentMatchUsername);
-    const scoreA = perspective.myScore;
-    const scoreB = perspective.oppScore;
     const result = perspective.result;
     const resultClass =
         result === "Win" ? "stored-result-win" :
         result === "Loss" ? "stored-result-loss" :
         "stored-result-unknown";
-    const bgUrl = resolveMapImageUrl(map);
-    if (bgUrl) {
-        entry.style.backgroundImage = `linear-gradient(rgba(8,8,8,0.72), rgba(8,8,8,0.82)), url('${bgUrl}')`;
+    const resultAccentClass =
+        result === "Win" ? "match-result-win" :
+        result === "Loss" ? "match-result-loss" :
+        "match-result-draw";
+    const badge = matchTypeBadgeMeta(matchData?.mode);
+    const scoreLabel = formatPerspectiveScoreLabel(perspective);
+    const rpDelta = extractRpDelta(matchData);
+    const rpClass =
+        rpDelta == null ? "" :
+        rpDelta > 0 ? "stored-rp-pos" :
+        rpDelta < 0 ? "stored-rp-neg" :
+        "stored-rp-zero";
+    const rpText =
+        rpDelta == null ? "" :
+        `${rpDelta > 0 ? "+" : ""}${Math.round(rpDelta)} RP`;
+    const timeLabel = formatMatchAgeLabel(matchData?.date);
+    const escapedMap = escapeHtml(String(map));
+    const entryEl = document.createElement("div");
+    entryEl.className = `stored-match-card match-results-card ${statusClass} ${resultAccentClass}`;
+    entryEl.dataset.matchId = matchId;
+    if (Number.isFinite(cardWidthPx) && cardWidthPx > 0) {
+        entryEl.style.width = `${Math.floor(cardWidthPx)}px`;
     }
-    entry.innerHTML = `
-        <div class="stored-match-top">
-            <div>
-                <div class="stored-field-label">Map</div>
-                <div class="stored-field-value">${map}</div>
-            </div>
-            <div>
-                <div class="stored-field-label">Score</div>
-                <div class="stored-field-value">${scoreA}:${scoreB}</div>
-            </div>
-            <div>
-                <div class="stored-field-label">Result</div>
-                <div class="stored-field-value ${resultClass}">${result}</div>
-            </div>
-            <div>
-                <div class="stored-field-label">Mode</div>
-                <div class="stored-field-value">${matchData?.mode || "Unknown"}</div>
-            </div>
+    entryEl.innerHTML = `
+        <div class="match-card-media">
+            <img class="match-card-map-image" alt="${escapedMap}" loading="lazy" decoding="async">
+            <div class="match-card-map-placeholder" hidden>${escapedMap}</div>
+            <div class="match-card-image-overlay"></div>
+            <div class="match-card-map-name">${escapedMap}</div>
+            <span class="match-card-type-badge ${badge.cls}">${escapeHtml(String(badge.label || "Other"))}</span>
         </div>
-        <div class="stored-match-meta">
-            ${matchData?.date || "No date"} | ${shortMatchId} | ${statusLabel}
+        <div class="match-card-body">
+            <div class="match-card-main-line">
+                <div class="stored-field-value match-card-result ${resultClass}">${result}</div>
+                <div class="stored-field-value match-card-score">${scoreLabel}</div>
+            </div>
+            ${rpDelta == null ? "" : `<div class="stored-field-value match-card-rp ${rpClass}">${rpText}</div>`}
+            <div class="stored-match-meta match-card-meta">
+                ${escapeHtml(timeLabel)} | ${escapeHtml(shortMatchId)} | ${escapeHtml(statusLabel)}
+            </div>
         </div>
     `;
-    resultsDiv.appendChild(entry);
-    resultsDiv.scrollTop = resultsDiv.scrollHeight;
+    const imgEl = entryEl.querySelector(".match-card-map-image");
+    const placeholderEl = entryEl.querySelector(".match-card-map-placeholder");
+    attachMatchCardImageFallback(imgEl, placeholderEl, map);
+    return entryEl;
+}
+
+function renderMatchResultsVirtualized(resultsDiv, rows) {
+    resultsDiv.classList.add("virtualized");
+    resultsDiv.innerHTML = `
+        <div class="match-results-virtual-spacer"></div>
+        <div class="match-results-virtual-viewport"></div>
+    `;
+    const spacer = resultsDiv.querySelector(".match-results-virtual-spacer");
+    const viewport = resultsDiv.querySelector(".match-results-virtual-viewport");
+    if (!spacer || !viewport) return;
+    let rafId = null;
+    let lastStart = -1;
+    let lastEnd = -1;
+    let lastCols = -1;
+    const rowStride = MATCH_RESULTS_ROW_HEIGHT + MATCH_RESULTS_CARD_GAP;
+
+    const computeLayout = () => {
+        const width = Math.max(1, resultsDiv.clientWidth - 2);
+        const cols = Math.max(1, Math.floor((width + MATCH_RESULTS_CARD_GAP) / (MATCH_RESULTS_CARD_MIN_WIDTH + MATCH_RESULTS_CARD_GAP)));
+        const cardWidth = (width - ((cols - 1) * MATCH_RESULTS_CARD_GAP)) / cols;
+        const totalRows = Math.ceil(rows.length / cols);
+        const fullHeight = Math.max(0, (totalRows * rowStride) - MATCH_RESULTS_CARD_GAP);
+        spacer.style.height = `${Math.ceil(fullHeight)}px`;
+        return { cols, cardWidth, totalRows };
+    };
+
+    const renderWindow = () => {
+        rafId = null;
+        const { cols, cardWidth, totalRows } = computeLayout();
+        const scrollTop = resultsDiv.scrollTop;
+        const viewHeight = resultsDiv.clientHeight;
+        const overscanRows = 3;
+        const startRow = Math.max(0, Math.floor(scrollTop / rowStride) - overscanRows);
+        const endRow = Math.min(totalRows - 1, Math.ceil((scrollTop + viewHeight) / rowStride) + overscanRows);
+        const startIdx = Math.max(0, startRow * cols);
+        const endIdx = Math.min(rows.length - 1, ((endRow + 1) * cols) - 1);
+        if (startIdx === lastStart && endIdx === lastEnd && cols === lastCols) return;
+        lastStart = startIdx;
+        lastEnd = endIdx;
+        lastCols = cols;
+        viewport.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        for (let idx = startIdx; idx <= endIdx; idx += 1) {
+            const row = rows[idx];
+            if (!row) continue;
+            const card = buildMatchResultCardElement(row, cardWidth);
+            const gridRow = Math.floor(idx / cols);
+            const gridCol = idx % cols;
+            card.style.position = "absolute";
+            card.style.top = `${Math.floor(gridRow * rowStride)}px`;
+            card.style.left = `${Math.floor(gridCol * (cardWidth + MATCH_RESULTS_CARD_GAP))}px`;
+            frag.appendChild(card);
+        }
+        viewport.appendChild(frag);
+    };
+
+    const scheduleRender = () => {
+        if (rafId != null) return;
+        rafId = window.requestAnimationFrame(renderWindow);
+    };
+
+    const onScroll = () => scheduleRender();
+    const onResize = () => {
+        lastStart = -1;
+        lastEnd = -1;
+        lastCols = -1;
+        scheduleRender();
+    };
+
+    resultsDiv.addEventListener("scroll", onScroll);
+    window.addEventListener("resize", onResize);
+    scheduleRender();
+
+    matchResultsVirtualCleanup = () => {
+        resultsDiv.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", onResize);
+        if (rafId != null) {
+            window.cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+        resultsDiv.classList.remove("virtualized");
+    };
+}
+
+function renderMatchResults(forceStickToBottom = false) {
+    const resultsDiv = document.getElementById("match-results");
+    if (!resultsDiv) return;
+    const rows = matchResultsOrder.map((id) => matchResultsById.get(id)).filter(Boolean);
+    const shouldStick = forceStickToBottom || (resultsDiv.scrollHeight - resultsDiv.scrollTop - resultsDiv.clientHeight) < 30;
+    cleanupMatchResultsVirtualization();
+    resultsDiv.classList.remove("virtualized");
+    if (rows.length >= MATCH_RESULTS_VIRTUALIZE_THRESHOLD) {
+        renderMatchResultsVirtualized(resultsDiv, rows);
+    } else {
+        resultsDiv.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        for (const row of rows) {
+            frag.appendChild(buildMatchResultCardElement(row));
+        }
+        resultsDiv.appendChild(frag);
+    }
+    if (shouldStick) {
+        resultsDiv.scrollTop = resultsDiv.scrollHeight;
+    }
+}
+
+function scheduleMatchResultsRender(forceStickToBottom = false) {
+    if (forceStickToBottom) {
+        matchResultsStickToBottom = true;
+    }
+    if (matchResultsRenderTick != null) return;
+    matchResultsRenderTick = window.requestAnimationFrame(() => {
+        const sticky = matchResultsStickToBottom;
+        matchResultsRenderTick = null;
+        matchResultsStickToBottom = false;
+        renderMatchResults(sticky);
+    });
+}
+
+function appendMatchResultRow(matchData, status = "captured") {
+    const matchId = String(matchData?.match_id || "unknown-id");
+    const existing = matchResultsById.get(matchId);
+    if (existing) {
+        existing.matchData = matchData;
+        existing.status = status;
+    } else {
+        matchResultsById.set(matchId, { matchData, status });
+        matchResultsOrder.push(matchId);
+    }
+    scheduleMatchResultsRender(true);
 }
 
 function setActiveTab(tabName) {
-    const isScanner = tabName === "scanner";
-    const isMatches = tabName === "matches";
-    const isStored = tabName === "stored";
-    const isDashboard = tabName === "dashboard";
-    document.getElementById("tab-scanner").classList.toggle("active", isScanner);
-    document.getElementById("tab-matches").classList.toggle("active", isMatches);
-    document.getElementById("tab-stored").classList.toggle("active", isStored);
-    document.getElementById("tab-dashboard").classList.toggle("active", isDashboard);
-    document.getElementById("panel-scanner").classList.toggle("active", isScanner);
-    document.getElementById("panel-matches").classList.toggle("active", isMatches);
-    document.getElementById("panel-stored").classList.toggle("active", isStored);
-    document.getElementById("panel-dashboard").classList.toggle("active", isDashboard);
-    if (isScanner && network) {
-        setTimeout(() => network.redraw(), 10);
+    setActiveTabUi(tabName, {
+        onScannerActivated: () => {
+            if (network) network.redraw();
+        },
+        onStoredActivated: () => {
+            loadStoredMatchesView("", true);
+        },
+        onPlayersActivated: () => {
+            loadPlayersTab(false);
+        },
+        onTeamBuilderActivated: () => {
+            loadTeamBuilderFriends(false);
+        },
+        onOperatorsActivated: () => {
+            loadOperatorsTab(false);
+        },
+        onDashboardActivated: () => {
+            triggerDashboardAutoRefresh();
+        },
+    });
+}
+
+function getPrimaryUsernameForPlayers() {
+    const explicit = String(document.getElementById("players-primary-username")?.value || "").trim();
+    if (explicit) return explicit;
+    const compute = String(document.getElementById("compute-username")?.value || "").trim();
+    if (compute) return compute;
+    const stored = String(document.getElementById("stored-username")?.value || "").trim();
+    return stored;
+}
+
+function renderPlayersTable(rows) {
+    const wrap = document.getElementById("players-table-wrap");
+    const chip = document.getElementById("players-count-chip");
+    if (!wrap) return;
+    const search = String(document.getElementById("players-search")?.value || "").trim().toLowerCase();
+    let filtered = Array.isArray(rows) ? rows.slice() : [];
+    if (search) {
+        filtered = filtered.filter((row) => String(row?.username || "").toLowerCase().includes(search));
     }
-    if (isStored) {
-        loadStoredMatchesView("", true);
+    filtered.sort((a, b) => (
+        toNumber(b?.is_friend ? 1 : 0, 0) - toNumber(a?.is_friend ? 1 : 0, 0) ||
+        toNumber(b?.shared_matches, 0) - toNumber(a?.shared_matches, 0) ||
+        String(a?.username || "").localeCompare(String(b?.username || ""))
+    ));
+    if (chip) chip.textContent = String(filtered.length);
+    if (!filtered.length) {
+        wrap.innerHTML = `<div class="compute-value">No encountered players found.</div>`;
+        return;
+    }
+    const body = filtered.map((row) => {
+        const tags = Array.isArray(row?.tags) ? row.tags : [];
+        const isFriend = Boolean(row?.is_friend) || tags.some((t) => String(t).toLowerCase() === "friend");
+        const btnLabel = isFriend ? "Unfriend" : "Friend";
+        return (
+            `<tr data-username="${escapeHtml(String(row.username || ""))}">` +
+            `<td>${escapeHtml(String(row.username || ""))}</td>` +
+            `<td>${toNumber(row.shared_matches, 0)}</td>` +
+            `<td>${formatFixed(toNumber(row.win_rate_together, 0), 1)}%</td>` +
+            `<td>${escapeHtml(formatMatchAgeLabel(row.last_seen))}</td>` +
+            `<td>${escapeHtml(tags.join(", ") || "-")}</td>` +
+            `<td><button class="players-friend-toggle ${isFriend ? "on" : ""}" type="button" data-username="${escapeHtml(String(row.username || ""))}" data-enabled="${isFriend ? "1" : "0"}">${btnLabel}</button></td>` +
+            `</tr>`
+        );
+    }).join("");
+    wrap.innerHTML = (
+        `<table class="players-table">` +
+        `<thead><tr><th>Username</th><th>Shared Matches</th><th>Win Rate Together</th><th>Last Seen</th><th>Tags</th><th>Friend</th></tr></thead>` +
+        `<tbody>${body}</tbody>` +
+        `</table>`
+    );
+    wrap.querySelectorAll(".players-friend-toggle").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+            const username = String(btn.dataset.username || "").trim();
+            if (!username) return;
+            const currentlyEnabled = btn.dataset.enabled === "1";
+            try {
+                const res = await api.setPlayerTag(username, "friend", !currentlyEnabled);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                await loadPlayersTab(true);
+                await loadTeamBuilderFriends(true);
+            } catch (err) {
+                logCompute(`Failed to update friend tag for ${username}: ${err}`, "error");
+            }
+        });
+    });
+}
+
+async function loadPlayersTab(silent = false) {
+    const username = getPrimaryUsernameForPlayers();
+    const wrap = document.getElementById("players-table-wrap");
+    if (!wrap) return;
+    if (!username) {
+        wrap.innerHTML = `<div class="compute-value">Enter a primary username to load encountered players.</div>`;
+        const chip = document.getElementById("players-count-chip");
+        if (chip) chip.textContent = "0";
+        return;
+    }
+    if (!silent) {
+        wrap.innerHTML = `<div class="compute-value">Loading encountered players...</div>`;
+    }
+    try {
+        const res = await api.getEncounteredPlayers(username, "Ranked");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        encounteredPlayersCache = Array.isArray(payload?.players) ? payload.players : [];
+        renderPlayersTable(encounteredPlayersCache);
+    } catch (err) {
+        wrap.innerHTML = `<div class="compute-value">Failed to load players: ${escapeHtml(String(err))}</div>`;
+    }
+}
+
+function renderTeamBuilderFriends(rows) {
+    const wrap = document.getElementById("team-builder-friends");
+    const chip = document.getElementById("team-builder-friend-count");
+    if (!wrap) return;
+    const list = Array.isArray(rows) ? rows.slice() : [];
+    if (chip) chip.textContent = String(list.length);
+    if (!list.length) {
+        wrap.innerHTML = `<div class="compute-value">No tagged friends yet.</div>`;
+        return;
+    }
+    wrap.innerHTML = list.map((row) => (
+        `<label class="team-friend-item">` +
+        `<input type="checkbox" class="team-friend-check" value="${escapeHtml(String(row.username || ""))}">` +
+        `<span>${escapeHtml(String(row.username || ""))}</span>` +
+        `</label>`
+    )).join("");
+}
+
+async function loadTeamBuilderFriends(silent = false) {
+    const wrap = document.getElementById("team-builder-friends");
+    if (!wrap) return;
+    if (!silent) {
+        wrap.innerHTML = `<div class="compute-value">Loading friends...</div>`;
+    }
+    try {
+        const res = await api.getFriends("friend");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        teamBuilderFriendsCache = Array.isArray(payload?.players) ? payload.players : [];
+        renderTeamBuilderFriends(teamBuilderFriendsCache);
+    } catch (err) {
+        wrap.innerHTML = `<div class="compute-value">Failed to load friends: ${escapeHtml(String(err))}</div>`;
+    }
+}
+
+function renderStackSynergy(analysis) {
+    const output = document.getElementById("team-builder-output");
+    if (!output) return;
+    if (!analysis || analysis.error) {
+        output.innerHTML = `<div class="compute-value">${escapeHtml(String(analysis?.error || "No stack data available."))}</div>`;
+        return;
+    }
+    const baselines = analysis.solo_baselines || {};
+    const baselineRows = Object.entries(baselines).map(([name, wr]) => (
+        `<span class="stack-baseline-chip">${escapeHtml(name)}: <strong>${wr == null ? "N/A" : `${formatFixed(wr, 1)}%`}</strong></span>`
+    )).join("");
+    const matrixRows = (Array.isArray(analysis.pair_matrix) ? analysis.pair_matrix : []).map((row) => {
+        const cells = (Array.isArray(row?.cells) ? row.cells : []).map((cell) => {
+            if (cell.win_rate == null) return `<td class="stack-matrix-empty">-</td>`;
+            const cls = cell.win_rate >= 50 ? "pos" : "neg";
+            return `<td class="${cls}" title="${escapeHtml(String(cell.shared_matches || 0))} shared matches">${formatFixed(cell.win_rate, 1)}%</td>`;
+        }).join("");
+        return `<tr><th>${escapeHtml(String(row?.player || ""))}</th>${cells}</tr>`;
+    }).join("");
+    const matrixHeader = (analysis.players || []).map((name) => `<th>${escapeHtml(String(name))}</th>`).join("");
+    const mapBars = (Array.isArray(analysis.map_pool) ? analysis.map_pool : []).map((m) => {
+        const wr = toNumber(m?.win_rate, 0);
+        const width = Math.max(0, Math.min(100, wr));
+        return (
+            `<div class="stack-map-row">` +
+            `<div class="stack-map-label">${escapeHtml(String(m?.map_name || "Unknown"))} <span>(n=${toNumber(m?.matches, 0)})</span></div>` +
+            `<div class="stack-map-bar-wrap"><div class="stack-map-bar" style="width:${width.toFixed(1)}%"></div><span>${formatFixed(wr, 1)}%</span></div>` +
+            `</div>`
+        );
+    }).join("");
+    const roles = (Array.isArray(analysis.role_coverage) ? analysis.role_coverage : []).map((row) => {
+        const sides = row?.side_rounds || {};
+        const ops = Array.isArray(row?.top_operators) ? row.top_operators.slice(0, 3) : [];
+        const topOps = ops.map((o) => `${o.operator} (${toNumber(o.rounds, 0)})`).join(", ") || "No operator rounds.";
+        return (
+            `<div class="stack-role-card">` +
+            `<div class="stack-role-name">${escapeHtml(String(row?.username || ""))}</div>` +
+            `<div class="stack-role-meta">ATK ${toNumber(sides.attacker, 0)} / DEF ${toNumber(sides.defender, 0)}</div>` +
+            `<div class="stack-role-meta">${escapeHtml(topOps)}</div>` +
+            `</div>`
+        );
+    }).join("");
+    output.innerHTML = (
+        `<div class="stack-summary">` +
+        `<div class="stack-winrate">${formatFixed(toNumber(analysis.stack_win_rate, 0), 1)}%</div>` +
+        `<div class="stack-meta">Stack WR (${toNumber(analysis.stack_wins, 0)}-${Math.max(0, toNumber(analysis.stack_match_count, 0) - toNumber(analysis.stack_wins, 0))}) over ${toNumber(analysis.stack_match_count, 0)} matches</div>` +
+        `<div class="stack-baselines">${baselineRows}</div>` +
+        `${analysis.warning ? `<div class="stack-warning">${escapeHtml(String(analysis.warning))}</div>` : ""}` +
+        `</div>` +
+        `<div class="stack-block">` +
+        `<div class="compute-label">Chemistry Matrix</div>` +
+        `<table class="stack-matrix"><thead><tr><th></th>${matrixHeader}</tr></thead><tbody>${matrixRows}</tbody></table>` +
+        `</div>` +
+        `<div class="stack-block">` +
+        `<div class="compute-label">Map Pool</div>` +
+        `<div class="stack-map-pool">${mapBars || `<div class="compute-value">No shared map data.</div>`}</div>` +
+        `</div>` +
+        `<div class="stack-block">` +
+        `<div class="compute-label">Role Coverage</div>` +
+        `<div class="stack-role-grid">${roles || `<div class="compute-value">No role data.</div>`}</div>` +
+        `</div>`
+    );
+}
+
+async function analyzeSelectedStack() {
+    const checks = Array.from(document.querySelectorAll(".team-friend-check:checked"));
+    const selectedFriends = checks.map((el) => String(el.value || "").trim()).filter(Boolean);
+    const primary = getPrimaryUsernameForPlayers();
+    const output = document.getElementById("team-builder-output");
+    if (!output) return;
+    if (!primary) {
+        output.innerHTML = `<div class="compute-value">Enter a primary username first.</div>`;
+        return;
+    }
+    if (selectedFriends.length < 2 || selectedFriends.length > 4) {
+        output.innerHTML = `<div class="compute-value">Select 2-4 friends to analyze with ${escapeHtml(primary)}.</div>`;
+        return;
+    }
+    const players = [primary, ...selectedFriends];
+    output.innerHTML = `<div class="compute-value">Analyzing stack...</div>`;
+    try {
+        const res = await api.getStackSynergy(players, "Ranked");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        renderStackSynergy(payload?.analysis || null);
+    } catch (err) {
+        output.innerHTML = `<div class="compute-value">Failed to analyze stack: ${escapeHtml(String(err))}</div>`;
+    }
+}
+
+function getOperatorsActiveUsername() {
+    const sel = String(document.getElementById("operators-player")?.value || "").trim();
+    if (sel) return sel;
+    return getPrimaryUsernameForPlayers() || (document.getElementById("compute-username")?.value || "").trim();
+}
+
+function operatorSlug(value) {
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
+function operatorTrackerIconUrl(operatorName) {
+    const slug = operatorSlug(operatorName);
+    if (!slug) return "";
+    return `https://trackercdn.com/cdn/tracker.gg/r6siege/db/images/operators/${encodeURIComponent(slug)}.png`;
+}
+
+function renderOperatorDot(item, baseline, bound = 20) {
+    const delta = toNumber(item?.delta_vs_baseline, 0);
+    const pct = Math.max(-bound, Math.min(bound, delta));
+    const left = 50 + ((pct / bound) * 50);
+    const rounds = Math.max(0, toNumber(item?.rounds, 0));
+    const size = Math.max(8, Math.min(16, 8 + Math.sqrt(rounds)));
+    const color = delta >= 0 ? "#4caf50" : "#f44336";
+    const op = String(item?.operator || "Unknown");
+    const iconUrl = operatorTrackerIconUrl(op);
+    const tooltip =
+        `${op}\n` +
+        `Rounds: ${rounds}\n` +
+        `Win rate: ${formatFixed(toNumber(item?.win_rate, 0), 1)}% (${delta >= 0 ? "+" : ""}${formatFixed(delta, 1)}% vs map baseline)\n` +
+        `First kill rate: ${formatFixed(toNumber(item?.fk_rate, 0), 1)}%\n` +
+        `First death rate: ${formatFixed(toNumber(item?.fd_rate, 0), 1)}%\n` +
+        `KD: ${formatFixed(toNumber(item?.kd, 0), 2)}`;
+    const iconHtml = iconUrl
+        ? `<img class="operators-dot-icon" src="${iconUrl}" alt="${escapeHtml(op)}" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">` +
+          `<span class="operators-dot-fallback" style="display:none">${escapeHtml(op.slice(0, 2).toUpperCase())}</span>`
+        : `<span class="operators-dot-fallback">${escapeHtml(op.slice(0, 2).toUpperCase())}</span>`;
+    return (
+        `<div class="operators-dot-wrap" style="left:${left.toFixed(2)}%" title="${escapeHtml(tooltip)}">` +
+        `<div class="operators-dot" style="width:${size.toFixed(0)}px;height:${size.toFixed(0)}px;background:${color};"></div>` +
+        `<div class="operators-dot-icon-wrap">${iconHtml}</div>` +
+        `<div class="operators-dot-label">${escapeHtml(op)}</div>` +
+        `</div>`
+    );
+}
+
+function renderOperatorSideLine(sideKey, baseline, operators) {
+    const list = Array.isArray(operators) ? operators : [];
+    if (list.length < 3) {
+        return `<div class="operators-side-empty">Not enough data</div>`;
+    }
+    const maxDelta = list.reduce((acc, row) => Math.max(acc, Math.abs(toNumber(row?.delta_vs_baseline, 0))), 0);
+    const bound = Math.max(10, Math.min(35, Math.ceil(maxDelta + 2)));
+    const dots = list.map((row) => renderOperatorDot(row, baseline, bound)).join("");
+    return (
+        `<div class="operators-side-line">` +
+        `<div class="operators-axis-center" aria-hidden="true"></div>` +
+        `${dots}` +
+        `</div>`
+    );
+}
+
+function renderOperatorsMapCards(payload) {
+    const grid = document.getElementById("operators-map-grid");
+    const lowWrap = document.getElementById("operators-low-data");
+    if (!grid || !lowWrap) return;
+    const maps = Array.isArray(payload?.maps) ? payload.maps : [];
+    const low = Array.isArray(payload?.low_data_maps) ? payload.low_data_maps : [];
+    if (!maps.length && !low.length) {
+        grid.innerHTML = `<div class="compute-value">No operator map data found for current filters.</div>`;
+        lowWrap.innerHTML = "";
+        return;
+    }
+    grid.innerHTML = maps.map((m) => (
+        `<section class="operators-map-card">` +
+        `<header class="operators-map-head"><strong>${escapeHtml(String(m?.map_name || "Unknown"))}</strong><span>(n=${toNumber(m?.total_rounds, 0)})</span></header>` +
+        `<div class="operators-side-block">` +
+        `<div class="operators-side-title">ATK baseline ${formatFixed(toNumber(m?.baseline_atk, 0), 1)}%</div>` +
+        `${renderOperatorSideLine("atk", toNumber(m?.baseline_atk, 0), m?.atk)}` +
+        `</div>` +
+        `<div class="operators-side-block">` +
+        `<div class="operators-side-title">DEF baseline ${formatFixed(toNumber(m?.baseline_def, 0), 1)}%</div>` +
+        `${renderOperatorSideLine("def", toNumber(m?.baseline_def, 0), m?.def)}` +
+        `</div>` +
+        `</section>`
+    )).join("");
+    if (low.length) {
+        lowWrap.innerHTML = (
+            `<div class="operators-low-title">Low-data maps</div>` +
+            low.map((m) => `<div class="operators-low-row">${escapeHtml(String(m?.map_name || "Unknown"))} (n=${toNumber(m?.total_rounds, 0)}) - not enough data</div>`).join("")
+        );
+    } else {
+        lowWrap.innerHTML = "";
+    }
+}
+
+async function loadOperatorsPlayersList() {
+    const sel = document.getElementById("operators-player");
+    if (!sel) return;
+    let names = operatorsPlayerListCache.slice();
+    if (!names.length) {
+        try {
+            const res = await api.getPlayersList();
+            if (res.ok) {
+                const payload = await res.json();
+                names = Array.isArray(payload?.players) ? payload.players : [];
+                operatorsPlayerListCache = names.slice();
+            }
+        } catch (_) {
+            // best effort
+        }
+    }
+    const fallback = getPrimaryUsernameForPlayers();
+    const merged = new Set(names);
+    if (fallback) merged.add(fallback);
+    const finalNames = Array.from(merged).sort((a, b) => a.localeCompare(b));
+    sel.innerHTML = finalNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+    if (fallback && finalNames.includes(fallback)) sel.value = fallback;
+}
+
+async function loadOperatorsTab(silent = false) {
+    const grid = document.getElementById("operators-map-grid");
+    if (!grid) return;
+    await loadOperatorsPlayersList();
+    const username = getOperatorsActiveUsername();
+    const stack = String(document.getElementById("operators-stack")?.value || "solo");
+    const matchType = String(document.getElementById("operators-match-type")?.value || "Ranked");
+    if (!username) {
+        grid.innerHTML = `<div class="compute-value">Select a player to load operator map breakdown.</div>`;
+        return;
+    }
+    if (!silent) {
+        grid.innerHTML = `<div class="compute-value">Loading operator map breakdown...</div>`;
+    }
+    try {
+        const res = await api.getOperatorsMapBreakdown(username, stack, matchType);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        renderOperatorsMapCards(payload);
+    } catch (err) {
+        grid.innerHTML = `<div class="compute-value">Failed to load operator map breakdown: ${escapeHtml(String(err))}</div>`;
     }
 }
 
@@ -1219,6 +1897,72 @@ function getDashboardModeFilters() {
     return { include, exclude };
 }
 
+function renderDashboardActiveFilterChips() {
+    const target = document.getElementById("dashboard-active-filters");
+    if (!target) return;
+    const username = String(document.getElementById("compute-username")?.value || "").trim();
+    const { include, exclude } = getDashboardModeFilters();
+    const chips = [];
+    if (username) chips.push(`User: ${username}`);
+    if (include.size) chips.push(`Include: ${Array.from(include).join(", ")}`);
+    if (exclude.size) chips.push(`Exclude: ${Array.from(exclude).join(", ")}`);
+    if (!chips.length) {
+        target.innerHTML = `<span class="dashboard-filter-chip empty">No active dashboard filters</span>`;
+        return;
+    }
+    target.innerHTML = chips
+        .map((label) => `<span class="dashboard-filter-chip">${escapeHtml(label)}</span>`)
+        .join("");
+}
+
+function renderDashboardNeedsUsernamePrompt() {
+    const prompt = "Enter a username above to load dashboard.";
+    const compute = document.getElementById("compute-results");
+    if (compute) {
+        compute.innerHTML = `
+            <div class="compute-card">
+                <div class="compute-label">Dashboard</div>
+                <div class="compute-value">${escapeHtml(prompt)}</div>
+            </div>
+        `;
+    }
+    const insightsScroll = document.getElementById("dashboard-insights-scroll");
+    if (insightsScroll) {
+        insightsScroll.innerHTML = `<div class="compute-value">${escapeHtml(prompt)}</div>`;
+    }
+    const graphs = document.getElementById("dashboard-graphs-content");
+    if (graphs) {
+        graphs.innerHTML = `<div class="compute-value">${escapeHtml(prompt)}</div>`;
+    }
+}
+
+function getDashboardRequestSignature(username) {
+    const { include, exclude } = getDashboardModeFilters();
+    const includeKey = Array.from(include).sort().join(",");
+    const excludeKey = Array.from(exclude).sort().join(",");
+    return `${String(username || "").trim().toLowerCase()}|i:${includeKey}|e:${excludeKey}`;
+}
+
+function triggerDashboardAutoRefresh({ force = false } = {}) {
+    const panel = document.getElementById("panel-dashboard");
+    if (!panel || !panel.classList.contains("active")) return;
+    const username = (document.getElementById("compute-username")?.value || "").trim();
+    if (!username) {
+        renderDashboardNeedsUsernamePrompt();
+        return;
+    }
+    const sig = getDashboardRequestSignature(username);
+    if (!force && computeReportState.stats && sig === dashboardLastRequestSignature) {
+        return;
+    }
+    if (dashboardComputeInFlight) {
+        dashboardRefreshQueued = true;
+        return;
+    }
+    dashboardLastRequestSignature = sig;
+    runStatComputation(username);
+}
+
 function applyDashboardModeFilters(matches) {
     const { include, exclude } = getDashboardModeFilters();
     return (Array.isArray(matches) ? matches : []).filter((match) => {
@@ -1229,8 +1973,193 @@ function applyDashboardModeFilters(matches) {
     });
 }
 
+function cleanupStoredVirtualization() {
+    if (typeof storedVirtualCleanup === "function") {
+        storedVirtualCleanup();
+    }
+    storedVirtualCleanup = null;
+}
+
+function buildStoredMatchCardElement(match, idx, username, cardWidthPx = null) {
+    const map = match?.map || "Unknown map";
+    const perspective = inferTeamPerspective(match, username);
+    const fullMatchId = String(match?.match_id || "No match ID");
+    const shortMatchId =
+        fullMatchId.length > 14
+            ? `${fullMatchId.slice(0, 8)}...${fullMatchId.slice(-4)}`
+            : fullMatchId;
+    const result = perspective.result;
+    const missingRoundData = match?.round_data_missing === true;
+    const resultClass =
+        result === "Win" ? "stored-result-win" :
+        result === "Loss" ? "stored-result-loss" :
+        "stored-result-unknown";
+    const accentClass =
+        result === "Win" ? "stored-card-win" :
+        result === "Loss" ? "stored-card-loss" :
+        "stored-card-draw";
+    const scoreLabel = formatPerspectiveScoreLabel(perspective);
+    const badge = matchTypeBadgeMeta(match?.mode);
+    const timeLabel = formatMatchAgeLabel(match?.date);
+    const rpDelta = extractRpDelta(match);
+    const rpClass =
+        rpDelta == null ? "" :
+        rpDelta > 0 ? "stored-rp-pos" :
+        rpDelta < 0 ? "stored-rp-neg" :
+        "stored-rp-zero";
+    const rpText =
+        rpDelta == null ? "" :
+        `${rpDelta > 0 ? "+" : ""}${Math.round(rpDelta)} RP`;
+    const escapedMap = escapeHtml(String(map));
+
+    const card = document.createElement("div");
+    card.className = `stored-match-card ${accentClass}`;
+    if (missingRoundData) {
+        card.classList.add("stored-match-missing-rounds");
+    }
+    card.dataset.matchIndex = String(idx);
+    if (Number.isFinite(cardWidthPx) && cardWidthPx > 0) {
+        card.style.width = `${Math.floor(cardWidthPx)}px`;
+    }
+    card.innerHTML = `
+        <div class="stored-card-media">
+            <img class="stored-card-map-image" alt="${escapedMap}" loading="lazy" decoding="async">
+            <div class="stored-card-map-placeholder" hidden>${escapedMap}</div>
+            <div class="stored-card-map-overlay"></div>
+            <div class="stored-card-map-name">${escapedMap}</div>
+        </div>
+        <div class="stored-card-bottom">
+            <div class="stored-card-left">
+                <div class="stored-card-score">${escapeHtml(scoreLabel)}</div>
+                <div class="stored-card-result ${resultClass}">${escapeHtml(result)}</div>
+                ${rpDelta == null ? "" : `<div class="stored-card-rp ${rpClass}">${rpText}</div>`}
+            </div>
+            <div class="stored-card-right">
+                <span class="stored-card-badge ${badge.cls}">${escapeHtml(String(badge.label || "Other"))}</span>
+                <div class="stored-card-time">${escapeHtml(timeLabel)}</div>
+            </div>
+        </div>
+        <div class="stored-card-meta">
+            ${escapeHtml(shortMatchId)}
+            ${missingRoundData ? '<span class="stored-warning-badge">Round Data Missing</span>' : ""}
+        </div>
+    `;
+    const imgEl = card.querySelector(".stored-card-map-image");
+    const placeholderEl = card.querySelector(".stored-card-map-placeholder");
+    attachStoredCardMapImageFallback(imgEl, placeholderEl, map);
+    card.addEventListener("click", () => selectStoredMatch(idx, username));
+    return card;
+}
+
+function renderStoredLoadingSkeleton() {
+    const list = document.getElementById("stored-match-list");
+    if (!list) return;
+    cleanupStoredVirtualization();
+    list.classList.remove("virtualized");
+    list.innerHTML = "";
+    for (let i = 0; i < 4; i += 1) {
+        const card = document.createElement("div");
+        card.className = "stored-match-card stored-skeleton-card";
+        card.innerHTML = `
+            <div class="stored-skeleton-media"></div>
+            <div class="stored-skeleton-body">
+                <div class="stored-skeleton-line wide"></div>
+                <div class="stored-skeleton-line mid"></div>
+                <div class="stored-skeleton-line short"></div>
+            </div>
+        `;
+        list.appendChild(card);
+    }
+}
+
+function renderStoredMatchesVirtualized(list, visibleMatches, username) {
+    list.classList.add("virtualized");
+    list.innerHTML = `
+        <div class="stored-virtual-spacer"></div>
+        <div class="stored-virtual-viewport"></div>
+    `;
+    const spacer = list.querySelector(".stored-virtual-spacer");
+    const viewport = list.querySelector(".stored-virtual-viewport");
+    if (!spacer || !viewport) return;
+
+    let lastStart = -1;
+    let lastEnd = -1;
+    let lastCols = -1;
+    let rafId = null;
+    let rowStride = STORED_VIRTUAL_ROW_HEIGHT + STORED_VIRTUAL_CARD_GAP;
+
+    const computeLayout = () => {
+        const width = Math.max(1, list.clientWidth - 16);
+        const cols = Math.max(1, Math.floor((width + STORED_VIRTUAL_CARD_GAP) / (STORED_VIRTUAL_CARD_MIN_WIDTH + STORED_VIRTUAL_CARD_GAP)));
+        const cardWidth = (width - ((cols - 1) * STORED_VIRTUAL_CARD_GAP)) / cols;
+        const totalRows = Math.ceil(visibleMatches.length / cols);
+        const fullHeight = Math.max(0, (totalRows * rowStride) - STORED_VIRTUAL_CARD_GAP);
+        spacer.style.height = `${Math.ceil(fullHeight)}px`;
+        return { cols, cardWidth, totalRows };
+    };
+
+    const renderWindow = () => {
+        rafId = null;
+        const { cols, cardWidth, totalRows } = computeLayout();
+        const scrollTop = list.scrollTop;
+        const viewHeight = list.clientHeight;
+        const overscanRows = 2;
+        const startRow = Math.max(0, Math.floor(scrollTop / rowStride) - overscanRows);
+        const endRow = Math.min(totalRows - 1, Math.ceil((scrollTop + viewHeight) / rowStride) + overscanRows);
+        const startIdx = Math.max(0, startRow * cols);
+        const endIdx = Math.min(visibleMatches.length - 1, ((endRow + 1) * cols) - 1);
+        if (startIdx === lastStart && endIdx === lastEnd && cols === lastCols) return;
+        lastStart = startIdx;
+        lastEnd = endIdx;
+        lastCols = cols;
+
+        viewport.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        for (let idx = startIdx; idx <= endIdx; idx += 1) {
+            const match = visibleMatches[idx];
+            if (!match) continue;
+            const row = Math.floor(idx / cols);
+            const col = idx % cols;
+            const card = buildStoredMatchCardElement(match, idx, username, cardWidth);
+            card.style.position = "absolute";
+            card.style.top = `${Math.floor(row * rowStride)}px`;
+            card.style.left = `${Math.floor(col * (cardWidth + STORED_VIRTUAL_CARD_GAP))}px`;
+            frag.appendChild(card);
+        }
+        viewport.appendChild(frag);
+    };
+
+    const scheduleRender = () => {
+        if (rafId != null) return;
+        rafId = window.requestAnimationFrame(renderWindow);
+    };
+
+    const onScroll = () => scheduleRender();
+    const onResize = () => {
+        lastStart = -1;
+        lastEnd = -1;
+        lastCols = -1;
+        scheduleRender();
+    };
+
+    list.addEventListener("scroll", onScroll);
+    window.addEventListener("resize", onResize);
+    scheduleRender();
+
+    storedVirtualCleanup = () => {
+        list.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", onResize);
+        if (rafId != null) {
+            window.cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+        list.classList.remove("virtualized");
+    };
+}
+
 function renderStoredMatches(matches, username) {
     const list = document.getElementById("stored-match-list");
+    cleanupStoredVirtualization();
     list.innerHTML = "";
     storedMatchesSource = Array.isArray(matches) ? matches : [];
     const visibleMatches = applyStoredModeFilters(storedMatchesSource);
@@ -1244,70 +2173,28 @@ function renderStoredMatches(matches, username) {
 
     if (!visibleMatches.length) {
         const empty = document.createElement("div");
-        empty.className = "log-entry log-info";
-        empty.textContent = "No stored matches found for this username/filter.";
+        empty.className = "stored-empty-state";
+        empty.textContent = "No matches stored. Run a scrape first.";
         list.appendChild(empty);
     }
 
-    for (let idx = 0; idx < visibleMatches.length; idx++) {
+    for (let idx = 0; idx < visibleMatches.length; idx += 1) {
         const match = visibleMatches[idx];
-        const map = match?.map || "Unknown map";
         const perspective = inferTeamPerspective(match, username);
-        const scoreA = perspective.myScore;
-        const scoreB = perspective.oppScore;
-        const fullMatchId = String(match?.match_id || "No match ID");
-        const shortMatchId =
-            fullMatchId.length > 14
-                ? `${fullMatchId.slice(0, 8)}...${fullMatchId.slice(-4)}`
-                : fullMatchId;
         const result = perspective.result;
-        const missingRoundData = match?.round_data_missing === true;
-        if (missingRoundData) missingRoundDataCount += 1;
-
+        if (match?.round_data_missing === true) missingRoundDataCount += 1;
         if (result === "Win") wins += 1;
         if (result === "Loss") losses += 1;
+    }
 
-        const resultClass =
-            result === "Win" ? "stored-result-win" :
-            result === "Loss" ? "stored-result-loss" :
-            "stored-result-unknown";
-
-        const card = document.createElement("div");
-        card.className = "stored-match-card";
-        if (missingRoundData) {
-            card.classList.add("stored-match-missing-rounds");
+    if (visibleMatches.length >= STORED_VIRTUALIZE_THRESHOLD) {
+        renderStoredMatchesVirtualized(list, visibleMatches, username);
+    } else {
+        list.classList.remove("virtualized");
+        for (let idx = 0; idx < visibleMatches.length; idx += 1) {
+            const card = buildStoredMatchCardElement(visibleMatches[idx], idx, username);
+            list.appendChild(card);
         }
-        card.dataset.matchIndex = String(idx);
-        const bgUrl = resolveMapImageUrl(map);
-        if (bgUrl) {
-            card.style.backgroundImage = `linear-gradient(rgba(8,8,8,0.72), rgba(8,8,8,0.82)), url('${bgUrl}')`;
-        }
-        card.innerHTML = `
-            <div class="stored-match-top">
-                <div>
-                    <div class="stored-field-label">Map</div>
-                    <div class="stored-field-value">${map}</div>
-                </div>
-                <div>
-                    <div class="stored-field-label">Score</div>
-                    <div class="stored-field-value">${scoreA}:${scoreB}</div>
-                </div>
-                <div>
-                    <div class="stored-field-label">Result</div>
-                    <div class="stored-field-value ${resultClass}">${result}</div>
-                </div>
-                <div>
-                    <div class="stored-field-label">Mode</div>
-                    <div class="stored-field-value">${match?.mode || "Unknown"}</div>
-                </div>
-            </div>
-            <div class="stored-match-meta">
-                ${match?.date || "No date"} | ${shortMatchId}
-                ${missingRoundData ? '<span class="stored-warning-badge">Round Data Missing</span>' : ""}
-            </div>
-        `;
-        card.addEventListener("click", () => selectStoredMatch(idx, username));
-        list.appendChild(card);
     }
 
     document.getElementById("stored-total").textContent = String(visibleMatches.length);
@@ -1525,6 +2412,33 @@ function getRoundsFromMatch(match) {
     }
     const fallback = match?.round_data?.rounds;
     return Array.isArray(fallback) ? fallback : [];
+}
+
+function attachStoredCardMapImageFallback(imgEl, placeholderEl, mapName) {
+    if (!imgEl) return;
+    const chain = [trackerMapImageUrl(mapName)];
+    let idx = 0;
+    const showPlaceholder = () => {
+        imgEl.hidden = true;
+        if (placeholderEl) {
+            placeholderEl.hidden = false;
+            placeholderEl.textContent = String(mapName || "Unknown map");
+        }
+    };
+    const tryNext = () => {
+        if (idx >= chain.length) {
+            showPlaceholder();
+            return;
+        }
+        imgEl.src = chain[idx];
+        idx += 1;
+    };
+    imgEl.addEventListener("error", tryNext);
+    imgEl.addEventListener("load", () => {
+        imgEl.hidden = false;
+        if (placeholderEl) placeholderEl.hidden = true;
+    });
+    tryNext();
 }
 
 function getRoundEvents(round) {
@@ -1872,9 +2786,7 @@ async function unpackStoredMatches(explicitUsername = "") {
     const btn = document.getElementById("unpack-stored-matches");
     if (btn) btn.disabled = true;
     try {
-        const resp = await fetch(`/api/unpack-scraped-matches/${encodeURIComponent(username)}?limit=5000`, {
-            method: "POST",
-        });
+        const resp = await api.postUnpackScrapedMatches(username, 5000);
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
@@ -1908,9 +2820,7 @@ async function deleteBadStoredMatches(explicitUsername = "") {
     const btn = document.getElementById("delete-bad-stored-matches");
     if (btn) btn.disabled = true;
     try {
-        const resp = await fetch(`/api/delete-bad-scraped-matches/${encodeURIComponent(username)}`, {
-            method: "POST",
-        });
+        const resp = await api.postDeleteBadScrapedMatches(username);
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
@@ -1940,8 +2850,9 @@ async function loadStoredMatchesView(explicitUsername = "", silent = false) {
     }
 
     currentStoredUsername = username;
+    renderStoredLoadingSkeleton();
     try {
-        const res = await fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=2000`);
+        const res = await api.getScrapedMatches(username, 10000);
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
         }
@@ -1959,25 +2870,15 @@ async function loadStoredMatchesView(explicitUsername = "", silent = false) {
 }
 
 function logCompute(message, level = "info") {
-    const logEl = document.getElementById("compute-log");
-    if (!logEl) return;
-    const entry = document.createElement("div");
-    entry.className = `log-entry log-${level}`;
-    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    logEl.appendChild(entry);
-    logEl.scrollTop = logEl.scrollHeight;
+    queueLogEntry("compute-log", message, level);
 }
 
 function openSettingsModal() {
-    const modal = document.getElementById("settings-modal");
-    if (!modal) return;
-    modal.classList.remove("hidden");
+    settingsModalController.open();
 }
 
 function closeSettingsModal() {
-    const modal = document.getElementById("settings-modal");
-    if (!modal) return;
-    modal.classList.add("hidden");
+    settingsModalController.close();
 }
 
 function renderStandardizerReport(payload) {
@@ -2015,11 +2916,7 @@ async function runDbStandardizerFromSettings() {
     runBtn.disabled = true;
     output.textContent = "Running DB standardizer...";
     try {
-        const dryRun = dryRunEl.checked ? "true" : "false";
-        const verbose = verboseEl.checked ? "true" : "false";
-        const res = await fetch(`/api/settings/db-standardize?dry_run=${dryRun}&verbose=${verbose}`, {
-            method: "POST",
-        });
+        const res = await api.postDbStandardize(dryRunEl.checked, verboseEl.checked);
         if (!res.ok) {
             const detail = await res.text();
             throw new Error(`HTTP ${res.status}: ${detail}`);
@@ -2521,6 +3418,13 @@ function clusterColumnsGreedy(defenders, attackers, byKey, minN) {
 function initHeatmapInteractions() {
     const grid = document.getElementById("atk-def-heatmap-grid");
     if (!grid) return;
+    let tooltip = document.getElementById("heatmap-tooltip-overlay");
+    if (!tooltip) {
+        tooltip = document.createElement("div");
+        tooltip.id = "heatmap-tooltip-overlay";
+        tooltip.className = "heatmap-tooltip hidden";
+        document.body.appendChild(tooltip);
+    }
     let locked = false;
     let lockedRow = null;
     let lockedCol = null;
@@ -2541,6 +3445,31 @@ function initHeatmapInteractions() {
             if (row != null && col != null && cellRow === row && cellCol === col) el.classList.add("is-focus");
         }
     };
+    const hideTooltip = () => {
+        tooltip?.classList.add("hidden");
+    };
+    const showTooltip = (cell, event) => {
+        if (!tooltip || !cell || !event) return;
+        const raw = String(cell.dataset.tooltip || "").trim();
+        if (!raw) {
+            hideTooltip();
+            return;
+        }
+        tooltip.textContent = raw;
+        tooltip.classList.remove("hidden");
+        const margin = 16;
+        const rect = tooltip.getBoundingClientRect();
+        let left = event.clientX + margin;
+        let top = event.clientY + margin;
+        if (left + rect.width > window.innerWidth - 8) {
+            left = Math.max(8, event.clientX - rect.width - margin);
+        }
+        if (top + rect.height > window.innerHeight - 8) {
+            top = Math.max(8, event.clientY - rect.height - margin);
+        }
+        tooltip.style.left = `${Math.round(left)}px`;
+        tooltip.style.top = `${Math.round(top)}px`;
+    };
     grid.addEventListener("mouseover", (event) => {
         if (locked) return;
         const cell = event.target?.closest(".heatmap-cell");
@@ -2548,9 +3477,20 @@ function initHeatmapInteractions() {
         const row = Number.parseInt(cell.dataset.row || "-999", 10);
         const col = Number.parseInt(cell.dataset.col || "-999", 10);
         apply(Number.isNaN(row) || row < 0 ? null : row, Number.isNaN(col) || col < 0 ? null : col);
+        showTooltip(cell, event);
+    });
+    grid.addEventListener("mousemove", (event) => {
+        if (locked) return;
+        const cell = event.target?.closest(".heatmap-cell");
+        if (!cell) {
+            hideTooltip();
+            return;
+        }
+        showTooltip(cell, event);
     });
     grid.addEventListener("mouseleave", () => {
         if (!locked) clear();
+        hideTooltip();
     });
     grid.addEventListener("click", (event) => {
         const cell = event.target?.closest(".heatmap-cell");
@@ -2568,6 +3508,7 @@ function initHeatmapInteractions() {
         lockedRow = Number.isNaN(row) || row < 0 ? null : row;
         lockedCol = Number.isNaN(col) || col < 0 ? null : col;
         apply(lockedRow, lockedCol);
+        hideTooltip();
     });
 }
 
@@ -2675,12 +3616,12 @@ function renderAtkDefHeatmap(analysis) {
             const d = defenders[colIdx];
             const cell = byKey.get(`${a}|||${d}`);
             if (!cell) {
-                out.push(`<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" title="No shared rounds">-</div>`);
+                out.push(`<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" data-tooltip="No shared rounds">-</div>`);
                 continue;
             }
             const n = toNumber(cell.n_rounds, 0);
             if (n < minN) {
-                out.push(`<div class="heatmap-cell heatmap-data-cell heatmap-hidden" data-row="${rowIdx}" data-col="${colIdx}" title="Hidden by sample-size filter (n=${n} < ${minN})">n&lt;${minN}</div>`);
+                out.push(`<div class="heatmap-cell heatmap-data-cell heatmap-hidden" data-row="${rowIdx}" data-col="${colIdx}" data-tooltip="Hidden by sample-size filter (n=${n} < ${minN})">n&lt;${minN}</div>`);
                 continue;
             }
             const winPct = toNumber(cell.win_pct, 0);
@@ -2704,7 +3645,7 @@ function renderAtkDefHeatmap(analysis) {
                 `lift=${lift.toFixed(metricMode === "percent_delta" ? 3 : 4)}${metricMode === "percent_delta" ? "%" : ""}\n` +
                 `${metricMode === "log_odds_ratio" ? "95% CI for lift (log OR, normal approx)" : "95% approx CI for lift"}=${intervalLabel}`;
             out.push(
-                `<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" title="${escapeHtml(title)}" style="background:${heatmapCellColor(lift, n, metricMode, colorBound)};">${metricLabel}</div>`
+                `<div class="heatmap-cell heatmap-data-cell" data-row="${rowIdx}" data-col="${colIdx}" data-tooltip="${escapeHtml(title.replace(/\n/g, " | "))}" style="background:${heatmapCellColor(lift, n, metricMode, colorBound)};">${metricLabel}</div>`
             );
         }
         return out;
@@ -2748,7 +3689,8 @@ function renderAtkDefHeatmap(analysis) {
         </div>
         <div class="heatmap-method-badge">Lift: ${escapeHtml(metricLabel)} | CI: ${escapeHtml(ciLabel)} | Norm: ${escapeHtml(normLabel)} | Hide: ${hideLabel}</div>
         <div class="heatmap-legend">
-            Color = lift (centered at 0). Hatching = low-sample hidden. Opacity = sample size. Hover to crosshair, click to lock.
+            <span class="heatmap-legend-main">Color = lift at 0-centered baseline. Hatching = hidden low-sample cells. Opacity = sample size.</span>
+            <span class="heatmap-legend-main">Hover for details, click to lock crosshair.</span>
             <span class="heatmap-opacity-scale">
                 <span class="heatmap-opacity-chip o10">n=10</span>
                 <span class="heatmap-opacity-chip o50">n=50</span>
@@ -2815,7 +3757,7 @@ async function loadAtkDefHeatmap(username) {
         stack_only: stackOnly ? "true" : "false",
         debug: debug ? "true" : "false",
     });
-    const res = await fetch(`/api/atk-def-heatmap/${encodeURIComponent(username)}?${qs.toString()}`);
+    const res = await api.getAtkDefHeatmap(username, qs);
     if (!res.ok) {
         throw new Error(`ATK/DEF heatmap HTTP ${res.status}`);
     }
@@ -2827,7 +3769,11 @@ async function loadAtkDefHeatmap(username) {
 function renderDashboardGraphs() {
     const wrap = document.getElementById("dashboard-graphs-content");
     const heatWrap = document.getElementById("dashboard-heatmap-content");
+    const mapWrap = document.getElementById("dashboard-mapperf-content");
     if (!wrap) return;
+    if (mapWrap) {
+        mapWrap.innerHTML = renderMapPerformanceGraph(computeReportState.map);
+    }
     if (heatWrap) {
         heatWrap.innerHTML = renderAtkDefHeatmap(computeReportState.atkDefHeatmap);
         initHeatmapInteractions();
@@ -2846,6 +3792,134 @@ function renderDashboardGraphs() {
         </div>
         ${renderEnemyThreatScatter(analysis)}
         <div class="insights-findings">${renderInsightsFindings(analysis.findings)}</div>
+    `;
+}
+
+function mapPerfRowTotalRounds(row) {
+    const atk = toNumber(row?.atk_rounds, 0);
+    const def = toNumber(row?.def_rounds, 0);
+    const sum = atk + def;
+    if (sum > 0) return sum;
+    const rounds = toNumber(row?.rounds, 0);
+    if (rounds > 0) return rounds;
+    const matches = toNumber(row?.matches, 0);
+    if (matches > 0) return matches;
+    return 0;
+}
+
+function mapPerfBarTone(side, winPct) {
+    const pct = toNumber(winPct, 0);
+    const isAtk = side === "atk";
+    let tone = "neutral";
+    if (pct < 50) tone = "low";
+    if (pct > 60) tone = "high";
+    return `${isAtk ? "atk" : "def"} ${tone}`;
+}
+
+function renderMapPerformanceGraph(mapAnalysis) {
+    const empty = `<div class="compute-value">No map data available. Run Dashboard first.</div>`;
+    const rowsRaw = Array.isArray(mapAnalysis?.maps) ? mapAnalysis.maps : [];
+    if (!rowsRaw.length) return empty;
+
+    const minSample = toNumber(document.getElementById("map-perf-min-sample")?.value, 0);
+    const sortMode = String(document.getElementById("map-perf-sort")?.value || "overall");
+
+    const rows = rowsRaw
+        .map((row) => {
+            const atk = row?.atk_win_pct == null ? null : toNumber(row.atk_win_pct, 0);
+            const def = row?.def_win_pct == null ? null : toNumber(row.def_win_pct, 0);
+            const sideOverall =
+                atk != null && def != null ? ((atk + def) / 2) :
+                (atk != null ? atk : (def != null ? def : null));
+            const overall = toNumber(sideOverall, toNumber(row?.win_pct, 0));
+            const rounds = mapPerfRowTotalRounds(row);
+            const gap = (atk == null || def == null) ? null : Math.abs(atk - def);
+            const weakSide = (atk == null || def == null) ? "" : (atk < def ? "ATK weak" : "DEF weak");
+            return {
+                map_name: String(row?.map_name || "Unknown"),
+                atk_win_pct: atk,
+                def_win_pct: def,
+                win_pct: overall,
+                rounds,
+                gap,
+                weak_side: weakSide,
+                matches: toNumber(row?.matches, 0),
+            };
+        })
+        .filter(Boolean)
+        .filter((row) => row.rounds >= Math.max(0, minSample));
+
+    if (!rows.length) {
+        return `<div class="compute-value">No map data matches current sample filter.</div>`;
+    }
+
+    rows.sort((a, b) => {
+        if (sortMode === "atk") return toNumber(b.atk_win_pct, -1) - toNumber(a.atk_win_pct, -1);
+        if (sortMode === "def") return toNumber(b.def_win_pct, -1) - toNumber(a.def_win_pct, -1);
+        if (sortMode === "rounds") return b.rounds - a.rounds;
+        return toNumber(b.win_pct, -1) - toNumber(a.win_pct, -1);
+    });
+
+    const best = rows[0] || null;
+    const worst = rows[rows.length - 1] || null;
+    const ban = rows
+        .filter((row) => row.rounds >= 20)
+        .slice()
+        .sort((a, b) => toNumber(a.win_pct, 999) - toNumber(b.win_pct, 999))[0] || null;
+    const sideGap = rows
+        .filter((row) => row.gap != null)
+        .slice()
+        .sort((a, b) => toNumber(b.gap, -1) - toNumber(a.gap, -1))[0] || null;
+
+    const renderSummary = (label, row, extra = "") => {
+        if (!row) return `<div class="map-perf-summary-item"><span>${label}</span><strong>N/A</strong></div>`;
+        const atkTxt = row.atk_win_pct == null ? "N/A" : `${formatFixed(row.atk_win_pct, 1)}%`;
+        const defTxt = row.def_win_pct == null ? "N/A" : `${formatFixed(row.def_win_pct, 1)}%`;
+        return `<div class="map-perf-summary-item"><span>${label}</span><strong>${escapeHtml(row.map_name)} — ${formatFixed(row.win_pct, 1)}% overall (ATK: ${atkTxt} / DEF: ${defTxt})${extra}</strong></div>`;
+    };
+
+    const chartRows = rows.map((row) => {
+        const atk = row.atk_win_pct;
+        const def = row.def_win_pct;
+        const atkWidth = Math.max(0, Math.min(100, toNumber(atk, 0)));
+        const defWidth = Math.max(0, Math.min(100, toNumber(def, 0)));
+        const atkTone = mapPerfBarTone("atk", atk);
+        const defTone = mapPerfBarTone("def", def);
+        const atkLabel = atk == null ? "N/A" : `${formatFixed(atk, 1)}%`;
+        const defLabel = def == null ? "N/A" : `${formatFixed(def, 1)}%`;
+        return `
+            <div class="map-perf-row">
+                <div class="map-perf-label">${escapeHtml(row.map_name)} <span class="map-perf-rounds">(n=${toNumber(row.rounds, 0)})</span></div>
+                <div class="map-perf-bars">
+                    <div class="map-perf-midline" aria-hidden="true"></div>
+                    <div class="map-perf-bar-lane atk">
+                        <div class="map-perf-bar ${atkTone}" style="width:${atkWidth.toFixed(2)}%"></div>
+                        <span class="map-perf-bar-value">${atkLabel}</span>
+                    </div>
+                    <div class="map-perf-bar-lane def">
+                        <div class="map-perf-bar ${defTone}" style="width:${defWidth.toFixed(2)}%"></div>
+                        <span class="map-perf-bar-value">${defLabel}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join("");
+
+    return `
+        <div class="map-perf-legend" aria-label="Map performance legend">
+            <span class="map-perf-legend-item"><span class="map-perf-legend-swatch atk" aria-hidden="true"></span>ATK</span>
+            <span class="map-perf-legend-item"><span class="map-perf-legend-swatch def" aria-hidden="true"></span>DEF</span>
+            <span class="map-perf-legend-item"><span class="map-perf-legend-baseline" aria-hidden="true"></span>50% baseline</span>
+        </div>
+        <div class="map-perf-summary">
+            ${renderSummary("Best map", best)}
+            ${renderSummary("Worst map", worst)}
+            ${renderSummary("Recommended ban", ban, " (min 20 rounds)")}
+            ${sideGap ? `<div class="map-perf-summary-item"><span>Biggest side gap</span><strong>${escapeHtml(sideGap.map_name)} — ${formatFixed(sideGap.gap, 1)}% gap (${escapeHtml(sideGap.weak_side)})</strong></div>` : `<div class="map-perf-summary-item"><span>Biggest side gap</span><strong>N/A</strong></div>`}
+        </div>
+        <div class="map-perf-chart">
+            ${chartRows}
+        </div>
     `;
 }
 
@@ -2942,7 +4016,9 @@ function setWorkspacePanel(panel) {
     const next = ["overview", "operators", "matchups", "team"].includes(panel) ? panel : "overview";
     computeReportState.workspace.panel = next;
     document.querySelectorAll("[data-ws-panel]").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.wsPanel === next);
+        const isActive = btn.dataset.wsPanel === next;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
     });
     document.querySelectorAll(".workspace-panel").forEach((p) => p.classList.remove("active"));
     const active = document.getElementById(`workspace-panel-${next}`);
@@ -3141,7 +4217,7 @@ async function loadWorkspaceOperatorInspector(operatorName) {
         recent_n_rounds: "300",
         previous_window: "true",
     });
-    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}/operator/${encodeURIComponent(operatorName)}?${qs.toString()}`);
+    const res = await api.getDashboardWorkspaceOperator(username, operatorName, qs);
     if (!res.ok) throw new Error(`Operator inspector HTTP ${res.status}`);
     const payload = await res.json();
     const ins = document.getElementById("workspace-inspector");
@@ -3209,7 +4285,7 @@ async function loadWorkspaceEvidence(reset = true) {
     if (selection.row_atk_op) qs.set("row_atk_op", selection.row_atk_op);
     if (selection.col_def_op) qs.set("col_def_op", selection.col_def_op);
     if (!reset && computeReportState.workspace.evidenceCursor) qs.set("evidence_cursor", computeReportState.workspace.evidenceCursor);
-    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}/evidence?${qs.toString()}`);
+    const res = await api.getDashboardWorkspaceEvidence(username, qs);
     if (!res.ok) throw new Error(`Evidence HTTP ${res.status}`);
     const payload = await res.json();
     computeReportState.workspace.evidenceCursor = payload.next_cursor || "";
@@ -3232,18 +4308,73 @@ async function loadWorkspacePanel(panel, force = false) {
         renderWorkspacePanel(panelKey, computeReportState.workspace.dataByPanel[panelKey]);
         return;
     }
+    const requestSeq = (toNumber(computeReportState.workspace.requestSeq, 0) + 1);
+    computeReportState.workspace.requestSeq = requestSeq;
     const f = getWorkspaceFiltersFromUI();
     persistWorkspaceState();
     const qs = new URLSearchParams({ ...f, panel: panelKey });
-    const res = await fetch(`/api/dashboard-workspace/${encodeURIComponent(username)}?${qs.toString()}`);
+    const fetchWorkspace = async (timeoutMs) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+            return await api.getDashboardWorkspace(username, qs, { signal: ctrl.signal });
+        } catch (err) {
+            if (err?.name === "AbortError") {
+                throw new Error(`Workspace request timed out after ${Math.round(timeoutMs / 1000)}s`);
+            }
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+    let res;
+    try {
+        res = await fetchWorkspace(WORKSPACE_REQUEST_TIMEOUT_MS);
+    } catch (err) {
+        const isTimeout = String(err).toLowerCase().includes("timed out");
+        if (!isTimeout) throw err;
+        logCompute("Workspace request timed out; retrying once...", "info");
+        res = await fetchWorkspace(WORKSPACE_REQUEST_TIMEOUT_MS + 30000);
+    }
     if (!res.ok) {
         const text = await res.text();
         throw new Error(`Workspace HTTP ${res.status}: ${text}`);
     }
     const payload = await res.json();
+    if (requestSeq !== computeReportState.workspace.requestSeq) return;
     computeReportState.workspace.dataByPanel[panelKey] = payload;
     computeReportState.workspace.meta = payload.meta || null;
     renderWorkspacePanel(panelKey, payload);
+}
+
+function scheduleWorkspaceAutoRefresh(delayMs = 250) {
+    if (workspaceAutoRefreshTimer) {
+        clearTimeout(workspaceAutoRefreshTimer);
+        workspaceAutoRefreshTimer = null;
+    }
+    workspaceAutoRefreshTimer = setTimeout(async () => {
+        workspaceAutoRefreshTimer = null;
+        const username = computeReportState.username || (document.getElementById("compute-username")?.value || "").trim();
+        if (!username) return;
+        const panel = computeReportState.workspace.panel || "overview";
+        try {
+            await loadWorkspacePanel(panel, true);
+        } catch (err) {
+            logCompute(`Workspace refresh failed: ${err}`, "error");
+            renderWorkspacePanelError(panel, err);
+        }
+    }, Math.max(0, toNumber(delayMs, 250)));
+}
+
+function scheduleDashboardGraphRender(delayMs = 80) {
+    if (dashboardGraphRenderTimer) {
+        clearTimeout(dashboardGraphRenderTimer);
+        dashboardGraphRenderTimer = null;
+    }
+    dashboardGraphRenderTimer = setTimeout(() => {
+        dashboardGraphRenderTimer = null;
+        renderDashboardGraphs();
+    }, Math.max(0, toNumber(delayMs, 80)));
 }
 
 function setDashboardView(view) {
@@ -3255,7 +4386,53 @@ function setDashboardView(view) {
     if (graphsPanel) graphsPanel.classList.toggle("active", next === "graphs");
     // Only toggle top-level Dashboard subtabs; workspace subtabs are managed separately.
     document.querySelectorAll(".dashboard-subtab[data-dashboard-view]").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.dashboardView === next);
+        const isActive = btn.dataset.dashboardView === next;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+}
+
+function setGraphPanel(panel) {
+    const next = panel === "threat" ? "threat" : "workspace";
+    computeReportState.graphPanel = next;
+    document.querySelectorAll("[data-graph-panel]").forEach((btn) => {
+        const isActive = btn.dataset.graphPanel === next;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+    const workspacePanel = document.getElementById("graph-panel-workspace");
+    const threatPanel = document.getElementById("graph-panel-threat");
+    if (workspacePanel) workspacePanel.hidden = next !== "workspace";
+    if (threatPanel) threatPanel.hidden = next !== "threat";
+}
+
+function initStatusChipMirrors() {
+    const mirrors = [
+        { sourceId: "scan-status", targetId: "scan-status-chip" },
+        { sourceId: "match-status", targetId: "match-status-chip" },
+        { sourceId: "stored-total", targetId: "stored-list-chip", prefix: "Items " },
+    ];
+    mirrors.forEach(({ sourceId, targetId, prefix = "" }) => {
+        const source = document.getElementById(sourceId);
+        const target = document.getElementById(targetId);
+        if (!source || !target) return;
+        const sync = () => {
+            const next = `${prefix}${String(source.textContent || "").trim() || "-"}`;
+            target.textContent = next;
+        };
+        sync();
+        const observer = new MutationObserver(sync);
+        observer.observe(source, { childList: true, characterData: true, subtree: true });
+    });
+}
+
+function syncFilterDrawerDefaults() {
+    const compact = window.matchMedia("(max-width: 900px)").matches;
+    if (filterDrawerCompactMode === compact) return;
+    filterDrawerCompactMode = compact;
+    document.querySelectorAll(".filter-drawer").forEach((drawer) => {
+        if (!(drawer instanceof HTMLDetailsElement)) return;
+        drawer.open = !compact;
     });
 }
 
@@ -4122,14 +5299,14 @@ async function runInsights(explicitUsername = "") {
     }
     try {
         const [roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, enemyThreatRes, operatorRes, mapRes] = await Promise.all([
-            fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
-            fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
-            fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
-            fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
-            fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
-            fetch(`/api/enemy-operator-threat/${encodeURIComponent(username)}`),
-            fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
-            fetch(`/api/map-stats/${encodeURIComponent(username)}`),
+            api.getRoundAnalysis(username),
+            api.getTeammateChemistry(username),
+            api.getLobbyQuality(username),
+            api.getTradeAnalysis(username, 5),
+            api.getTeamAnalysis(username),
+            api.getEnemyOperatorThreat(username),
+            api.getOperatorStats(username),
+            api.getMapStats(username),
         ]);
 
         let roundAnalysis = null;
@@ -4183,21 +5360,23 @@ async function runInsights(explicitUsername = "") {
 async function runStatComputation(explicitUsername = "") {
     const username = (explicitUsername || document.getElementById("compute-username")?.value || "").trim();
     if (!username) {
-        logCompute("Enter a username before computing stats.", "error");
+        renderDashboardNeedsUsernamePrompt();
         return;
     }
+    if (dashboardComputeInFlight) return;
+    dashboardComputeInFlight = true;
     computeReportState.username = username;
     try {
         const [matchesRes, roundRes, chemistryRes, lobbyRes, tradeRes, teamRes, enemyThreatRes, operatorRes, mapRes] = await Promise.all([
-            fetch(`/api/scraped-matches/${encodeURIComponent(username)}?limit=2000`),
-            fetch(`/api/round-analysis/${encodeURIComponent(username)}`),
-            fetch(`/api/teammate-chemistry/${encodeURIComponent(username)}`),
-            fetch(`/api/lobby-quality/${encodeURIComponent(username)}`),
-            fetch(`/api/trade-analysis/${encodeURIComponent(username)}?window_seconds=5`),
-            fetch(`/api/team-analysis/${encodeURIComponent(username)}`),
-            fetch(`/api/enemy-operator-threat/${encodeURIComponent(username)}`),
-            fetch(`/api/operator-stats/${encodeURIComponent(username)}`),
-            fetch(`/api/map-stats/${encodeURIComponent(username)}`),
+            api.getScrapedMatches(username, 2000),
+            api.getRoundAnalysis(username),
+            api.getTeammateChemistry(username),
+            api.getLobbyQuality(username),
+            api.getTradeAnalysis(username, 5),
+            api.getTeamAnalysis(username),
+            api.getEnemyOperatorThreat(username),
+            api.getOperatorStats(username),
+            api.getMapStats(username),
         ]);
         if (!matchesRes.ok) {
             throw new Error(`HTTP ${matchesRes.status}`);
@@ -4444,34 +5623,66 @@ async function runStatComputation(explicitUsername = "") {
             logCompute(`Map stats unavailable (HTTP ${mapRes.status}).`, "error");
         }
     } catch (err) {
+        dashboardLastRequestSignature = "";
         logCompute(`Failed stat computation: ${err}`, "error");
+    } finally {
+        dashboardComputeInFlight = false;
+        if (dashboardRefreshQueued) {
+            dashboardRefreshQueued = false;
+            setTimeout(() => triggerDashboardAutoRefresh({ force: true }), 0);
+        }
     }
 }
 
-document.getElementById("start-scan").addEventListener("click", startScan);
-document.getElementById("stop-scan").addEventListener("click", stopScan);
-document.getElementById("start-match-scrape").addEventListener("click", startMatchScrape);
-document.getElementById("stop-match-scrape").addEventListener("click", stopMatchScrape);
-document.getElementById("load-stored-matches").addEventListener("click", () => loadStoredMatchesView("", false));
-document.getElementById("unpack-stored-matches").addEventListener("click", () => unpackStoredMatches(""));
-document.getElementById("delete-bad-stored-matches").addEventListener("click", () => deleteBadStoredMatches(""));
-document.getElementById("stored-detail-close").addEventListener("click", closeStoredDetail);
-document.getElementById("stored-show-ranked").addEventListener("change", () => {
+document.getElementById("start-scan")?.addEventListener("click", startScan);
+document.getElementById("stop-scan")?.addEventListener("click", stopScan);
+document.getElementById("start-match-scrape")?.addEventListener("click", startMatchScrape);
+document.getElementById("stop-match-scrape")?.addEventListener("click", stopMatchScrape);
+document.getElementById("load-stored-matches")?.addEventListener("click", () => loadStoredMatchesView("", false));
+document.getElementById("unpack-stored-matches")?.addEventListener("click", () => unpackStoredMatches(""));
+document.getElementById("delete-bad-stored-matches")?.addEventListener("click", () => deleteBadStoredMatches(""));
+document.getElementById("stored-detail-close")?.addEventListener("click", closeStoredDetail);
+document.getElementById("stored-show-ranked")?.addEventListener("change", () => {
     renderStoredMatches(storedMatchesSource, currentStoredUsername);
 });
-document.getElementById("stored-show-unranked").addEventListener("change", () => {
+document.getElementById("stored-show-unranked")?.addEventListener("change", () => {
     renderStoredMatches(storedMatchesSource, currentStoredUsername);
 });
-document.getElementById("tab-scanner").addEventListener("click", () => setActiveTab("scanner"));
-document.getElementById("tab-matches").addEventListener("click", () => setActiveTab("matches"));
-document.getElementById("tab-stored").addEventListener("click", () => setActiveTab("stored"));
-document.getElementById("tab-dashboard").addEventListener("click", () => setActiveTab("dashboard"));
-document.getElementById("dashboard-tab-insights").addEventListener("click", () => setDashboardView("insights"));
-document.getElementById("dashboard-tab-graphs").addEventListener("click", () => setDashboardView("graphs"));
-document.getElementById("open-settings").addEventListener("click", openSettingsModal);
-document.getElementById("close-settings").addEventListener("click", closeSettingsModal);
-document.getElementById("run-db-standardizer").addEventListener("click", runDbStandardizerFromSettings);
-document.getElementById("run-stat-compute").addEventListener("click", () => runStatComputation(""));
+document.getElementById("tab-scanner")?.addEventListener("click", () => setActiveTab("scanner"));
+document.getElementById("tab-matches")?.addEventListener("click", () => setActiveTab("matches"));
+document.getElementById("tab-stored")?.addEventListener("click", () => setActiveTab("stored"));
+document.getElementById("tab-players")?.addEventListener("click", () => setActiveTab("players"));
+document.getElementById("tab-team-builder")?.addEventListener("click", () => setActiveTab("team-builder"));
+document.getElementById("tab-operators")?.addEventListener("click", () => setActiveTab("operators"));
+document.getElementById("tab-dashboard")?.addEventListener("click", () => setActiveTab("dashboard"));
+document.getElementById("dashboard-tab-insights")?.addEventListener("click", () => setDashboardView("insights"));
+document.getElementById("dashboard-tab-graphs")?.addEventListener("click", () => setDashboardView("graphs"));
+["graph-tab-workspace", "graph-tab-threat"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", () => {
+        setGraphPanel(el.dataset.graphPanel || "workspace");
+    });
+});
+document.getElementById("open-settings")?.addEventListener("click", openSettingsModal);
+document.getElementById("close-settings")?.addEventListener("click", closeSettingsModal);
+document.getElementById("run-db-standardizer")?.addEventListener("click", runDbStandardizerFromSettings);
+document.getElementById("run-stat-compute")?.addEventListener("click", () => triggerDashboardAutoRefresh({ force: true }));
+const computeUsernameInput = document.getElementById("compute-username");
+computeUsernameInput?.addEventListener("input", renderDashboardActiveFilterChips);
+computeUsernameInput?.addEventListener("blur", () => triggerDashboardAutoRefresh());
+computeUsernameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+        event.preventDefault();
+        triggerDashboardAutoRefresh({ force: true });
+    }
+});
+document.querySelectorAll(".dashboard-include-type-filter, .dashboard-exclude-type-filter").forEach((el) => {
+    el.addEventListener("change", () => {
+        renderDashboardActiveFilterChips();
+        triggerDashboardAutoRefresh();
+    });
+});
 const heatmapRefresh = document.getElementById("heatmap-refresh");
 if (heatmapRefresh) {
     heatmapRefresh.addEventListener("click", async () => {
@@ -4479,10 +5690,10 @@ if (heatmapRefresh) {
         if (!username) return;
         try {
             await loadAtkDefHeatmap(username);
-            renderDashboardGraphs();
+            scheduleDashboardGraphRender(30);
         } catch (err) {
             computeReportState.atkDefHeatmap = { error: String(err) };
-            renderDashboardGraphs();
+            scheduleDashboardGraphRender(30);
             logCompute(`Heatmap refresh failed: ${err}`, "error");
         }
     });
@@ -4498,20 +5709,27 @@ if (heatmapRefresh) {
         } catch (err) {
             computeReportState.atkDefHeatmap = { error: String(err) };
         }
-        renderDashboardGraphs();
+        scheduleDashboardGraphRender(50);
     });
 });
 ["heatmap-top-n", "heatmap-sort-rows", "heatmap-sort-cols", "heatmap-cluster-cols"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("change", () => {
-        renderDashboardGraphs();
+        scheduleDashboardGraphRender(40);
+    });
+});
+["map-perf-sort", "map-perf-min-sample"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => {
+        scheduleDashboardGraphRender(40);
     });
 });
 const heatmapSearch = document.getElementById("heatmap-search-op");
 if (heatmapSearch) {
     heatmapSearch.addEventListener("input", () => {
-        renderDashboardGraphs();
+        scheduleDashboardGraphRender(120);
     });
 }
 ["ws-tab-overview", "ws-tab-operators", "ws-tab-matchups", "ws-tab-team"].forEach((id) => {
@@ -4545,13 +5763,14 @@ if (wsRefresh) {
     const evt = el.tagName === "INPUT" && el.type === "text" ? "input" : "change";
     el.addEventListener(evt, () => {
         persistWorkspaceState();
-        if (["ws-labels", "ws-clamp-mode", "ws-clamp-abs"].includes(id)) {
+        if (id === "ws-labels") {
             const panel = computeReportState.workspace.panel || "overview";
             const payload = computeReportState.workspace.dataByPanel[panel];
             if (payload) renderWorkspacePanel(panel, payload);
             return;
         }
         computeReportState.workspace.dataByPanel = {};
+        scheduleWorkspaceAutoRefresh(id === "ws-map-name" || id === "ws-search" ? 350 : 150);
     });
 });
 const wsEvidenceMore = document.getElementById("workspace-evidence-more");
@@ -4564,14 +5783,32 @@ if (wsEvidenceMore) {
         }
     });
 }
-document.getElementById("matches-run-forever").addEventListener("change", syncContinuousControls);
-document.getElementById("matches-newest-only").addEventListener("change", syncScrapeModeControls);
-document.getElementById("matches-full-backfill").addEventListener("change", syncScrapeModeControls);
+document.getElementById("matches-run-forever")?.addEventListener("change", syncContinuousControls);
+document.getElementById("matches-newest-only")?.addEventListener("change", syncScrapeModeControls);
+document.getElementById("matches-full-backfill")?.addEventListener("change", syncScrapeModeControls);
 document.querySelectorAll(".compute-mode-toggle .compute-chip").forEach((chip) => {
     chip.addEventListener("click", () => {
         computeReportState.mode = chip.dataset.mode || "overall";
         renderComputeReport();
     });
+});
+
+document.getElementById("players-refresh")?.addEventListener("click", () => loadPlayersTab(false));
+document.getElementById("players-search")?.addEventListener("input", () => renderPlayersTable(encounteredPlayersCache));
+document.getElementById("players-primary-username")?.addEventListener("blur", () => {
+    const val = String(document.getElementById("players-primary-username")?.value || "").trim();
+    if (val) {
+        const computeInput = document.getElementById("compute-username");
+        if (computeInput && !String(computeInput.value || "").trim()) computeInput.value = val;
+    }
+    loadPlayersTab(false);
+});
+document.getElementById("team-builder-analyze")?.addEventListener("click", analyzeSelectedStack);
+document.getElementById("operators-refresh")?.addEventListener("click", () => loadOperatorsTab(false));
+["operators-player", "operators-stack", "operators-match-type"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => loadOperatorsTab(true));
 });
 
 window.addEventListener("error", (event) => {
@@ -4582,26 +5819,21 @@ window.addEventListener("unhandledrejection", (event) => {
     log(`Promise error: ${event.reason}`, "error");
 });
 
-window.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    const modal = document.getElementById("settings-modal");
-    if (!modal || modal.classList.contains("hidden")) return;
-    closeSettingsModal();
-});
-
-document.getElementById("settings-modal").addEventListener("click", (event) => {
-    if (event.target?.id === "settings-modal") {
-        closeSettingsModal();
-    }
-});
-
 loadOperatorImageIndex();
+setActiveTab("scanner");
 initDashboardSectionToggles();
 applyDashboardSectionVisibility();
 setDashboardView("insights");
+setGraphPanel(computeReportState.graphPanel || "workspace");
 restoreWorkspaceState();
 setWorkspacePanel(computeReportState.workspace.panel || "overview");
 syncScrapeModeControls();
+initPrimaryTabKeyboardNav();
+initStatusChipMirrors();
+renderDashboardActiveFilterChips();
+settingsModalController.bindDismissHandlers();
+syncFilterDrawerDefaults();
+window.addEventListener("resize", syncFilterDrawerDefaults);
 initNetwork();
 log("Ready to scan. Enter a username and click Start Scan.");
 logMatch("Ready to scrape matches. Enter a username and click Scrape Matches.");

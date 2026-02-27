@@ -149,13 +149,7 @@ class LobbyQualityPlugin:
                 AND mdp_me.team_id  != mdp_enemy.team_id
                 AND mdp_enemy.username != ''
             WHERE mdp_me.username = :username
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = mdp_me.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND mdp_me.match_type = 'Ranked'
             GROUP BY mdp_me.match_id
             HAVING valid_enemy_count >= 2
             ORDER BY (

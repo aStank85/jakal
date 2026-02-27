@@ -102,14 +102,8 @@ class MapStatsPlugin:
             FROM match_detail_players mdp
             JOIN scraped_match_cards smc ON smc.match_id = mdp.match_id
             WHERE mdp.username = ?
+              AND mdp.match_type = 'Ranked'
               AND smc.map_name IS NOT NULL
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc2
-                    WHERE smc2.match_id = mdp.match_id
-                      AND LOWER(COALESCE(smc2.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc2.mode, '')) NOT LIKE '%unranked%'
-              )
             """,
             (self.username,),
         )
@@ -123,15 +117,9 @@ class MapStatsPlugin:
             FROM player_rounds pr
             JOIN scraped_match_cards smc ON smc.match_id = pr.match_id
             WHERE pr.username = ?
+              AND pr.match_type = 'Ranked'
               AND smc.map_name IS NOT NULL
               AND pr.side IS NOT NULL
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc2
-                    WHERE smc2.match_id = pr.match_id
-                      AND LOWER(COALESCE(smc2.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc2.mode, '')) NOT LIKE '%unranked%'
-              )
             """,
             (self.username,),
         )

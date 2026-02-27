@@ -119,13 +119,7 @@ class TeammateChemistryPlugin:
                    SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins
             FROM match_detail_players
             WHERE username = ?
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = match_detail_players.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND match_type = 'Ranked'
             """, (self.username,)
         )
         row   = cur.fetchone()
@@ -155,13 +149,7 @@ class TeammateChemistryPlugin:
                 AND mdp1.username != mdp2.username
             WHERE mdp1.username = ?
               AND mdp2.username != ''
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = mdp1.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND mdp1.match_type = 'Ranked'
             GROUP BY mdp2.username
             HAVING COUNT(DISTINCT mdp1.match_id) >= ?
             ORDER BY shared_matches DESC
@@ -196,13 +184,7 @@ class TeammateChemistryPlugin:
                     AND mdp2.username = ?
                 LEFT JOIN scraped_match_cards smc ON mdp1.match_id = smc.match_id
                 WHERE mdp1.username = ? AND mdp1.result = ?
-                  AND EXISTS (
-                        SELECT 1
-                        FROM scraped_match_cards smc2
-                        WHERE smc2.match_id = mdp1.match_id
-                          AND LOWER(COALESCE(smc2.mode, '')) LIKE '%ranked%'
-                          AND LOWER(COALESCE(smc2.mode, '')) NOT LIKE '%unranked%'
-                  )
+                  AND mdp1.match_type = 'Ranked'
                 ORDER BY smc.match_date DESC
                 LIMIT {MAX_CITATIONS}
                 """,
@@ -220,13 +202,7 @@ class TeammateChemistryPlugin:
                     AND mdp2.username = ?
                 LEFT JOIN scraped_match_cards smc ON mdp1.match_id = smc.match_id
                 WHERE mdp1.username = ?
-                  AND EXISTS (
-                        SELECT 1
-                        FROM scraped_match_cards smc2
-                        WHERE smc2.match_id = mdp1.match_id
-                          AND LOWER(COALESCE(smc2.mode, '')) LIKE '%ranked%'
-                          AND LOWER(COALESCE(smc2.mode, '')) NOT LIKE '%unranked%'
-                  )
+                  AND mdp1.match_type = 'Ranked'
                 ORDER BY smc.match_date DESC
                 LIMIT {MAX_CITATIONS}
                 """,

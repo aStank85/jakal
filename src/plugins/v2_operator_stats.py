@@ -119,15 +119,9 @@ class OperatorStatsPlugin:
                 pr.clutch_lost
             FROM player_rounds pr
             WHERE pr.username = ?
+              AND pr.match_type = 'Ranked'
               AND pr.operator IS NOT NULL
               AND pr.operator != ''
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = pr.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
             """,
             (self.username,),
         )

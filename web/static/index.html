@@ -10,34 +10,51 @@
         <span class="global-scrape-dot"></span>
         <span>Match scrape running...</span>
     </div>
-    <div class="container">
-        <header>
-            <h1>JAKAL - R6 Network Scanner</h1>
-            <p>Visualize player connections in real time</p>
+    <div class="container app-shell">
+        <header class="app-header">
+            <h1>R6 Data Analyzer</h1>
+            <p>Visualize player statistics & insights in real time</p>
             <button id="open-settings" class="settings-btn" type="button">Settings</button>
         </header>
-        <div class="tabs">
-            <button class="tab-btn active" id="tab-scanner" data-tab="scanner">Network Scanner</button>
-            <button class="tab-btn" id="tab-matches" data-tab="matches">Match Scraper</button>
-            <button class="tab-btn" id="tab-stored" data-tab="stored">Stored Matches</button>
-            <button class="tab-btn" id="tab-dashboard" data-tab="dashboard">Dashboard</button>
-        </div>
+        <nav class="tabs app-nav" role="tablist" aria-label="Primary Tabs">
+            <button class="tab-btn active" id="tab-scanner" data-tab="scanner" role="tab" aria-selected="true" aria-controls="panel-scanner">Network Scanner</button>
+            <button class="tab-btn" id="tab-matches" data-tab="matches" role="tab" aria-selected="false" aria-controls="panel-matches">Match Scraper</button>
+            <button class="tab-btn" id="tab-stored" data-tab="stored" role="tab" aria-selected="false" aria-controls="panel-stored">Stored Matches</button>
+            <button class="tab-btn" id="tab-players" data-tab="players" role="tab" aria-selected="false" aria-controls="panel-players">Players</button>
+            <button class="tab-btn" id="tab-team-builder" data-tab="team-builder" role="tab" aria-selected="false" aria-controls="panel-team-builder">Team Builder</button>
+            <button class="tab-btn" id="tab-operators" data-tab="operators" role="tab" aria-selected="false" aria-controls="panel-operators">Operators</button>
+            <button class="tab-btn" id="tab-dashboard" data-tab="dashboard" role="tab" aria-selected="false" aria-controls="panel-dashboard">Dashboard</button>
+        </nav>
+        <main class="app-main">
 
         <section id="panel-scanner" class="tab-panel active">
-            <div class="controls">
-                <input type="text" id="username" placeholder="Enter R6 username" value="SaucedZyn">
-                <select id="depth">
-                    <option value="1">1 Level Deep</option>
-                    <option value="2" selected>2 Levels Deep</option>
-                    <option value="3">3 Levels Deep</option>
-                </select>
-                <label>
-                    <input type="checkbox" id="debug-browser">
-                    Show Browser (Debug)
-                </label>
-                <button id="start-scan">Start Scan</button>
-                <button id="stop-scan" disabled>Stop Scan</button>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Network Scanner</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Status: <strong id="scan-status-chip">Idle</strong></span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="start-scan">Start Scan</button>
+                    <button id="stop-scan" disabled>Stop Scan</button>
+                </div>
             </div>
+            <details class="filter-drawer" open>
+                <summary>Scanner Filters</summary>
+                <div class="controls">
+                    <input type="text" id="username" placeholder="Enter R6 username" value="SaucedZyn">
+                    <select id="depth">
+                        <option value="1">1 Level Deep</option>
+                        <option value="2" selected>2 Levels Deep</option>
+                        <option value="3">3 Levels Deep</option>
+                    </select>
+                    <label>
+                        <input type="checkbox" id="debug-browser">
+                        Show Browser (Debug)
+                    </label>
+                </div>
+            </details>
 
             <div class="stats">
                 <div class="stat">
@@ -63,40 +80,53 @@
         </section>
 
         <section id="panel-matches" class="tab-panel">
-            <div class="controls">
-                <input type="text" id="matches-username" placeholder="Enter R6 username" value="SaucedZyn">
-                <select id="max-matches">
-                    <option value="3">Last 3 Matches</option>
-                    <option value="5" selected>Last 5 Matches</option>
-                    <option value="10">Last 10 Matches</option>
-                </select>
-                <label>
-                    <input type="checkbox" id="matches-debug-browser">
-                    Show Browser (Debug)
-                </label>
-                <label>
-                    <input type="checkbox" id="matches-newest-only">
-                    Get Newest Matches
-                </label>
-                <label>
-                    <input type="checkbox" id="matches-full-backfill">
-                    Full Backfill
-                </label>
-                <label>
-                    <input type="checkbox" id="matches-run-forever">
-                    Run Continuously
-                </label>
-                <button id="start-match-scrape">Scrape Matches</button>
-                <button id="stop-match-scrape" disabled>Stop Scrape</button>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Match Scraper</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Status: <strong id="match-status-chip">Idle</strong></span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="start-match-scrape">Scrape Matches</button>
+                    <button id="stop-match-scrape" disabled>Stop Scrape</button>
+                </div>
             </div>
-            <div class="controls matches-type-controls">
-                <span class="matches-type-label">Allowed Types (Newest/Backfill):</span>
-                <label><input type="checkbox" class="matches-type-filter" value="ranked" checked> Ranked</label>
-                <label><input type="checkbox" class="matches-type-filter" value="unranked" checked> Unranked</label>
-                <label><input type="checkbox" class="matches-type-filter" value="standard" checked> Standard</label>
-                <label><input type="checkbox" class="matches-type-filter" value="quick" checked> Quick</label>
-                <label><input type="checkbox" class="matches-type-filter" value="event" checked> Event</label>
-            </div>
+            <details class="filter-drawer" open>
+                <summary>Scraper Filters</summary>
+                <div class="controls">
+                    <input type="text" id="matches-username" placeholder="Enter R6 username" value="SaucedZyn">
+                    <select id="max-matches">
+                        <option value="3">Last 3 Matches</option>
+                        <option value="5" selected>Last 5 Matches</option>
+                        <option value="10">Last 10 Matches</option>
+                    </select>
+                    <label>
+                        <input type="checkbox" id="matches-debug-browser">
+                        Show Browser (Debug)
+                    </label>
+                    <label>
+                        <input type="checkbox" id="matches-newest-only">
+                        Get Newest Matches
+                    </label>
+                    <label>
+                        <input type="checkbox" id="matches-full-backfill">
+                        Full Backfill
+                    </label>
+                    <label>
+                        <input type="checkbox" id="matches-run-forever">
+                        Run Continuously
+                    </label>
+                </div>
+                <div class="controls matches-type-controls">
+                    <span class="matches-type-label">Allowed Types (Newest/Backfill):</span>
+                    <label><input type="checkbox" class="matches-type-filter" value="ranked" checked> Ranked</label>
+                    <label><input type="checkbox" class="matches-type-filter" value="unranked" checked> Unranked</label>
+                    <label><input type="checkbox" class="matches-type-filter" value="standard" checked> Standard</label>
+                    <label><input type="checkbox" class="matches-type-filter" value="quick" checked> Quick</label>
+                    <label><input type="checkbox" class="matches-type-filter" value="event" checked> Event</label>
+                </div>
+            </details>
 
             <div class="stats">
                 <div class="stat">
@@ -122,20 +152,33 @@
         </section>
 
         <section id="panel-stored" class="tab-panel">
-            <div class="controls">
-                <input type="text" id="stored-username" placeholder="Enter R6 username" value="SaucedZyn">
-                <label>
-                    <input type="checkbox" id="stored-show-ranked" checked>
-                    Ranked
-                </label>
-                <label>
-                    <input type="checkbox" id="stored-show-unranked" checked>
-                    Unranked
-                </label>
-                <button id="load-stored-matches">Load Stored Matches</button>
-                <button id="unpack-stored-matches">Unpack Matches</button>
-                <button id="delete-bad-stored-matches">Delete Bad Matches</button>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Stored Matches</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">List: <strong id="stored-list-chip">Ready</strong></span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="load-stored-matches">Load Stored Matches</button>
+                </div>
             </div>
+            <details class="filter-drawer" open>
+                <summary>Stored Match Filters</summary>
+                <div class="controls">
+                    <input type="text" id="stored-username" placeholder="Enter R6 username" value="SaucedZyn">
+                    <label>
+                        <input type="checkbox" id="stored-show-ranked" checked>
+                        Ranked
+                    </label>
+                    <label>
+                        <input type="checkbox" id="stored-show-unranked" checked>
+                        Unranked
+                    </label>
+                    <button id="unpack-stored-matches">Unpack Matches</button>
+                    <button id="delete-bad-stored-matches">Delete Bad Matches</button>
+                </div>
+            </details>
 
             <div class="stats">
                 <div class="stat">
@@ -170,36 +213,135 @@
             </div>
         </section>
 
+        <section id="panel-players" class="tab-panel" hidden>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Players</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Encountered: <strong id="players-count-chip">0</strong></span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="players-refresh" type="button">Refresh Players</button>
+                </div>
+            </div>
+            <details class="filter-drawer" open>
+                <summary>Players Filters</summary>
+                <div class="controls">
+                    <input type="text" id="players-primary-username" placeholder="Primary player username" value="SaucedZyn">
+                    <input type="text" id="players-search" placeholder="Search encountered players">
+                </div>
+            </details>
+            <div id="players-table-wrap" class="players-table-wrap">
+                <div class="compute-value">Loading encountered players...</div>
+            </div>
+        </section>
+
+        <section id="panel-team-builder" class="tab-panel" hidden>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Team Builder</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Friends: <strong id="team-builder-friend-count">0</strong></span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="team-builder-analyze" type="button">Analyze Stack</button>
+                </div>
+            </div>
+            <div class="team-builder-layout">
+                <aside class="team-builder-left">
+                    <div class="compute-label">Tagged Friends</div>
+                    <div id="team-builder-friends" class="team-builder-friends">
+                        <div class="compute-value">No tagged friends yet.</div>
+                    </div>
+                </aside>
+                <section class="team-builder-right">
+                    <div id="team-builder-output" class="team-builder-output">
+                        <div class="compute-value">Select 2-4 friends, then click Analyze Stack.</div>
+                    </div>
+                </section>
+            </div>
+        </section>
+
+        <section id="panel-operators" class="tab-panel" hidden>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Operators</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Per-map operator impact</span>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button id="operators-refresh" type="button">Refresh Operators</button>
+                </div>
+            </div>
+            <details class="filter-drawer" open>
+                <summary>Operators Filters</summary>
+                <div class="controls">
+                    <select id="operators-player"></select>
+                    <select id="operators-stack">
+                        <option value="solo" selected>Stack: Solo</option>
+                        <option value="duo">Stack: Duo</option>
+                        <option value="trio">Stack: Trio</option>
+                        <option value="squad">Stack: Squad</option>
+                        <option value="full">Stack: Full Stack</option>
+                    </select>
+                    <select id="operators-match-type">
+                        <option value="Ranked" selected>Match Type: Ranked</option>
+                    </select>
+                </div>
+            </details>
+            <div id="operators-map-grid" class="operators-map-grid">
+                <div class="compute-value">Select filters and refresh.</div>
+            </div>
+            <div id="operators-low-data" class="operators-low-data"></div>
+        </section>
+
         <section id="panel-dashboard" class="tab-panel">
-            <div class="controls">
-                <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
-                <button id="run-stat-compute">Run Dashboard</button>
+            <div class="panel-topbar">
+                <div>
+                    <h2 class="panel-title">Dashboard</h2>
+                    <div class="panel-chips">
+                        <span class="panel-chip">Status: <strong id="dashboard-status-chip">Ready</strong></span>
+                    </div>
+                    <div id="dashboard-active-filters" class="dashboard-active-filters" aria-live="polite"></div>
+                </div>
+                <div class="panel-actions">
+                    <button id="run-stat-compute">Refresh</button>
+                </div>
             </div>
+            <details class="filter-drawer" open>
+                <summary>Dashboard Filters</summary>
+                <div class="controls">
+                    <input type="text" id="compute-username" placeholder="Enter R6 username" value="SaucedZyn">
+                </div>
+                <div class="controls compute-type-controls">
+                    <span class="compute-types-label">Dashboard Match Types:</span>
+                    <span class="compute-types-sub-label">Include</span>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="ranked"> Ranked</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="unranked"> Unranked</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="standard"> Standard</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="quick"> Quick</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="event"> Event</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="arcade"> Arcade</label>
+                    <label><input type="checkbox" class="dashboard-include-type-filter" value="other"> Other</label>
+                </div>
+                <div class="controls compute-type-controls">
+                    <span class="compute-types-label compute-types-label-spacer" aria-hidden="true">Dashboard Match Types:</span>
+                    <span class="compute-types-sub-label">Exclude</span>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="ranked"> Ranked</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="unranked"> Unranked</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="standard"> Standard</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="quick"> Quick</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="event"> Event</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="arcade"> Arcade</label>
+                    <label><input type="checkbox" class="dashboard-exclude-type-filter" value="other"> Other</label>
+                </div>
+            </details>
             <div class="dashboard-subtabs" role="tablist" aria-label="Dashboard Views">
-                <button id="dashboard-tab-insights" class="dashboard-subtab active" data-dashboard-view="insights" role="tab">Insights</button>
-                <button id="dashboard-tab-graphs" class="dashboard-subtab" data-dashboard-view="graphs" role="tab">Graphs</button>
-            </div>
-            <div class="controls compute-type-controls">
-                <span class="compute-types-label">Dashboard Match Types:</span>
-                <span class="compute-types-sub-label">Include</span>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="ranked"> Ranked</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="unranked"> Unranked</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="standard"> Standard</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="quick"> Quick</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="event"> Event</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="arcade"> Arcade</label>
-                <label><input type="checkbox" class="dashboard-include-type-filter" value="other"> Other</label>
-            </div>
-            <div class="controls compute-type-controls">
-                <span class="compute-types-label compute-types-label-spacer" aria-hidden="true">Dashboard Match Types:</span>
-                <span class="compute-types-sub-label">Exclude</span>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="ranked"> Ranked</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="unranked"> Unranked</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="standard"> Standard</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="quick"> Quick</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="event"> Event</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="arcade"> Arcade</label>
-                <label><input type="checkbox" class="dashboard-exclude-type-filter" value="other"> Other</label>
+                <button id="dashboard-tab-insights" class="dashboard-subtab active" data-dashboard-view="insights" role="tab" aria-selected="true">Insights</button>
+                <button id="dashboard-tab-graphs" class="dashboard-subtab" data-dashboard-view="graphs" role="tab" aria-selected="false">Graphs</button>
             </div>
             <div id="compute-results" class="compute-report">
                 <div class="compute-kpi-strip">
@@ -304,111 +446,147 @@
                 </div>
 
                 <div id="dashboard-graphs-panel" class="dashboard-panel">
-                    <div class="compute-card dashboard-graph-card">
-                        <div class="compute-label">Workspace Filters</div>
-                        <div class="dashboard-graph-controls workspace-filter-bar">
-                            <select id="ws-queue">
-                                <option value="all" selected>Queue: All</option>
-                                <option value="ranked">Queue: Ranked</option>
-                                <option value="unranked">Queue: Unranked</option>
-                            </select>
-                            <select id="ws-playlist">
-                                <option value="" selected>Playlist: All</option>
-                                <option value="standard">Playlist: Standard</option>
-                                <option value="quick">Playlist: Quick</option>
-                                <option value="event">Playlist: Event</option>
-                                <option value="arcade">Playlist: Arcade</option>
-                            </select>
-                            <select id="ws-days">
-                                <option value="30">Window: 30d</option>
-                                <option value="60">Window: 60d</option>
-                                <option value="90" selected>Window: 90d</option>
-                                <option value="180">Window: 180d</option>
-                                <option value="365">Window: 365d</option>
-                            </select>
-                            <input id="ws-map-name" type="text" placeholder="Map filter..." autocomplete="off">
-                            <input id="ws-search" type="text" placeholder="Search ops/players..." autocomplete="off">
-                            <label class="settings-check">
-                                <input id="ws-stack-only" type="checkbox">
-                                Stack only
-                            </label>
-                            <button id="ws-refresh" type="button">Refresh Workspace</button>
-                        </div>
-                        <div class="dashboard-graph-controls workspace-analysis-bar">
-                            <select id="ws-normalization">
-                                <option value="global" selected>Norm: Global</option>
-                                <option value="attacker">Norm: Attacker Row</option>
-                            </select>
-                            <select id="ws-lift-mode">
-                                <option value="percent_delta" selected>Lift: Percent Delta</option>
-                                <option value="logit_lift">Lift: Logit</option>
-                                <option value="log_odds_ratio">Lift: Log OR</option>
-                            </select>
-                            <select id="ws-interval-method">
-                                <option value="wilson" selected>CI: Wilson 95%</option>
-                                <option value="wald">CI: Wald 95%</option>
-                            </select>
-                            <select id="ws-weighting">
-                                <option value="rounds" selected>Weighting: Rounds</option>
-                                <option value="matches">Weighting: Matches</option>
-                            </select>
-                            <select id="ws-min-n">
-                                <option value="0">Hide: none</option>
-                                <option value="25" selected>Hide: n&lt;25</option>
-                                <option value="50">Hide: n&lt;50</option>
-                            </select>
-                            <label class="settings-check">
-                                <input id="ws-debug" type="checkbox">
-                                Debug
-                            </label>
-                        </div>
-                        <div class="dashboard-graph-controls workspace-view-bar">
-                            <select id="ws-clamp-mode">
-                                <option value="percentile" selected>Clamp: Percentile</option>
-                                <option value="abs">Clamp: Absolute</option>
-                            </select>
-                            <select id="ws-clamp-abs">
-                                <option value="10">Clamp abs: 10</option>
-                                <option value="15" selected>Clamp abs: 15</option>
-                                <option value="20">Clamp abs: 20</option>
-                                <option value="25">Clamp abs: 25</option>
-                            </select>
-                            <label class="settings-check">
-                                <input id="ws-labels" type="checkbox">
-                                Labels on
-                            </label>
-                        </div>
+                    <div class="dashboard-subtabs graph-tabs" role="tablist" aria-label="Graph Tabs">
+                        <button id="graph-tab-workspace" class="dashboard-subtab active" data-graph-panel="workspace" type="button" aria-selected="true">Workspace</button>
+                        <button id="graph-tab-threat" class="dashboard-subtab" data-graph-panel="threat" type="button" aria-selected="false">Map Performance</button>
                     </div>
-                    <div class="dashboard-subtabs workspace-tabs" role="tablist" aria-label="Workspace Tabs">
-                        <button id="ws-tab-overview" class="dashboard-subtab active" data-ws-panel="overview" type="button">Overview</button>
-                        <button id="ws-tab-operators" class="dashboard-subtab" data-ws-panel="operators" type="button">Operators</button>
-                        <button id="ws-tab-matchups" class="dashboard-subtab" data-ws-panel="matchups" type="button">Matchups</button>
-                        <button id="ws-tab-team" class="dashboard-subtab" data-ws-panel="team" type="button">Team</button>
-                    </div>
-                    <div class="workspace-layout">
-                        <div class="workspace-main">
-                            <div id="workspace-panel-overview" class="workspace-panel active">
-                                <div class="compute-value">Run Dashboard to load workspace data.</div>
+                    <div id="graph-panel-workspace">
+                        <div class="compute-card dashboard-graph-card">
+                            <div class="compute-label">Workspace Filters</div>
+                            <div class="workspace-control-group">
+                                <div class="workspace-control-title">Match Types And Scope</div>
+                                <div class="dashboard-graph-controls workspace-filter-bar">
+                                    <select id="ws-queue">
+                                        <option value="all" selected>Queue: All</option>
+                                        <option value="ranked">Queue: Ranked</option>
+                                        <option value="unranked">Queue: Unranked</option>
+                                    </select>
+                                    <select id="ws-playlist">
+                                        <option value="" selected>Playlist: All</option>
+                                        <option value="standard">Playlist: Standard</option>
+                                        <option value="quick">Playlist: Quick</option>
+                                        <option value="event">Playlist: Event</option>
+                                        <option value="arcade">Playlist: Arcade</option>
+                                    </select>
+                                    <select id="ws-days">
+                                        <option value="30">Window: 30d</option>
+                                        <option value="60">Window: 60d</option>
+                                        <option value="90" selected>Window: 90d</option>
+                                        <option value="180">Window: 180d</option>
+                                        <option value="365">Window: 365d</option>
+                                    </select>
+                                    <input id="ws-map-name" type="text" placeholder="Map filter..." autocomplete="off">
+                                    <input id="ws-search" type="text" placeholder="Search ops/players..." autocomplete="off">
+                                    <label class="settings-check">
+                                        <input id="ws-stack-only" type="checkbox">
+                                        Stack only
+                                    </label>
+                                    <button id="ws-refresh" type="button">Refresh Workspace</button>
+                                </div>
                             </div>
-                            <div id="workspace-panel-operators" class="workspace-panel"></div>
-                            <div id="workspace-panel-matchups" class="workspace-panel"></div>
-                            <div id="workspace-panel-team" class="workspace-panel"></div>
+                            <div class="workspace-control-group">
+                                <div class="workspace-control-title">Normalization And Confidence</div>
+                                <div class="dashboard-graph-controls workspace-analysis-bar">
+                                    <select id="ws-normalization">
+                                        <option value="global" selected>Norm: Global</option>
+                                        <option value="attacker">Norm: Attacker Row</option>
+                                    </select>
+                                    <select id="ws-lift-mode">
+                                        <option value="percent_delta" selected>Lift: Percent Delta</option>
+                                        <option value="logit_lift">Lift: Logit</option>
+                                        <option value="log_odds_ratio">Lift: Log OR</option>
+                                    </select>
+                                    <select id="ws-interval-method">
+                                        <option value="wilson" selected>CI: Wilson 95%</option>
+                                        <option value="wald">CI: Wald 95%</option>
+                                    </select>
+                                    <select id="ws-weighting">
+                                        <option value="rounds" selected>Weighting: Rounds</option>
+                                        <option value="matches">Weighting: Matches</option>
+                                    </select>
+                                    <select id="ws-min-n">
+                                        <option value="0">Hide: none</option>
+                                        <option value="25" selected>Hide: n&lt;25</option>
+                                        <option value="50">Hide: n&lt;50</option>
+                                    </select>
+                                    <label class="settings-check">
+                                        <input id="ws-debug" type="checkbox">
+                                        Debug
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="workspace-control-group">
+                                <div class="workspace-control-title">View</div>
+                                <div class="dashboard-graph-controls workspace-view-bar">
+                                    <select id="ws-clamp-mode">
+                                        <option value="percentile" selected>Clamp: Percentile</option>
+                                        <option value="abs">Clamp: Absolute</option>
+                                    </select>
+                                    <select id="ws-clamp-abs">
+                                        <option value="10">Clamp abs: 10</option>
+                                        <option value="15" selected>Clamp abs: 15</option>
+                                        <option value="20">Clamp abs: 20</option>
+                                        <option value="25">Clamp abs: 25</option>
+                                    </select>
+                                    <label class="settings-check">
+                                        <input id="ws-labels" type="checkbox">
+                                        Labels on
+                                    </label>
+                                </div>
+                            </div>
                         </div>
-                        <aside id="workspace-inspector" class="workspace-inspector">
-                            <div class="compute-label">Inspector</div>
-                            <div class="compute-value">Click a chart item to inspect.</div>
-                        </aside>
+                        <div class="dashboard-subtabs workspace-tabs" role="tablist" aria-label="Workspace Tabs">
+                            <button id="ws-tab-overview" class="dashboard-subtab active" data-ws-panel="overview" type="button" aria-selected="true">Overview</button>
+                            <button id="ws-tab-operators" class="dashboard-subtab" data-ws-panel="operators" type="button" aria-selected="false">Operators</button>
+                            <button id="ws-tab-matchups" class="dashboard-subtab" data-ws-panel="matchups" type="button" aria-selected="false">Matchups</button>
+                            <button id="ws-tab-team" class="dashboard-subtab" data-ws-panel="team" type="button" aria-selected="false">Team</button>
+                        </div>
+                        <div class="workspace-layout">
+                            <div class="workspace-main">
+                                <div id="workspace-panel-overview" class="workspace-panel active">
+                                    <div class="compute-value">Run Dashboard to load workspace data.</div>
+                                </div>
+                                <div id="workspace-panel-operators" class="workspace-panel"></div>
+                                <div id="workspace-panel-matchups" class="workspace-panel"></div>
+                                <div id="workspace-panel-team" class="workspace-panel"></div>
+                            </div>
+                            <aside id="workspace-inspector" class="workspace-inspector">
+                                <div class="compute-label">Inspector</div>
+                                <div class="compute-value">Click a chart item to inspect.</div>
+                            </aside>
+                        </div>
+                        <details id="workspace-evidence-drawer" class="compute-console">
+                            <summary>Evidence</summary>
+                            <div id="workspace-evidence-meta" class="compute-value">No selection.</div>
+                            <div id="workspace-evidence-table" class="dashboard-graphs-content"></div>
+                            <button id="workspace-evidence-more" type="button">Load More</button>
+                        </details>
                     </div>
-                    <details id="workspace-evidence-drawer" class="compute-console">
-                        <summary>Evidence</summary>
-                        <div id="workspace-evidence-meta" class="compute-value">No selection.</div>
-                        <div id="workspace-evidence-table" class="dashboard-graphs-content"></div>
-                        <button id="workspace-evidence-more" type="button">Load More</button>
-                    </div>
-                    <div class="compute-card dashboard-graph-card">
-                        <div class="compute-label">Enemy Operator Threat Graph</div>
-                        <div id="dashboard-graphs-content" class="dashboard-graphs-content">
-                            <div class="compute-value">Run Dashboard to load graph data.</div>
+                    <div id="graph-panel-threat" hidden>
+                        <div class="compute-card dashboard-graph-card">
+                            <div class="compute-label">Map Performance Graph</div>
+                            <div class="dashboard-graph-controls map-perf-controls">
+                                <select id="map-perf-sort">
+                                    <option value="overall" selected>Sort: Overall</option>
+                                    <option value="atk">Sort: ATK</option>
+                                    <option value="def">Sort: DEF</option>
+                                    <option value="rounds">Sort: Rounds Played</option>
+                                </select>
+                                <select id="map-perf-min-sample">
+                                    <option value="0">Show all</option>
+                                    <option value="10" selected>Hide &lt; 10 rounds</option>
+                                    <option value="20">Hide &lt; 20 rounds</option>
+                                </select>
+                            </div>
+                            <div id="dashboard-mapperf-content" class="dashboard-graphs-content">
+                                <div class="compute-value">No map data available. Run Dashboard first.</div>
+                            </div>
+                        </div>
+                        <div class="compute-card dashboard-graph-card">
+                            <div class="compute-label">Enemy Operator Threat Graph</div>
+                            <div id="dashboard-graphs-content" class="dashboard-graphs-content">
+                                <div class="compute-value">Run Dashboard to load graph data.</div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -418,6 +596,7 @@
                 <div class="log" id="compute-log"></div>
             </details>
         </section>
+        </main>
     </div>
 
     <div id="settings-modal" class="settings-modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -441,6 +620,6 @@
         </div>
     </div>
 
-    <script src="/static/network.js?v=20260226a"></script>
+    <script type="module" src="/static/app.js?v=20260227e"></script>
 </body>
 </html>

@@ -150,8 +150,7 @@ class RoundAnalysisPlugin:
             LEFT JOIN scraped_match_cards smc
                 ON pr.match_id = smc.match_id
             WHERE pr.username = ?
-              AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-              AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
+              AND pr.match_type = 'Ranked'
             ORDER BY pr.match_id, pr.round_id
             """,
             (self.username,),

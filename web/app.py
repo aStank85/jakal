@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import asyncio
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 import json
 import os
@@ -206,7 +206,14 @@ def get_rate_status() -> dict:
 @app.get("/")
 async def root() -> HTMLResponse:
     with open("web/static/index.html", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        return HTMLResponse(
+            content=f.read(),
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
 
 @app.get("/api/rate-status")
@@ -225,7 +232,7 @@ async def operator_image_index() -> dict:
 
 @app.get("/api/scraped-matches/{username}")
 async def scraped_matches(username: str, limit: int = 50) -> dict:
-    safe_limit = max(1, min(limit, 2000))
+    safe_limit = max(1, min(limit, 10000))
     try:
         matches = db.get_scraped_match_cards(username, safe_limit)
         return {"username": username, "matches": matches, "count": len(matches)}
@@ -322,6 +329,320 @@ async def map_stats(username: str) -> dict:
         return {"username": username, "analysis": analysis}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to run map stats: {str(e)}")
+
+
+@app.get("/api/players/encountered")
+async def players_encountered(username: str, match_type: str = "Ranked") -> dict:
+    try:
+        rows = db.get_encountered_players(username, match_type=match_type)
+        return {
+            "username": username,
+            "match_type": match_type,
+            "players": rows,
+            "count": len(rows),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load encountered players: {str(e)}")
+
+
+@app.get("/api/players/friends")
+async def players_friends(tag: str = "friend") -> dict:
+    try:
+        rows = db.get_tagged_players(tag=tag)
+        return {"tag": tag, "players": rows, "count": len(rows)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load tagged players: {str(e)}")
+
+
+@app.post("/api/players/tag")
+async def players_tag(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    username = str((payload or {}).get("username") or "").strip()
+    tag = str((payload or {}).get("tag") or "friend").strip().lower()
+    enabled = bool((payload or {}).get("enabled", True))
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    if not tag:
+        raise HTTPException(status_code=400, detail="tag is required")
+    try:
+        result = db.set_player_tag(username, tag, enabled=enabled)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update player tag: {str(e)}")
+
+
+@app.get("/api/stack/synergy")
+async def stack_synergy(players: str, match_type: str = "Ranked") -> dict:
+    raw = [p.strip() for p in str(players or "").split(",") if p and p.strip()]
+    dedup = []
+    seen = set()
+    for p in raw:
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(p)
+    if len(dedup) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 players in players query param.")
+    try:
+        analysis = db.compute_stack_synergy(dedup, match_type=match_type)
+        return {"players": dedup, "match_type": match_type, "analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute stack synergy: {str(e)}")
+
+
+@app.get("/api/stack/debug")
+async def stack_debug(players: str, match_type: str = "Ranked") -> dict:
+    raw = [p.strip() for p in str(players or "").split(",") if p and p.strip()]
+    dedup = []
+    seen = set()
+    for p in raw:
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(p)
+    if len(dedup) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least 2 players in players query param.")
+    try:
+        debug = db.debug_stack_synergy(dedup, match_type=match_type)
+        return {"players": dedup, "match_type": match_type, "debug": debug}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to debug stack synergy: {str(e)}")
+
+
+@app.get("/api/players/list")
+async def players_list() -> dict:
+    try:
+        rows = db.get_all_players()
+        names = [str(r.get("username") or "").strip() for r in rows if str(r.get("username") or "").strip()]
+        names = sorted(set(names), key=lambda x: x.lower())
+        return {"players": names, "count": len(names)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load players list: {str(e)}")
+
+
+@app.get("/api/operators/map-breakdown")
+async def operators_map_breakdown(username: str, stack: str = "solo", match_type: str = "Ranked") -> dict:
+    clean_username = str(username or "").strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="username is required")
+    stack_key = str(stack or "solo").strip().lower()
+    stack_to_friend_count = {
+        "solo": 0,
+        "duo": 1,
+        "trio": 2,
+        "squad": 3,
+        "full": 4,
+        "fullstack": 4,
+        "full_stack": 4,
+    }
+    if stack_key not in stack_to_friend_count:
+        raise HTTPException(status_code=400, detail="stack must be one of: solo, duo, trio, squad, full")
+    friend_target = int(stack_to_friend_count[stack_key])
+    mode_key = str(match_type or "Ranked").strip().lower()
+    mode_aliases = {"ranked", "pvp_ranked"} if mode_key in {"ranked", "pvp_ranked"} else {mode_key}
+
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute(
+            """
+            SELECT LOWER(TRIM(p.username)) AS username_key
+            FROM player_tags pt
+            JOIN players p ON p.player_id = pt.player_id
+            WHERE LOWER(TRIM(pt.tag)) = 'friend'
+            """
+        )
+        friend_keys = {str(r["username_key"] or "").strip().lower() for r in cursor.fetchall() if str(r["username_key"] or "").strip()}
+
+        cursor.execute(
+            """
+            SELECT match_id, team_id
+            FROM match_detail_players
+            WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
+            """,
+            (clean_username,),
+        )
+        user_rows = cursor.fetchall()
+        match_team_rows = []
+        for row in user_rows:
+            mid = str(row["match_id"] or "").strip()
+            if not mid:
+                continue
+            team_id = row["team_id"]
+            cursor.execute(
+                """
+                SELECT match_type
+                FROM match_detail_players
+                WHERE match_id = ?
+                  AND LOWER(TRIM(username)) = LOWER(TRIM(?))
+                LIMIT 1
+                """,
+                (mid, clean_username),
+            )
+            mt = cursor.fetchone()
+            mk = str(mt["match_type"] or "").strip().lower() if mt else ""
+            if mk not in mode_aliases:
+                continue
+            match_team_rows.append((mid, team_id))
+
+        if not match_team_rows:
+            return {"username": clean_username, "stack": stack_key, "match_type": match_type, "maps": [], "low_data_maps": [], "eligible_matches": 0}
+
+        eligible_match_ids = []
+        for mid, team_id in match_team_rows:
+            cursor.execute(
+                """
+                SELECT LOWER(TRIM(username)) AS teammate_key
+                FROM match_detail_players
+                WHERE match_id = ?
+                  AND team_id = ?
+                  AND LOWER(TRIM(username)) != LOWER(TRIM(?))
+                """,
+                (mid, team_id, clean_username),
+            )
+            teammates = {str(r["teammate_key"] or "").strip().lower() for r in cursor.fetchall() if str(r["teammate_key"] or "").strip()}
+            friend_count = sum(1 for t in teammates if t in friend_keys)
+            if friend_count == friend_target:
+                eligible_match_ids.append(mid)
+
+        if not eligible_match_ids:
+            return {"username": clean_username, "stack": stack_key, "match_type": match_type, "maps": [], "low_data_maps": [], "eligible_matches": 0}
+
+        placeholders = ",".join("?" for _ in eligible_match_ids)
+        params = [clean_username, *eligible_match_ids]
+
+        cursor.execute(
+            f"""
+            WITH latest_cards AS (
+                SELECT smc.match_id, COALESCE(NULLIF(TRIM(smc.map_name), ''), 'Unknown') AS map_name
+                FROM scraped_match_cards smc
+                JOIN (
+                    SELECT match_id, MAX(id) AS max_id
+                    FROM scraped_match_cards
+                    GROUP BY match_id
+                ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
+            )
+            SELECT
+                COALESCE(NULLIF(TRIM(pr.operator), ''), 'Unknown') AS operator,
+                LOWER(TRIM(COALESCE(pr.side, 'unknown'))) AS side,
+                COALESCE(lc.map_name, 'Unknown') AS map_name,
+                COUNT(*) AS rounds,
+                AVG(CASE WHEN LOWER(TRIM(COALESCE(pr.result, ''))) IN ('win', 'victory') THEN 1.0 ELSE 0.0 END) AS win_rate,
+                AVG(CASE WHEN COALESCE(pr.first_blood, 0) = 1 THEN 1.0 ELSE 0.0 END) AS fk_rate,
+                AVG(CASE WHEN COALESCE(pr.first_death, 0) = 1 THEN 1.0 ELSE 0.0 END) AS fd_rate,
+                AVG(CAST(pr.kills AS FLOAT) / NULLIF(pr.deaths, 0)) AS kd
+            FROM player_rounds pr
+            LEFT JOIN latest_cards lc ON lc.match_id = pr.match_id
+            WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
+              AND pr.match_id IN ({placeholders})
+            GROUP BY operator, side, map_name
+            HAVING COUNT(*) >= 8
+            ORDER BY map_name, side, win_rate DESC
+            """,
+            params,
+        )
+        op_rows = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(
+            f"""
+            WITH latest_cards AS (
+                SELECT smc.match_id, COALESCE(NULLIF(TRIM(smc.map_name), ''), 'Unknown') AS map_name
+                FROM scraped_match_cards smc
+                JOIN (
+                    SELECT match_id, MAX(id) AS max_id
+                    FROM scraped_match_cards
+                    GROUP BY match_id
+                ) last ON last.match_id = smc.match_id AND last.max_id = smc.id
+            )
+            SELECT
+                COALESCE(lc.map_name, 'Unknown') AS map_name,
+                LOWER(TRIM(COALESCE(pr.side, 'unknown'))) AS side,
+                COUNT(*) AS rounds,
+                AVG(CASE WHEN LOWER(TRIM(COALESCE(pr.result, ''))) IN ('win', 'victory') THEN 1.0 ELSE 0.0 END) AS win_rate
+            FROM player_rounds pr
+            LEFT JOIN latest_cards lc ON lc.match_id = pr.match_id
+            WHERE LOWER(TRIM(pr.username)) = LOWER(TRIM(?))
+              AND pr.match_id IN ({placeholders})
+            GROUP BY map_name, side
+            """,
+            params,
+        )
+        base_rows = [dict(r) for r in cursor.fetchall()]
+
+        maps = defaultdict(lambda: {
+            "map_name": "",
+            "total_rounds": 0,
+            "atk": [],
+            "def": [],
+            "baseline_atk": 0.0,
+            "baseline_def": 0.0,
+        })
+        for row in base_rows:
+            map_name = str(row.get("map_name") or "Unknown")
+            side = str(row.get("side") or "unknown")
+            rounds = int(row.get("rounds") or 0)
+            wr = float(row.get("win_rate") or 0.0) * 100.0
+            bucket = maps[map_name]
+            bucket["map_name"] = map_name
+            bucket["total_rounds"] += rounds
+            if side.startswith("atk") or side == "attacker":
+                bucket["baseline_atk"] = round(wr, 2)
+            elif side.startswith("def") or side == "defender":
+                bucket["baseline_def"] = round(wr, 2)
+
+        for row in op_rows:
+            map_name = str(row.get("map_name") or "Unknown")
+            side = str(row.get("side") or "unknown")
+            rounds = int(row.get("rounds") or 0)
+            wr = float(row.get("win_rate") or 0.0) * 100.0
+            fk = float(row.get("fk_rate") or 0.0) * 100.0
+            fd = float(row.get("fd_rate") or 0.0) * 100.0
+            kd = float(row.get("kd") or 0.0)
+            bucket = maps[map_name]
+            bucket["map_name"] = map_name
+            base = bucket["baseline_atk"] if (side.startswith("atk") or side == "attacker") else bucket["baseline_def"]
+            item = {
+                "operator": str(row.get("operator") or "Unknown"),
+                "rounds": rounds,
+                "win_rate": round(wr, 2),
+                "delta_vs_baseline": round(wr - base, 2),
+                "fk_rate": round(fk, 2),
+                "fd_rate": round(fd, 2),
+                "kd": round(kd, 3),
+            }
+            if side.startswith("atk") or side == "attacker":
+                bucket["atk"].append(item)
+            elif side.startswith("def") or side == "defender":
+                bucket["def"].append(item)
+
+        high_data = []
+        low_data = []
+        for m in maps.values():
+            m["atk"].sort(key=lambda x: (-x["delta_vs_baseline"], -x["rounds"], x["operator"].lower()))
+            m["def"].sort(key=lambda x: (-x["delta_vs_baseline"], -x["rounds"], x["operator"].lower()))
+            if int(m.get("total_rounds", 0)) < 10:
+                low_data.append({"map_name": m["map_name"], "total_rounds": int(m.get("total_rounds", 0))})
+            else:
+                high_data.append(m)
+
+        high_data.sort(key=lambda x: (-int(x.get("total_rounds", 0)), str(x.get("map_name", "")).lower()))
+        low_data.sort(key=lambda x: (-int(x.get("total_rounds", 0)), str(x.get("map_name", "")).lower()))
+        return {
+            "username": clean_username,
+            "stack": stack_key,
+            "match_type": match_type,
+            "eligible_matches": len(set(eligible_match_ids)),
+            "maps": high_data,
+            "low_data_maps": low_data,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute operators map breakdown: {str(e)}")
 
 
 @app.post("/api/settings/db-standardize")

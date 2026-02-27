@@ -122,13 +122,7 @@ class TeamAnalysisPlugin:
                    mdp.scraped_at
             FROM match_detail_players mdp
             WHERE mdp.username = ?
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = mdp.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND mdp.match_type = 'Ranked'
             ORDER BY mdp.scraped_at DESC
             """,
             (self.username,),

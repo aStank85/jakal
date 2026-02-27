@@ -23,8 +23,24 @@ class Database:
         if path.is_absolute():
             return str(path)
 
-        project_root = Path(__file__).resolve().parents[2]
+        # database.py lives in <repo>/src; anchor relative DB paths to <repo>.
+        project_root = Path(__file__).resolve().parents[1]
         return str(project_root / path)
+
+    @staticmethod
+    def _canonicalize_match_type(raw_match_type: Any) -> str:
+        """Normalize match type to canonical values used by query filters."""
+        text = str(raw_match_type or "").strip()
+        if not text:
+            return ""
+        key = text.lower()
+        if key in {"ranked", "pvp_ranked"}:
+            return "Ranked"
+        if key in {"unranked", "pvp_unranked"}:
+            return "Unranked"
+        if key in {"casual", "quick match", "quickmatch", "quick_match"}:
+            return "Quick Match"
+        return text
     
     def init_database(self):
         """Create tables if they don't exist."""
@@ -61,6 +77,17 @@ class Database:
                     backfill_complete INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     notes TEXT
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS player_tags (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id   INTEGER NOT NULL,
+                    tag         TEXT NOT NULL,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (player_id) REFERENCES players(player_id),
+                    UNIQUE(player_id, tag)
                 )
             """)
 
@@ -465,6 +492,48 @@ class Database:
                     scraped_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agg_player_map (
+                    tracker_player_id   TEXT NOT NULL,
+                    match_type          TEXT NOT NULL,
+                    map_name            TEXT NOT NULL,
+                    matches             INTEGER NOT NULL DEFAULT 0,
+                    wins                INTEGER NOT NULL DEFAULT 0,
+                    kills               INTEGER NOT NULL DEFAULT 0,
+                    deaths              INTEGER NOT NULL DEFAULT 0,
+                    atk_wins            INTEGER NOT NULL DEFAULT 0,
+                    def_wins            INTEGER NOT NULL DEFAULT 0,
+                    last_played_at      INTEGER,
+                    PRIMARY KEY (tracker_player_id, match_type, map_name)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agg_player_operator (
+                    tracker_player_id   TEXT NOT NULL,
+                    match_type          TEXT NOT NULL,
+                    operator            TEXT NOT NULL,
+                    rounds              INTEGER NOT NULL DEFAULT 0,
+                    wins                INTEGER NOT NULL DEFAULT 0,
+                    kills               INTEGER NOT NULL DEFAULT 0,
+                    deaths              INTEGER NOT NULL DEFAULT 0,
+                    last_played_at      INTEGER,
+                    PRIMARY KEY (tracker_player_id, match_type, operator)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agg_sessions (
+                    tracker_player_id   TEXT NOT NULL,
+                    session_id          TEXT NOT NULL,
+                    started_at          INTEGER,
+                    ended_at            INTEGER,
+                    matches             INTEGER NOT NULL DEFAULT 0,
+                    wins                INTEGER NOT NULL DEFAULT 0,
+                    losses              INTEGER NOT NULL DEFAULT 0,
+                    kd                  REAL NOT NULL DEFAULT 0,
+                    rp_delta_sum        INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (tracker_player_id, session_id)
+                )
+            """)
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_scraped_at
@@ -491,8 +560,48 @@ class Database:
                 ON player_rounds (match_id, round_id)
             """)
             cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_rounds_username_match_round
+                ON player_rounds (username, match_id, round_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_rounds_player_tracker_match
+                ON player_rounds (player_id_tracker, match_id)
+            """)
+            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_match_scraped
                 ON scraped_match_cards (match_id, scraped_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_match
+                ON scraped_match_cards (username, match_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_match_detail_players_username_match_type
+                ON match_detail_players (username, match_type)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_match_detail_players_match_id
+                ON match_detail_players (match_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_match_detail_players_player_match
+                ON match_detail_players (player_id, match_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_match_detail_players_player_tracker
+                ON match_detail_players (player_id_tracker)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agg_player_map_tracker_last_played
+                ON agg_player_map (tracker_player_id, last_played_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agg_player_operator_tracker_last_played
+                ON agg_player_operator (tracker_player_id, last_played_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agg_sessions_tracker_started
+                ON agg_sessions (tracker_player_id, started_at DESC)
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_players_username
@@ -524,6 +633,8 @@ class Database:
             self._migrate_stats_snapshots_table()
             self._migrate_computed_metrics_table()
             self._migrate_match_analysis_tables()
+            self._ensure_player_tags_table()
+            self._ensure_aggregate_tables()
             self._ensure_performance_indexes()
             self._commit_with_retry(context="migrate schema commit")
         except sqlite3.Error as e:
@@ -553,12 +664,118 @@ class Database:
             ON player_rounds (match_id, round_id)
         """)
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_username_match_round
+            ON player_rounds (username, match_id, round_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_rounds_player_tracker_match
+            ON player_rounds (player_id_tracker, match_id)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_match_scraped
             ON scraped_match_cards (match_id, scraped_at DESC)
         """)
         cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scraped_match_cards_username_match
+            ON scraped_match_cards (username, match_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_detail_players_username_match_type
+            ON match_detail_players (username, match_type)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_detail_players_match_id
+            ON match_detail_players (match_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_detail_players_player_match
+            ON match_detail_players (player_id, match_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_detail_players_player_tracker
+            ON match_detail_players (player_id_tracker)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agg_player_map_tracker_last_played
+            ON agg_player_map (tracker_player_id, last_played_at DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agg_player_operator_tracker_last_played
+            ON agg_player_operator (tracker_player_id, last_played_at DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agg_sessions_tracker_started
+            ON agg_sessions (tracker_player_id, started_at DESC)
+        """)
+        cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_players_username
             ON players (username)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_tags_player_id
+            ON player_tags (player_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_player_tags_tag
+            ON player_tags (tag)
+        """)
+
+    def _ensure_player_tags_table(self) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS player_tags (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id   INTEGER NOT NULL,
+                tag         TEXT NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (player_id) REFERENCES players(player_id),
+                UNIQUE(player_id, tag)
+            )
+        """)
+
+    def _ensure_aggregate_tables(self) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agg_player_map (
+                tracker_player_id   TEXT NOT NULL,
+                match_type          TEXT NOT NULL,
+                map_name            TEXT NOT NULL,
+                matches             INTEGER NOT NULL DEFAULT 0,
+                wins                INTEGER NOT NULL DEFAULT 0,
+                kills               INTEGER NOT NULL DEFAULT 0,
+                deaths              INTEGER NOT NULL DEFAULT 0,
+                atk_wins            INTEGER NOT NULL DEFAULT 0,
+                def_wins            INTEGER NOT NULL DEFAULT 0,
+                last_played_at      INTEGER,
+                PRIMARY KEY (tracker_player_id, match_type, map_name)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agg_player_operator (
+                tracker_player_id   TEXT NOT NULL,
+                match_type          TEXT NOT NULL,
+                operator            TEXT NOT NULL,
+                rounds              INTEGER NOT NULL DEFAULT 0,
+                wins                INTEGER NOT NULL DEFAULT 0,
+                kills               INTEGER NOT NULL DEFAULT 0,
+                deaths              INTEGER NOT NULL DEFAULT 0,
+                last_played_at      INTEGER,
+                PRIMARY KEY (tracker_player_id, match_type, operator)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agg_sessions (
+                tracker_player_id   TEXT NOT NULL,
+                session_id          TEXT NOT NULL,
+                started_at          INTEGER,
+                ended_at            INTEGER,
+                matches             INTEGER NOT NULL DEFAULT 0,
+                wins                INTEGER NOT NULL DEFAULT 0,
+                losses              INTEGER NOT NULL DEFAULT 0,
+                kd                  REAL NOT NULL DEFAULT 0,
+                rp_delta_sum        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (tracker_player_id, session_id)
+            )
         """)
 
     def _commit_with_retry(self, retries: int = 8, delay_seconds: float = 0.25, context: str = "commit") -> None:
@@ -675,7 +892,12 @@ class Database:
             """
             UPDATE match_detail_players
             SET match_type = (
-                SELECT smc.mode
+                SELECT CASE
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('ranked', 'pvp_ranked') THEN 'Ranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('unranked', 'pvp_unranked') THEN 'Unranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('casual', 'quick match', 'quickmatch', 'quick_match') THEN 'Quick Match'
+                    ELSE smc.mode
+                END
                 FROM scraped_match_cards smc
                 WHERE smc.match_id = match_detail_players.match_id
                   AND LOWER(TRIM(smc.username)) = LOWER(TRIM(match_detail_players.username))
@@ -689,7 +911,12 @@ class Database:
             """
             UPDATE player_rounds
             SET match_type = (
-                SELECT smc.mode
+                SELECT CASE
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('ranked', 'pvp_ranked') THEN 'Ranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('unranked', 'pvp_unranked') THEN 'Unranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('casual', 'quick match', 'quickmatch', 'quick_match') THEN 'Quick Match'
+                    ELSE smc.mode
+                END
                 FROM scraped_match_cards smc
                 WHERE smc.match_id = player_rounds.match_id
                   AND LOWER(TRIM(smc.username)) = LOWER(TRIM(player_rounds.username))
@@ -705,7 +932,12 @@ class Database:
             """
             UPDATE round_outcomes
             SET match_type = (
-                SELECT smc.mode
+                SELECT CASE
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('ranked', 'pvp_ranked') THEN 'Ranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('unranked', 'pvp_unranked') THEN 'Unranked'
+                    WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('casual', 'quick match', 'quickmatch', 'quick_match') THEN 'Quick Match'
+                    ELSE smc.mode
+                END
                 FROM player_rounds pr
                 JOIN scraped_match_cards smc
                   ON smc.match_id = pr.match_id
@@ -725,7 +957,12 @@ class Database:
                 f"""
                 UPDATE {table_name}
                 SET match_type = (
-                    SELECT smc.mode
+                    SELECT CASE
+                        WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('ranked', 'pvp_ranked') THEN 'Ranked'
+                        WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('unranked', 'pvp_unranked') THEN 'Unranked'
+                        WHEN LOWER(TRIM(COALESCE(smc.mode, ''))) IN ('casual', 'quick match', 'quickmatch', 'quick_match') THEN 'Quick Match'
+                        ELSE smc.mode
+                    END
                     FROM scraped_match_cards smc
                     WHERE smc.match_id = {table_name}.match_id
                     ORDER BY smc.id DESC
@@ -734,6 +971,262 @@ class Database:
                 WHERE (match_type IS NULL OR TRIM(match_type) = '')
                 """
             )
+
+    def refresh_aggregates_for_matches(self, match_ids: List[str]) -> int:
+        """Incrementally refresh aggregate tables for trackers present in these matches."""
+        clean_match_ids = sorted({str(mid or "").strip() for mid in match_ids if str(mid or "").strip()})
+        if not clean_match_ids:
+            return 0
+        placeholders = ",".join("?" * len(clean_match_ids))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT DISTINCT player_id_tracker
+            FROM match_detail_players
+            WHERE match_id IN ({placeholders})
+              AND player_id_tracker IS NOT NULL
+              AND TRIM(player_id_tracker) != ''
+            """,
+            clean_match_ids,
+        )
+        tracker_ids = {str(row["player_id_tracker"]).strip() for row in cursor.fetchall() if row["player_id_tracker"]}
+        cursor.execute(
+            f"""
+            SELECT DISTINCT player_id_tracker
+            FROM player_rounds
+            WHERE match_id IN ({placeholders})
+              AND player_id_tracker IS NOT NULL
+              AND TRIM(player_id_tracker) != ''
+            """,
+            clean_match_ids,
+        )
+        tracker_ids.update({str(row["player_id_tracker"]).strip() for row in cursor.fetchall() if row["player_id_tracker"]})
+        self.refresh_aggregates_for_tracker_ids(sorted(tid for tid in tracker_ids if tid))
+        return len(tracker_ids)
+
+    def refresh_aggregates_for_tracker_ids(self, tracker_ids: List[str]) -> None:
+        """Rebuild aggregate rows for specific tracker IDs."""
+        clean_tracker_ids = sorted({str(tid or "").strip() for tid in tracker_ids if str(tid or "").strip()})
+        if not clean_tracker_ids:
+            return
+        session_gap_seconds = 90 * 60
+        with self.conn:
+            cursor = self.conn.cursor()
+            for tracker_id in clean_tracker_ids:
+                cursor.execute("DELETE FROM agg_player_map WHERE tracker_player_id = ?", (tracker_id,))
+                cursor.execute("DELETE FROM agg_player_operator WHERE tracker_player_id = ?", (tracker_id,))
+                cursor.execute("DELETE FROM agg_sessions WHERE tracker_player_id = ?", (tracker_id,))
+
+                cursor.execute(
+                    """
+                    WITH latest_cards AS (
+                        SELECT
+                            smc.match_id,
+                            smc.map_name,
+                            COALESCE(
+                                CAST(strftime('%s', REPLACE(REPLACE(TRIM(COALESCE(smc.match_date, '')), 'T', ' '), 'Z', '')) AS INTEGER),
+                                CAST(strftime('%s', smc.scraped_at) AS INTEGER),
+                                0
+                            ) AS match_ts
+                        FROM scraped_match_cards smc
+                        JOIN (
+                            SELECT match_id, MAX(id) AS max_id
+                            FROM scraped_match_cards
+                            WHERE match_id IS NOT NULL AND TRIM(match_id) != ''
+                            GROUP BY match_id
+                        ) x ON x.match_id = smc.match_id AND x.max_id = smc.id
+                    ),
+                    mdp_match AS (
+                        SELECT
+                            player_id_tracker,
+                            match_id,
+                            MAX(COALESCE(NULLIF(TRIM(match_type), ''), 'Other')) AS match_type,
+                            MAX(COALESCE(NULLIF(TRIM(result), ''), '')) AS result,
+                            MAX(COALESCE(kills, 0)) AS kills,
+                            MAX(COALESCE(deaths, 0)) AS deaths
+                        FROM match_detail_players
+                        WHERE player_id_tracker = ?
+                          AND TRIM(player_id_tracker) != ''
+                        GROUP BY player_id_tracker, match_id
+                    ),
+                    side_by_match AS (
+                        SELECT
+                            player_id_tracker,
+                            match_id,
+                            SUM(CASE WHEN LOWER(COALESCE(side, '')) = 'attacker' AND LOWER(COALESCE(result, '')) IN ('victory', 'win') THEN 1 ELSE 0 END) AS atk_wins,
+                            SUM(CASE WHEN LOWER(COALESCE(side, '')) = 'defender' AND LOWER(COALESCE(result, '')) IN ('victory', 'win') THEN 1 ELSE 0 END) AS def_wins
+                        FROM player_rounds
+                        WHERE player_id_tracker = ?
+                          AND TRIM(player_id_tracker) != ''
+                        GROUP BY player_id_tracker, match_id
+                    )
+                    INSERT INTO agg_player_map (
+                        tracker_player_id, match_type, map_name, matches, wins, kills, deaths, atk_wins, def_wins, last_played_at
+                    )
+                    SELECT
+                        m.player_id_tracker AS tracker_player_id,
+                        m.match_type,
+                        COALESCE(NULLIF(TRIM(lc.map_name), ''), 'Unknown') AS map_name,
+                        COUNT(*) AS matches,
+                        SUM(CASE WHEN LOWER(COALESCE(m.result, '')) IN ('win', 'victory') THEN 1 ELSE 0 END) AS wins,
+                        SUM(COALESCE(m.kills, 0)) AS kills,
+                        SUM(COALESCE(m.deaths, 0)) AS deaths,
+                        SUM(COALESCE(s.atk_wins, 0)) AS atk_wins,
+                        SUM(COALESCE(s.def_wins, 0)) AS def_wins,
+                        MAX(COALESCE(lc.match_ts, 0)) AS last_played_at
+                    FROM mdp_match m
+                    LEFT JOIN side_by_match s
+                        ON s.player_id_tracker = m.player_id_tracker
+                       AND s.match_id = m.match_id
+                    LEFT JOIN latest_cards lc
+                        ON lc.match_id = m.match_id
+                    GROUP BY m.player_id_tracker, m.match_type, COALESCE(NULLIF(TRIM(lc.map_name), ''), 'Unknown')
+                    """,
+                    (tracker_id, tracker_id),
+                )
+
+                cursor.execute(
+                    """
+                    WITH latest_cards AS (
+                        SELECT
+                            smc.match_id,
+                            COALESCE(
+                                CAST(strftime('%s', REPLACE(REPLACE(TRIM(COALESCE(smc.match_date, '')), 'T', ' '), 'Z', '')) AS INTEGER),
+                                CAST(strftime('%s', smc.scraped_at) AS INTEGER),
+                                0
+                            ) AS match_ts
+                        FROM scraped_match_cards smc
+                        JOIN (
+                            SELECT match_id, MAX(id) AS max_id
+                            FROM scraped_match_cards
+                            WHERE match_id IS NOT NULL AND TRIM(match_id) != ''
+                            GROUP BY match_id
+                        ) x ON x.match_id = smc.match_id AND x.max_id = smc.id
+                    ),
+                    pr_round AS (
+                        SELECT
+                            player_id_tracker,
+                            match_id,
+                            round_id,
+                            MAX(COALESCE(NULLIF(TRIM(match_type), ''), 'Other')) AS match_type,
+                            MAX(COALESCE(NULLIF(TRIM(operator), ''), 'Unknown')) AS operator,
+                            MAX(COALESCE(NULLIF(TRIM(result), ''), '')) AS result,
+                            MAX(COALESCE(kills, 0)) AS kills,
+                            MAX(COALESCE(deaths, 0)) AS deaths
+                        FROM player_rounds
+                        WHERE player_id_tracker = ?
+                          AND TRIM(player_id_tracker) != ''
+                        GROUP BY player_id_tracker, match_id, round_id
+                    )
+                    INSERT INTO agg_player_operator (
+                        tracker_player_id, match_type, operator, rounds, wins, kills, deaths, last_played_at
+                    )
+                    SELECT
+                        pr.player_id_tracker AS tracker_player_id,
+                        pr.match_type,
+                        pr.operator,
+                        COUNT(*) AS rounds,
+                        SUM(CASE WHEN LOWER(COALESCE(pr.result, '')) IN ('victory', 'win') THEN 1 ELSE 0 END) AS wins,
+                        SUM(COALESCE(pr.kills, 0)) AS kills,
+                        SUM(COALESCE(pr.deaths, 0)) AS deaths,
+                        MAX(COALESCE(lc.match_ts, 0)) AS last_played_at
+                    FROM pr_round pr
+                    LEFT JOIN latest_cards lc
+                        ON lc.match_id = pr.match_id
+                    GROUP BY pr.player_id_tracker, pr.match_type, pr.operator
+                    """,
+                    (tracker_id,),
+                )
+
+                cursor.execute(
+                    """
+                    WITH latest_cards AS (
+                        SELECT
+                            smc.match_id,
+                            COALESCE(
+                                CAST(strftime('%s', REPLACE(REPLACE(TRIM(COALESCE(smc.match_date, '')), 'T', ' '), 'Z', '')) AS INTEGER),
+                                CAST(strftime('%s', smc.scraped_at) AS INTEGER),
+                                0
+                            ) AS match_ts
+                        FROM scraped_match_cards smc
+                        JOIN (
+                            SELECT match_id, MAX(id) AS max_id
+                            FROM scraped_match_cards
+                            WHERE match_id IS NOT NULL AND TRIM(match_id) != ''
+                            GROUP BY match_id
+                        ) x ON x.match_id = smc.match_id AND x.max_id = smc.id
+                    ),
+                    mdp_match AS (
+                        SELECT
+                            player_id_tracker,
+                            match_id,
+                            MAX(COALESCE(NULLIF(TRIM(result), ''), '')) AS result,
+                            MAX(COALESCE(kills, 0)) AS kills,
+                            MAX(COALESCE(deaths, 0)) AS deaths,
+                            MAX(COALESCE(rank_points_delta, 0)) AS rank_points_delta
+                        FROM match_detail_players
+                        WHERE player_id_tracker = ?
+                          AND TRIM(player_id_tracker) != ''
+                        GROUP BY player_id_tracker, match_id
+                    ),
+                    match_base AS (
+                        SELECT
+                            m.player_id_tracker,
+                            m.match_id,
+                            COALESCE(lc.match_ts, 0) AS match_ts,
+                            CASE WHEN LOWER(COALESCE(m.result, '')) IN ('win', 'victory') THEN 1 ELSE 0 END AS is_win,
+                            COALESCE(m.kills, 0) AS kills,
+                            COALESCE(m.deaths, 0) AS deaths,
+                            COALESCE(m.rank_points_delta, 0) AS rp_delta
+                        FROM mdp_match m
+                        LEFT JOIN latest_cards lc
+                            ON lc.match_id = m.match_id
+                    ),
+                    ordered AS (
+                        SELECT
+                            *,
+                            LAG(match_ts) OVER (
+                                PARTITION BY player_id_tracker
+                                ORDER BY match_ts, match_id
+                            ) AS prev_ts
+                        FROM match_base
+                    ),
+                    sessioned AS (
+                        SELECT
+                            *,
+                            SUM(
+                                CASE
+                                    WHEN prev_ts IS NULL OR match_ts - prev_ts > ?
+                                    THEN 1 ELSE 0
+                                END
+                            ) OVER (
+                                PARTITION BY player_id_tracker
+                                ORDER BY match_ts, match_id
+                                ROWS UNBOUNDED PRECEDING
+                            ) AS session_num
+                        FROM ordered
+                    )
+                    INSERT INTO agg_sessions (
+                        tracker_player_id, session_id, started_at, ended_at, matches, wins, losses, kd, rp_delta_sum
+                    )
+                    SELECT
+                        player_id_tracker AS tracker_player_id,
+                        player_id_tracker || ':' || CAST(MIN(match_ts) AS TEXT) || ':' || CAST(session_num AS TEXT) AS session_id,
+                        MIN(match_ts) AS started_at,
+                        MAX(match_ts) AS ended_at,
+                        COUNT(*) AS matches,
+                        SUM(is_win) AS wins,
+                        COUNT(*) - SUM(is_win) AS losses,
+                        CASE
+                            WHEN SUM(deaths) = 0 THEN CAST(SUM(kills) AS REAL)
+                            ELSE ROUND(CAST(SUM(kills) AS REAL) / CAST(SUM(deaths) AS REAL), 3)
+                        END AS kd,
+                        SUM(rp_delta) AS rp_delta_sum
+                    FROM sessioned
+                    GROUP BY player_id_tracker, session_num
+                    """,
+                    (tracker_id, session_gap_seconds),
+                )
     
     def add_player(self, username: str, device_tag: str = "pc") -> int:
         """Add a player or return existing player_id."""
@@ -890,6 +1383,481 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to get players list: {e}")
+
+    def _get_or_create_player_id(self, username: str) -> int:
+        clean = str(username or "").strip()
+        if not clean:
+            raise RuntimeError("Username is required")
+        return self.add_player(clean)
+
+    def set_player_tag(self, username: str, tag: str, enabled: bool = True) -> Dict[str, Any]:
+        clean_username = str(username or "").strip()
+        clean_tag = str(tag or "").strip().lower()
+        if not clean_username:
+            raise RuntimeError("Username is required")
+        if not clean_tag:
+            raise RuntimeError("Tag is required")
+        try:
+            self._ensure_player_tags_table()
+            player_id = self._get_or_create_player_id(clean_username)
+            cursor = self.conn.cursor()
+            if enabled:
+                cursor.execute(
+                    """
+                    INSERT INTO player_tags (player_id, tag)
+                    VALUES (?, ?)
+                    ON CONFLICT(player_id, tag) DO NOTHING
+                    """,
+                    (player_id, clean_tag),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM player_tags WHERE player_id = ? AND LOWER(TRIM(tag)) = ?",
+                    (player_id, clean_tag),
+                )
+            self.conn.commit()
+            cursor.execute(
+                "SELECT tag FROM player_tags WHERE player_id = ? ORDER BY tag",
+                (player_id,),
+            )
+            tags = [str(row["tag"]) for row in cursor.fetchall()]
+            return {
+                "player_id": player_id,
+                "username": clean_username,
+                "tag": clean_tag,
+                "enabled": bool(enabled),
+                "tags": tags,
+            }
+        except sqlite3.Error as e:
+            self.conn.rollback()
+            raise RuntimeError(f"Failed to set tag for '{clean_username}': {e}")
+
+    def get_tagged_players(self, tag: str = "friend") -> List[Dict]:
+        clean_tag = str(tag or "").strip().lower()
+        try:
+            self._ensure_player_tags_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT p.player_id, p.username, p.device_tag, p.created_at
+                FROM player_tags pt
+                JOIN players p ON p.player_id = pt.player_id
+                WHERE LOWER(TRIM(pt.tag)) = ?
+                ORDER BY LOWER(p.username)
+                """,
+                (clean_tag,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to get tagged players: {e}")
+
+    def get_encountered_players(self, primary_username: str, match_type: str = "Ranked") -> List[Dict]:
+        clean_primary = str(primary_username or "").strip()
+        if not clean_primary:
+            return []
+        clean_match_type = str(match_type or "Ranked").strip()
+        try:
+            self._ensure_player_tags_table()
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                WITH teammate_rows AS (
+                    SELECT
+                        tm.username AS teammate_username,
+                        me.match_id AS match_id,
+                        LOWER(TRIM(me.result)) AS player_result,
+                        COALESCE(me.scraped_at, tm.scraped_at) AS seen_at
+                    FROM match_detail_players me
+                    JOIN match_detail_players tm
+                      ON me.match_id = tm.match_id
+                     AND me.team_id = tm.team_id
+                     AND LOWER(TRIM(tm.username)) != LOWER(TRIM(me.username))
+                    WHERE LOWER(TRIM(me.username)) = LOWER(TRIM(?))
+                      AND LOWER(TRIM(COALESCE(me.match_type, ''))) = LOWER(TRIM(?))
+                ),
+                dedup AS (
+                    SELECT
+                        teammate_username,
+                        match_id,
+                        MAX(CASE WHEN player_result IN ('win', 'victory') THEN 1 ELSE 0 END) AS did_win,
+                        MAX(seen_at) AS last_seen
+                    FROM teammate_rows
+                    GROUP BY teammate_username, match_id
+                )
+                SELECT
+                    d.teammate_username AS username,
+                    p.player_id AS player_id,
+                    COUNT(*) AS shared_matches,
+                    CASE WHEN COUNT(*) > 0 THEN ROUND(100.0 * SUM(d.did_win) / COUNT(*), 1) ELSE 0 END AS win_rate_together,
+                    MAX(d.last_seen) AS last_seen,
+                    GROUP_CONCAT(DISTINCT pt.tag) AS tags,
+                    MAX(CASE WHEN LOWER(TRIM(pt.tag)) = 'friend' THEN 1 ELSE 0 END) AS is_friend
+                FROM dedup d
+                LEFT JOIN players p
+                  ON LOWER(TRIM(p.username)) = LOWER(TRIM(d.teammate_username))
+                LEFT JOIN player_tags pt
+                  ON p.player_id = pt.player_id
+                GROUP BY d.teammate_username, p.player_id
+                ORDER BY is_friend DESC, shared_matches DESC, LOWER(d.teammate_username) ASC
+                """,
+                (clean_primary, clean_match_type),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                tags_raw = str(row["tags"] or "").strip()
+                tags = [t.strip() for t in tags_raw.split(",") if t and t.strip()] if tags_raw else []
+                rows.append(
+                    {
+                        "username": row["username"],
+                        "player_id": row["player_id"],
+                        "shared_matches": int(row["shared_matches"] or 0),
+                        "win_rate_together": float(row["win_rate_together"] or 0.0),
+                        "last_seen": row["last_seen"],
+                        "tags": sorted(set(tags), key=lambda t: t.lower()),
+                        "is_friend": bool(row["is_friend"]),
+                    }
+                )
+            return rows
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to get encountered players for '{clean_primary}': {e}")
+
+    def compute_stack_synergy(self, usernames: List[str], match_type: str = "Ranked") -> Dict[str, Any]:
+        clean = []
+        seen = set()
+        for name in (usernames or []):
+            u = str(name or "").strip()
+            if not u:
+                continue
+            key = u.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append(u)
+        if len(clean) < 2:
+            return {"error": "Select at least 2 players."}
+
+        username_keys = [u.lower() for u in clean]
+        username_placeholders = ",".join("?" for _ in username_keys)
+        clean_match_type = str(match_type or "Ranked").strip()
+        mode_key = clean_match_type.lower()
+        match_type_keys = ["ranked", "pvp_ranked"] if mode_key in {"ranked", "pvp_ranked"} else [mode_key]
+        match_type_placeholders = ",".join("?" for _ in match_type_keys)
+        params = [*username_keys, *match_type_keys]
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    LOWER(TRIM(username)) AS uname,
+                    username,
+                    match_id,
+                    team_id,
+                    LOWER(TRIM(COALESCE(result, ''))) AS result
+                FROM match_detail_players
+                WHERE LOWER(TRIM(username)) IN ({username_placeholders})
+                  AND LOWER(TRIM(COALESCE(match_type, ''))) IN ({match_type_placeholders})
+                """,
+                params,
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to compute stack synergy: {e}")
+
+        roster_keys = [u.lower() for u in clean]
+        roster_set = set(roster_keys)
+        display_by_key = {u.lower(): u for u in clean}
+        matches: Dict[tuple[str, Any], Dict[str, Any]] = {}
+        for row in rows:
+            match_id = str(row.get("match_id") or "").strip()
+            if not match_id:
+                continue
+            team_id = row.get("team_id")
+            key = (match_id, team_id)
+            bucket = matches.setdefault(
+                key,
+                {
+                    "match_id": match_id,
+                    "team_id": team_id,
+                    "map_name": "Unknown",
+                    "players": {},
+                },
+            )
+            uname = str(row.get("uname") or "").strip().lower()
+            if not uname or uname not in roster_set:
+                continue
+            entry = bucket["players"].get(uname)
+            if not entry:
+                bucket["players"][uname] = {
+                    "result": str(row.get("result") or "").strip().lower(),
+                }
+
+        match_ids = sorted({str(r.get("match_id") or "").strip() for r in rows if str(r.get("match_id") or "").strip()})
+        if match_ids:
+            try:
+                cursor = self.conn.cursor()
+                id_placeholders = ",".join("?" for _ in match_ids)
+                cursor.execute(
+                    f"""
+                    SELECT
+                        match_id,
+                        COALESCE(NULLIF(TRIM(map_name), ''), 'Unknown') AS map_name
+                    FROM scraped_match_cards
+                    WHERE match_id IN ({id_placeholders})
+                    GROUP BY match_id
+                    """,
+                    match_ids,
+                )
+                map_by_match = {str(r["match_id"]): str(r["map_name"] or "Unknown") for r in cursor.fetchall()}
+            except sqlite3.Error:
+                map_by_match = {}
+            for bucket in matches.values():
+                mid = str(bucket.get("match_id") or "").strip()
+                if mid and mid in map_by_match:
+                    bucket["map_name"] = map_by_match[mid]
+
+        def win_flag(result_text: str) -> int:
+            return 1 if result_text in {"win", "victory"} else 0
+
+        full_stack_matches = [
+            b for b in matches.values()
+            if set(b["players"].keys()) == roster_set
+        ]
+        full_stack_n = len(full_stack_matches)
+        full_stack_wins = sum(
+            win_flag(next(iter(b["players"].values())).get("result", ""))
+            for b in full_stack_matches
+            if b.get("players")
+        )
+        stack_win_rate = round((100.0 * full_stack_wins / full_stack_n), 1) if full_stack_n else 0.0
+
+        pair_stats: Dict[tuple[str, str], Dict[str, Any]] = {}
+        map_stats: Dict[str, Dict[str, Any]] = {}
+        for b in full_stack_matches:
+            players = sorted(b["players"].keys())
+            did_win = win_flag(next(iter(b["players"].values())).get("result", ""))
+            map_name = str(b.get("map_name") or "Unknown")
+            mm = map_stats.setdefault(map_name, {"matches": 0, "wins": 0})
+            mm["matches"] += 1
+            mm["wins"] += did_win
+            for i in range(len(players)):
+                for j in range(i + 1, len(players)):
+                    key = (players[i], players[j])
+                    p = pair_stats.setdefault(key, {"matches": 0, "wins": 0})
+                    p["matches"] += 1
+                    p["wins"] += did_win
+
+        # Pair fallback when full stack has sparse data.
+        if full_stack_n < 5:
+            pair_stats = {}
+            for b in matches.values():
+                players = sorted(b["players"].keys())
+                if len(players) < 2:
+                    continue
+                did_win = win_flag(next(iter(b["players"].values())).get("result", ""))
+                for i in range(len(players)):
+                    for j in range(i + 1, len(players)):
+                        key = (players[i], players[j])
+                        p = pair_stats.setdefault(key, {"matches": 0, "wins": 0})
+                        p["matches"] += 1
+                        p["wins"] += did_win
+
+        pair_matrix = []
+        for a in roster_keys:
+            row_cells = []
+            for b in roster_keys:
+                if a == b:
+                    row_cells.append({"vs": display_by_key[b], "shared_matches": 0, "win_rate": None, "delta_vs_baseline": None})
+                    continue
+                key = (a, b) if a < b else (b, a)
+                stat = pair_stats.get(key, {"matches": 0, "wins": 0})
+                n = int(stat.get("matches", 0))
+                wr = round((100.0 * stat.get("wins", 0) / n), 1) if n else None
+                row_cells.append({"vs": display_by_key[b], "shared_matches": n, "win_rate": wr, "delta_vs_baseline": None})
+            pair_matrix.append({"player": display_by_key[a], "cells": row_cells})
+
+        # Baseline from ranked match_detail_players by player (dedup by match_id).
+        solo_baselines = {}
+        for name in clean:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT
+                        match_id,
+                        MAX(CASE WHEN LOWER(TRIM(COALESCE(result, ''))) IN ('win', 'victory') THEN 1 ELSE 0 END) AS did_win
+                    FROM match_detail_players
+                    WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
+                      AND LOWER(TRIM(COALESCE(match_type, ''))) = LOWER(TRIM(?))
+                    GROUP BY match_id
+                    """,
+                    (name, clean_match_type),
+                )
+                personal_rows = cursor.fetchall()
+                total = len(personal_rows)
+                wins = sum(int(r["did_win"] or 0) for r in personal_rows)
+                solo_baselines[name] = round((100.0 * wins / total), 1) if total else None
+            except sqlite3.Error:
+                solo_baselines[name] = None
+
+        # Role/operator coverage (operator from player_rounds in full stack matches).
+        role_coverage = []
+        if full_stack_matches:
+            full_ids = [m["match_id"] for m in full_stack_matches]
+            mid_placeholders = ",".join("?" for _ in full_ids)
+            for name in clean:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            COALESCE(operator, 'Unknown') AS operator,
+                            COALESCE(side, 'unknown') AS side,
+                            COUNT(*) AS rounds
+                        FROM player_rounds
+                        WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
+                          AND match_id IN ({mid_placeholders})
+                        GROUP BY operator, side
+                        ORDER BY rounds DESC
+                        """,
+                        [name, *full_ids],
+                    )
+                    op_rows = cursor.fetchall()
+                except sqlite3.Error:
+                    op_rows = []
+                side_counts = {"attacker": 0, "defender": 0, "unknown": 0}
+                operators = []
+                for r in op_rows:
+                    side = str(r["side"] or "unknown").strip().lower()
+                    side_key = side if side in side_counts else "unknown"
+                    rounds = int(r["rounds"] or 0)
+                    side_counts[side_key] += rounds
+                    operators.append({"operator": r["operator"], "side": side_key, "rounds": rounds})
+                role_coverage.append(
+                    {
+                        "username": name,
+                        "side_rounds": side_counts,
+                        "top_operators": operators[:6],
+                    }
+                )
+
+        map_pool = []
+        for map_name, stat in sorted(map_stats.items(), key=lambda kv: (-kv[1]["matches"], kv[0].lower())):
+            n = int(stat.get("matches", 0))
+            wr = round((100.0 * stat.get("wins", 0) / n), 1) if n else 0.0
+            map_pool.append({"map_name": map_name, "matches": n, "win_rate": wr})
+
+        return {
+            "players": clean,
+            "stack_match_count": full_stack_n,
+            "stack_win_rate": stack_win_rate,
+            "stack_wins": full_stack_wins,
+            "solo_baselines": solo_baselines,
+            "pair_matrix": pair_matrix,
+            "map_pool": map_pool,
+            "role_coverage": role_coverage,
+            "pair_only": full_stack_n < 5,
+            "warning": (
+                f"Not enough data for {', '.join(clean)} - showing pair data only"
+                if full_stack_n < 5 else ""
+            ),
+        }
+
+    def debug_stack_synergy(self, usernames: List[str], match_type: str = "Ranked") -> Dict[str, Any]:
+        clean = []
+        seen = set()
+        for name in (usernames or []):
+            u = str(name or "").strip()
+            if not u:
+                continue
+            key = u.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean.append(u)
+        if len(clean) < 2:
+            return {"error": "Select at least 2 players."}
+
+        username_keys = [u.lower() for u in clean]
+        placeholders = ",".join("?" for _ in username_keys)
+        mode_key = str(match_type or "Ranked").strip().lower()
+        ranked_aliases = {"ranked", "pvp_ranked"}
+
+        def match_type_ok(value: Any) -> bool:
+            mk = str(value or "").strip().lower()
+            if mode_key in ranked_aliases:
+                return mk in ranked_aliases
+            return mk == mode_key
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    LOWER(TRIM(username)) AS uname,
+                    username,
+                    match_id,
+                    team_id,
+                    COALESCE(match_type, '') AS match_type
+                FROM match_detail_players
+                WHERE LOWER(TRIM(username)) IN ({placeholders})
+                """,
+                username_keys,
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to debug stack synergy: {e}")
+
+        by_match: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            mid = str(row.get("match_id") or "").strip()
+            if not mid:
+                continue
+            by_match.setdefault(mid, []).append(row)
+
+        roster_set = set(username_keys)
+        raw_shared = []
+        after_type = []
+        after_team = []
+        dropped = []
+
+        for match_id, mrows in by_match.items():
+            present_any = {str(r.get("uname") or "").strip().lower() for r in mrows}
+            if not roster_set.issubset(present_any):
+                continue
+            raw_shared.append(match_id)
+
+            typed_rows = [r for r in mrows if match_type_ok(r.get("match_type"))]
+            present_typed = {str(r.get("uname") or "").strip().lower() for r in typed_rows}
+            if not roster_set.issubset(present_typed):
+                missing = sorted(list(roster_set.difference(present_typed)))
+                dropped.append({"match_id": match_id, "reason": f"dropped_by_match_type_missing_players:{','.join(missing)}"})
+                continue
+            after_type.append(match_id)
+
+            team_to_users: Dict[str, set] = {}
+            for r in typed_rows:
+                team_key = str(r.get("team_id") if r.get("team_id") is not None else "null")
+                uname = str(r.get("uname") or "").strip().lower()
+                if uname in roster_set:
+                    team_to_users.setdefault(team_key, set()).add(uname)
+            same_team = any(roster_set.issubset(users) for users in team_to_users.values())
+            if not same_team:
+                team_summary = ";".join([f"{k}:{','.join(sorted(v))}" for k, v in team_to_users.items()]) or "none"
+                dropped.append({"match_id": match_id, "reason": f"dropped_by_team_id:{team_summary}"})
+                continue
+            after_team.append(match_id)
+
+        pass_sample = after_team[:3]
+        drop_sample = dropped[:3]
+        return {
+            "players": clean,
+            "requested_match_type": match_type,
+            "raw_shared_match_ids_count": len(raw_shared),
+            "after_match_type_filter_count": len(after_type),
+            "after_team_id_filter_count": len(after_team),
+            "passing_match_ids_sample": pass_sample,
+            "dropped_match_ids_sample": drop_sample,
+        }
 
     def add_computed_metrics(self, snapshot_id: int, player_id: int, metrics: Dict[str, Any]) -> int:
         """
@@ -1711,14 +2679,16 @@ class Database:
             "inserted_detail_rows": 0,
             "inserted_round_rows": 0,
             "inserted_player_round_rows": 0,
+            "aggregates_refreshed_trackers": 0,
             "skipped": 0,
             "errors": 0,
         }
+        touched_match_ids: set[str] = set()
 
         for row in cards:
             owner_username = str(row["username"] or "").strip()
             match_id = str(row["match_id"] or "").strip()
-            match_type = str(row["mode"] or "").strip()
+            match_type = self._canonicalize_match_type(row["mode"])
             summary_raw = row["summary_json"]
             if not owner_username or not match_id or not summary_raw:
                 stats["skipped"] += 1
@@ -1798,8 +2768,15 @@ class Database:
                 stats["inserted_detail_rows"] += len(detail_rows)
                 stats["inserted_round_rows"] += len(round_rows)
                 stats["inserted_player_round_rows"] += len(player_round_rows)
+                touched_match_ids.add(match_id)
             except Exception:
                 stats["errors"] += 1
+
+        if touched_match_ids:
+            try:
+                stats["aggregates_refreshed_trackers"] = self.refresh_aggregates_for_matches(list(touched_match_ids))
+            except Exception as agg_err:
+                print(f"[DB] Warning: failed to refresh aggregates after unpack: {agg_err}")
 
         return stats
 
@@ -1877,9 +2854,12 @@ class Database:
                     if (not str(map_name or "").strip()) and str(item.get("map") or "").strip():
                         map_name = item.get("map")
                         updated = True
-                    mode = existing["mode"]
-                    if (not str(mode or "").strip()) and str(item.get("mode") or "").strip():
-                        mode = item.get("mode")
+                    mode = self._canonicalize_match_type(existing["mode"])
+                    if mode != str(existing["mode"] or "").strip():
+                        updated = True
+                    new_mode = self._canonicalize_match_type(item.get("mode"))
+                    if (not str(mode or "").strip()) and str(new_mode or "").strip():
+                        mode = new_mode
                         updated = True
                     match_date = existing["match_date"]
                     if (not str(match_date or "").strip()) and str(item.get("date") or "").strip():
@@ -1933,7 +2913,7 @@ class Database:
                 username,
                 item.get("match_id"),
                 item.get("map"),
-                item.get("mode"),
+                self._canonicalize_match_type(item.get("mode")),
                 item.get("score_team_a"),
                 item.get("score_team_b"),
                 item.get("duration"),
@@ -2495,26 +3475,17 @@ class Database:
         match_id: str,
         players: List[Dict],
         match_type: Optional[str] = None,
+        commit: bool = True,
     ) -> None:
         """Persist parsed API player overviews for one match."""
+        match_type = self._canonicalize_match_type(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM match_detail_players WHERE player_id = ? AND match_id = ?",
             (player_id, match_id),
         )
-
-        for p in players:
-            cursor.execute("""
-                INSERT INTO match_detail_players (
-                    player_id, match_id, match_type, player_id_tracker, username, team_id, result,
-                    kills, deaths, assists, headshots, first_bloods, first_deaths,
-                    clutches_won, clutches_lost, clutches_1v1, clutches_1v2, clutches_1v3,
-                    clutches_1v4, clutches_1v5, kills_1k, kills_2k, kills_3k, kills_4k,
-                    kills_5k, rounds_won, rounds_lost, rank_points, rank_points_delta,
-                    rank_points_previous, kd_ratio, hs_pct, esr, kills_per_round,
-                    time_played_ms, elo, elo_delta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
+        rows = [
+            (
                 player_id,
                 match_id,
                 match_type,
@@ -2552,8 +3523,26 @@ class Database:
                 p.get("time_played_ms"),
                 p.get("elo"),
                 p.get("elo_delta"),
-            ))
-        self.conn.commit()
+            )
+            for p in players
+        ]
+        if rows:
+            cursor.executemany(
+                """
+                INSERT INTO match_detail_players (
+                    player_id, match_id, match_type, player_id_tracker, username, team_id, result,
+                    kills, deaths, assists, headshots, first_bloods, first_deaths,
+                    clutches_won, clutches_lost, clutches_1v1, clutches_1v2, clutches_1v3,
+                    clutches_1v4, clutches_1v5, kills_1k, kills_2k, kills_3k, kills_4k,
+                    kills_5k, rounds_won, rounds_lost, rank_points, rank_points_delta,
+                    rank_points_previous, kd_ratio, hs_pct, esr, kills_per_round,
+                    time_played_ms, elo, elo_delta
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        if commit:
+            self.conn.commit()
 
     def get_match_detail_players(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
         """Fetch API player overviews for one player, optionally filtered by match_id."""
@@ -2585,26 +3574,36 @@ class Database:
         match_id: str,
         rounds: List[Dict],
         match_type: Optional[str] = None,
+        commit: bool = True,
     ) -> None:
         """Persist parsed API round outcomes for one match."""
+        match_type = self._canonicalize_match_type(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM round_outcomes WHERE player_id = ? AND match_id = ?",
             (player_id, match_id),
         )
-        for r in rounds:
-            cursor.execute("""
-                INSERT INTO round_outcomes (player_id, match_id, match_type, round_id, end_reason, winner_side)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
+        rows = [
+            (
                 player_id,
                 match_id,
                 match_type,
                 r.get("round_id"),
                 r.get("end_reason"),
                 r.get("winner_side"),
-            ))
-        self.conn.commit()
+            )
+            for r in rounds
+        ]
+        if rows:
+            cursor.executemany(
+                """
+                INSERT INTO round_outcomes (player_id, match_id, match_type, round_id, end_reason, winner_side)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        if commit:
+            self.conn.commit()
 
     def get_round_outcomes(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
         """Fetch stored round outcomes."""
@@ -2628,8 +3627,10 @@ class Database:
         player_rounds: List[Dict],
         match_type: Optional[str] = None,
         usernames_by_tracker_id: Optional[Dict[str, str]] = None,
+        commit: bool = True,
     ) -> None:
         """Persist parsed API player-round rows for one match."""
+        match_type = self._canonicalize_match_type(match_type)
         cursor = self.conn.cursor()
         cursor.execute(
             "DELETE FROM player_rounds WHERE player_id = ? AND match_id = ?",
@@ -2637,40 +3638,49 @@ class Database:
         )
         usernames_by_tracker_id = usernames_by_tracker_id or {}
 
+        rows = []
         for pr in player_rounds:
             tracker_id = pr.get("player_id_tracker")
-            cursor.execute("""
+            rows.append(
+                (
+                    player_id,
+                    match_id,
+                    match_type,
+                    pr.get("round_id"),
+                    tracker_id,
+                    usernames_by_tracker_id.get(tracker_id),
+                    pr.get("team_id"),
+                    pr.get("side"),
+                    pr.get("operator"),
+                    pr.get("killed_by_player_id"),
+                    pr.get("killed_by_operator"),
+                    pr.get("result"),
+                    pr.get("is_disconnected", 0),
+                    pr.get("kills"),
+                    pr.get("deaths"),
+                    pr.get("assists"),
+                    pr.get("headshots"),
+                    pr.get("first_blood"),
+                    pr.get("first_death"),
+                    pr.get("clutch_won"),
+                    pr.get("clutch_lost"),
+                    pr.get("hs_pct"),
+                    pr.get("esr"),
+                )
+            )
+        if rows:
+            cursor.executemany(
+                """
                 INSERT INTO player_rounds (
                     player_id, match_id, match_type, round_id, player_id_tracker, username, team_id, side,
                     operator, killed_by_player_id, killed_by_operator, result, is_disconnected, kills, deaths, assists, headshots,
                     first_blood, first_death, clutch_won, clutch_lost, hs_pct, esr
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                player_id,
-                match_id,
-                match_type,
-                pr.get("round_id"),
-                tracker_id,
-                usernames_by_tracker_id.get(tracker_id),
-                pr.get("team_id"),
-                pr.get("side"),
-                pr.get("operator"),
-                pr.get("killed_by_player_id"),
-                pr.get("killed_by_operator"),
-                pr.get("result"),
-                pr.get("is_disconnected", 0),
-                pr.get("kills"),
-                pr.get("deaths"),
-                pr.get("assists"),
-                pr.get("headshots"),
-                pr.get("first_blood"),
-                pr.get("first_death"),
-                pr.get("clutch_won"),
-                pr.get("clutch_lost"),
-                pr.get("hs_pct"),
-                pr.get("esr"),
-            ))
-        self.conn.commit()
+                """,
+                rows,
+            )
+        if commit:
+            self.conn.commit()
 
     def get_player_rounds(self, player_id: int, match_id: Optional[str] = None) -> List[Dict]:
         """Fetch stored player-round rows."""
@@ -2691,37 +3701,60 @@ class Database:
         """Persist a batch of API match detail payloads for one player."""
         saved_matches = 0
         saved_round_rows = 0
-        for detail in details:
-            match_id = detail.get("match_id")
-            if not match_id:
-                continue
-            players = detail.get("players", [])
-            rounds = detail.get("round_outcomes", [])
-            player_rounds = detail.get("player_rounds", [])
-            usernames_by_tracker_id = {
-                p.get("player_id_tracker"): p.get("username")
-                for p in players
-                if p.get("player_id_tracker")
-            }
-            meta = detail.get("match_meta") if isinstance(detail.get("match_meta"), dict) else {}
-            match_type = (
-                detail.get("mode")
-                or meta.get("mode")
-                or meta.get("sessionTypeName")
-                or ""
-            )
+        touched_match_ids: set[str] = set()
+        with self.conn:
+            for detail in details:
+                match_id = detail.get("match_id")
+                if not match_id:
+                    continue
+                players = detail.get("players", [])
+                rounds = detail.get("round_outcomes", [])
+                player_rounds = detail.get("player_rounds", [])
+                usernames_by_tracker_id = {
+                    p.get("player_id_tracker"): p.get("username")
+                    for p in players
+                    if p.get("player_id_tracker")
+                }
+                meta = detail.get("match_meta") if isinstance(detail.get("match_meta"), dict) else {}
+                match_type = (
+                    detail.get("mode")
+                    or meta.get("mode")
+                    or meta.get("sessionTypeName")
+                    or ""
+                )
+                match_type = self._canonicalize_match_type(match_type)
 
-            self.save_match_detail_players(player_id, match_id, players, match_type=match_type)
-            self.save_round_outcomes(player_id, match_id, rounds, match_type=match_type)
-            self.save_player_rounds(
-                player_id,
-                match_id,
-                player_rounds,
-                match_type=match_type,
-                usernames_by_tracker_id=usernames_by_tracker_id,
-            )
-            saved_matches += 1
-            saved_round_rows += len(player_rounds)
+                self.save_match_detail_players(
+                    player_id,
+                    match_id,
+                    players,
+                    match_type=match_type,
+                    commit=False,
+                )
+                self.save_round_outcomes(
+                    player_id,
+                    match_id,
+                    rounds,
+                    match_type=match_type,
+                    commit=False,
+                )
+                self.save_player_rounds(
+                    player_id,
+                    match_id,
+                    player_rounds,
+                    match_type=match_type,
+                    usernames_by_tracker_id=usernames_by_tracker_id,
+                    commit=False,
+                )
+                saved_matches += 1
+                saved_round_rows += len(player_rounds)
+                touched_match_ids.add(str(match_id))
+
+        if touched_match_ids:
+            try:
+                self.refresh_aggregates_for_matches(list(touched_match_ids))
+            except Exception as agg_err:
+                print(f"[DB] Warning: failed to refresh aggregates after batch save: {agg_err}")
 
         return {"matches": saved_matches, "round_rows": saved_round_rows}
 

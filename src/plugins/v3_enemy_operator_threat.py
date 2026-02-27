@@ -113,13 +113,7 @@ class EnemyOperatorThreatPlugin:
                 SUM(CASE WHEN pr.result = 'victory' THEN 1 ELSE 0 END) AS total_wins
             FROM player_rounds pr
             WHERE pr.username = ?
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = pr.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND pr.match_type = 'Ranked'
             """,
             (self.username,),
         )
@@ -151,13 +145,7 @@ class EnemyOperatorThreatPlugin:
               AND deaths = 1
               AND killed_by_operator IS NOT NULL
               AND TRIM(killed_by_operator) != ''
-              AND EXISTS (
-                    SELECT 1
-                    FROM scraped_match_cards smc
-                    WHERE smc.match_id = player_rounds.match_id
-                      AND LOWER(COALESCE(smc.mode, '')) LIKE '%ranked%'
-                      AND LOWER(COALESCE(smc.mode, '')) NOT LIKE '%unranked%'
-              )
+              AND match_type = 'Ranked'
             GROUP BY killed_by_operator
             """,
             (self.username,),
