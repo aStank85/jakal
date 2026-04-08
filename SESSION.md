@@ -8,17 +8,16 @@ for competitive improvement. Web UI at localhost:8000.
 Working on: Phase 2/3 refactor
 
 ## Last session
-Completed Phase 1 cleanup and Phase 2 helper extraction.
+Completed Phase 1 cleanup and Phase 2 helper/cache extraction.
 - Removed _match_scan_package (duplicate)
 - Moved loose scripts to scripts/
 - Archived CODEX task files to docs/tasks/
 - Extracted helpers from web/app.py into src/utils.py (88 lines removed)
+- Extracted workspace cache helpers from web/app.py into src/cache.py
 
 ## Known broken things
 - None
 
 ## Next logical step
-Phase 2 continued: extract cache functions from web/app.py into src/cache.py
-Functions: _workspace_sql_cache_get/set, _workspace_scope_cache_get/set,
-_workspace_team_cache_get/set, _workspace_insights_cache_get/set,
-_ensure_workspace_cache_tables
+Phase 3: continue breaking web/app.py into focused modules/routes.
+Good candidates: workspace API handlers, dev diagnostics, or asset-serving setup.
