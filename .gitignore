@@ -64,3 +64,4 @@ match-scan-runner.zip
 
 # Keep main database
 !jakal_scraper.sqlite
+.aider*
