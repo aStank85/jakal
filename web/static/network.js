@@ -4468,7 +4468,7 @@ function restorePrimaryTabFromUrl() {
 }
 
 function setWorkspacePanel(panel) {
-    const next = ["overview", "operators", "matchups", "team"].includes(panel) ? panel : "overview";
+    const next = ["overview", "insights", "operators", "matchups", "team"].includes(panel) ? panel : "overview";
     computeReportState.workspace.panel = next;
     document.querySelectorAll("[data-ws-panel]").forEach((btn) => {
         const isActive = btn.dataset.wsPanel === next;
@@ -4496,6 +4496,70 @@ function renderWorkspaceOverview(payload) {
             <div class="insights-finding info">rounds_total=${toNumber(diag.rounds_total, 0)} missing_players=${toNumber(diag.rounds_missing_players, 0)} not_5v5=${toNumber(diag.rounds_not_5v5, 0)}</div>
         </div>
     `;
+}
+
+function renderWorkspaceInsightInspector(insight) {
+    const ins = document.getElementById("workspace-inspector");
+    if (!ins || !insight) return;
+    const evidence = insight?.evidence || {};
+    const score = toNumber(insight?.rank_score, 0);
+    const evLines = Object.entries(evidence)
+        .slice(0, 8)
+        .map(([k, v]) => `<span>${escapeHtml(String(k))} <strong>${escapeHtml(String(v))}</strong></span>`)
+        .join("");
+    ins.innerHTML = `
+        <div class="compute-label">Inspector: ${escapeHtml(String(insight?.title || "Insight"))}</div>
+        <div class="dashboard-graph-summary">
+            <span>Severity <strong>${escapeHtml(String(insight?.severity || ""))}</strong></span>
+            <span>Category <strong>${escapeHtml(String(insight?.category || ""))}</strong></span>
+            <span>Rank <strong>${formatFixed(score, 2)}</strong></span>
+        </div>
+        <div class="compute-value">${escapeHtml(String(insight?.message || ""))}</div>
+        <div class="dashboard-graph-summary">${evLines}</div>
+    `;
+}
+
+function renderWorkspaceInsights(payload) {
+    const insights = Array.isArray(payload?.insights) ? payload.insights : [];
+    const meta = payload?.meta || {};
+    const baseline = payload?.baseline || {};
+    const scopeMatches = toNumber(payload?.scope?.match_ids, 0);
+    const header = `
+        <div class="dashboard-graph-summary">
+            <span>Scope matches <strong>${scopeMatches}</strong></span>
+            <span>Baseline p0 <strong>${formatFixed(toNumber(baseline?.p0, 0) * 100.0, 2)}%</strong></span>
+            <span>Baseline wins/rounds <strong>${toNumber(baseline?.wins, 0)}/${toNumber(baseline?.rounds, 0)}</strong></span>
+            <span>Cache <strong>${payload?.cache_hit ? "hit" : "miss"}</strong></span>
+            <span>Compute <strong>${toNumber(meta?.compute_ms, 0)}ms</strong></span>
+            <span>Version <strong>${escapeHtml(String(meta?.version || "-"))}</strong></span>
+        </div>
+    `;
+    if (!insights.length) {
+        return `${header}<div class="compute-value">No insights emitted for this scope yet.</div>`;
+    }
+    const cards = insights.map((ins, idx) => {
+        const sev = String(ins?.severity || "INFO").toLowerCase();
+        const cat = String(ins?.category || "SYNERGY").toLowerCase();
+        const actions = Array.isArray(ins?.actions) ? ins.actions : [];
+        const evidence = ins?.evidence || {};
+        const evidenceRows = Object.entries(evidence)
+            .map(([k, v]) => `<div class="workspace-insight-evidence-row"><span>${escapeHtml(String(k))}</span><strong>${escapeHtml(String(v))}</strong></div>`)
+            .join("");
+        return (
+            `<article class="workspace-insight-card ${sev}" data-insight-idx="${idx}">` +
+            `<div class="workspace-insight-head">` +
+            `<div class="workspace-insight-chips"><span class="workspace-insight-chip sev-${sev}">${escapeHtml(String(ins?.severity || "INFO"))}</span><span class="workspace-insight-chip cat-${cat}">${escapeHtml(String(ins?.category || "SYNERGY"))}</span></div>` +
+            `<h4>${escapeHtml(String(ins?.title || ""))}</h4>` +
+            `</div>` +
+            `<p class="workspace-insight-message">${escapeHtml(String(ins?.message || ""))}</p>` +
+            `<details class="workspace-insight-evidence"><summary>Evidence</summary>${evidenceRows}</details>` +
+            `<div class="workspace-insight-actions">` +
+            actions.map((a, aIdx) => `<button type="button" data-insight-idx="${idx}" data-action-idx="${aIdx}">${escapeHtml(String(a?.label || "Apply"))}</button>`).join("") +
+            `</div>` +
+            `</article>`
+        );
+    }).join("");
+    return `${header}<div class="workspace-insight-grid">${cards}</div>`;
 }
 
 function renderWorkspaceOperatorScatter(operators) {
@@ -4932,9 +4996,70 @@ function renderWorkspacePanel(panel, payload) {
     const el = document.getElementById(`workspace-panel-${panel}`);
     if (!el) return;
     if (panel === "overview") el.innerHTML = renderWorkspaceOverview(payload);
+    if (panel === "insights") el.innerHTML = renderWorkspaceInsights(payload);
     if (panel === "operators") el.innerHTML = renderWorkspaceOperatorScatter(payload?.operators);
     if (panel === "matchups") el.innerHTML = renderWorkspaceMatchups(payload);
     if (panel === "team") el.innerHTML = renderWorkspaceTeam(payload);
+    if (panel === "insights") {
+        const applyAction = async (action) => {
+            const t = String(action?.type || "");
+            const p = action?.params || {};
+            if (t === "apply_filter" || t === "clear_filter") {
+                const fieldMap = {
+                    ws_days: "ws-days",
+                    ws_queue: "ws-queue",
+                    ws_playlist: "ws-playlist",
+                    ws_map_name: "ws-map-name",
+                    ws_search: "ws-search",
+                    ws_stack_only: "ws-stack-only",
+                };
+                Object.entries(fieldMap).forEach(([k, id]) => {
+                    if (!(k in p)) return;
+                    const elf = document.getElementById(id);
+                    if (!elf) return;
+                    if (elf.type === "checkbox") elf.checked = String(p[k]) === "true";
+                    else elf.value = String(p[k] ?? "");
+                });
+                if (Object.prototype.hasOwnProperty.call(p, "ws_side")) {
+                    const side = String(p.ws_side || "").toLowerCase();
+                    const ins = document.getElementById("workspace-inspector");
+                    if (ins && (side === "attack" || side === "defense")) {
+                        ins.innerHTML = `<div class="compute-label">Inspector</div><div class="compute-value">Applied side intent: ${escapeHtml(side)}. Open Operators/Team context to evaluate this phase.</div>`;
+                    }
+                }
+                computeReportState.workspace.dataByPanel = {};
+                await loadWorkspacePanel(computeReportState.workspace.panel || "insights", true);
+                return;
+            }
+            if (t === "open_panel") {
+                const next = String(p?.ws_panel || "overview");
+                setWorkspacePanel(next);
+                await loadWorkspacePanel(next, false);
+            }
+        };
+        el.querySelectorAll(".workspace-insight-card").forEach((card) => {
+            card.addEventListener("click", () => {
+                const idx = toNumber(card.dataset.insightIdx, -1);
+                const ins = Array.isArray(payload?.insights) ? payload.insights[idx] : null;
+                if (ins) renderWorkspaceInsightInspector(ins);
+            });
+        });
+        el.querySelectorAll(".workspace-insight-actions button").forEach((btn) => {
+            btn.addEventListener("click", async (ev) => {
+                ev.stopPropagation();
+                const idx = toNumber(btn.dataset.insightIdx, -1);
+                const aIdx = toNumber(btn.dataset.actionIdx, -1);
+                const ins = Array.isArray(payload?.insights) ? payload.insights[idx] : null;
+                const action = Array.isArray(ins?.actions) ? ins.actions[aIdx] : null;
+                if (!action) return;
+                try {
+                    await applyAction(action);
+                } catch (err) {
+                    logCompute(`Insight action failed: ${err}`, "error");
+                }
+            });
+        });
+    }
     if (panel === "operators") {
         el.querySelectorAll(".ws-scatter-dot").forEach((btn) => {
             btn.addEventListener("click", async () => {
@@ -5183,6 +5308,40 @@ async function loadWorkspacePanel(panel, force = false) {
     computeReportState.workspace.requestSeq = requestSeq;
     const f = getWorkspaceFiltersFromUI();
     persistWorkspaceState();
+    if (panelKey === "insights") {
+        if (target) target.innerHTML = `<div class="compute-value">Building scoped features...</div>`;
+        const qs = new URLSearchParams({
+            ws_days: f.days,
+            ws_queue: f.queue,
+            ws_playlist: f.playlist,
+            ws_map_name: f.map_name,
+            ws_stack_only: f.stack_only,
+            ws_search: f.search,
+            force_refresh: force ? "true" : "false",
+        });
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 12000);
+        let res;
+        try {
+            res = await api.getWorkspaceInsights(username, qs, { signal: ctrl.signal });
+        } catch (err) {
+            if (String(err?.name || "").toLowerCase() === "aborterror") {
+                throw new Error("Insights request timed out after 12s");
+            }
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Workspace Insights HTTP ${res.status}: ${text}`);
+        }
+        const payload = await res.json();
+        if (requestSeq !== computeReportState.workspace.requestSeq) return;
+        computeReportState.workspace.dataByPanel[panelKey] = payload;
+        renderWorkspacePanel(panelKey, payload);
+        return;
+    }
     if (panelKey === "team") {
         if (target) target.innerHTML = `<div class="compute-value">Building scope...</div>`;
         const teamQs = new URLSearchParams({
@@ -6650,7 +6809,7 @@ if (heatmapSearch) {
         scheduleDashboardGraphRender(120);
     });
 }
-["ws-tab-overview", "ws-tab-operators", "ws-tab-matchups", "ws-tab-team"].forEach((id) => {
+["ws-tab-overview", "ws-tab-insights", "ws-tab-operators", "ws-tab-matchups", "ws-tab-team"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("click", async () => {

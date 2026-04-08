@@ -44,3 +44,23 @@ debug_drawer.txt
 
 #Claude settings
 .claude/settings.local.json
+
+# Debug/backup databases
+*.backup-*.sqlite
+*.debug-*.sqlite
+*.debug2-*.sqlite
+*.debug3-*.sqlite
+*.debug4-*.sqlite
+*.debug5-*.sqlite
+*.finalattempt-*.sqlite
+*.finalfix-*.sqlite
+*.killevents2-*.sqlite
+*.killfix-*.sqlite
+*.killfix-*.sqlite
+*.pre-rerun-*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+match-scan-runner.zip
+
+# Keep main database
+!jakal_scraper.sqlite

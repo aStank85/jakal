@@ -1,0 +1,148 @@
+{
+  "players": [
+    {
+      "id": "p1",
+      "nickname": "Alpha",
+      "pseudonym": "Alpha",
+      "teamId": "blue",
+      "partyId": null,
+      "scoreboard": {
+        "kills": 2,
+        "deaths": 1,
+        "headshots": 1,
+        "assists": 0,
+        "trades": 0,
+        "clutches": 0,
+        "aces": 0,
+        "openingKills": 1,
+        "openingDeaths": 0,
+        "plants": 0,
+        "score": 900,
+        "mvps": 0
+      },
+      "rounds": [
+        {
+          "id": 1,
+          "sideId": "attacker",
+          "operatorId": "ash",
+          "isTraded": null,
+          "stats": {
+            "kills": 1,
+            "deaths": 0,
+            "headshots": 1,
+            "assists": 0,
+            "trades": 0,
+            "plants": 0,
+            "score": 350
+          }
+        },
+        {
+          "id": 2,
+          "sideId": "defender",
+          "operatorId": "mute",
+          "isTraded": null,
+          "stats": {
+            "kills": 1,
+            "deaths": 1,
+            "headshots": 0,
+            "assists": 0,
+            "trades": 0,
+            "plants": 0,
+            "score": 250
+          }
+        }
+      ]
+    },
+    {
+      "id": "p2",
+      "nickname": "Bravo",
+      "pseudonym": "Bravo",
+      "teamId": "red",
+      "partyId": null,
+      "scoreboard": {
+        "kills": 1,
+        "deaths": 2,
+        "headshots": 0,
+        "assists": 0,
+        "trades": 0,
+        "clutches": 0,
+        "aces": 0,
+        "openingKills": 0,
+        "openingDeaths": 1,
+        "plants": 0,
+        "score": 600,
+        "mvps": 0
+      },
+      "rounds": [
+        {
+          "id": 1,
+          "sideId": "defender",
+          "operatorId": "jager",
+          "isTraded": null,
+          "stats": {
+            "kills": 0,
+            "deaths": 1,
+            "headshots": 0,
+            "assists": 0,
+            "trades": 0,
+            "plants": 0,
+            "score": 100
+          }
+        },
+        {
+          "id": 2,
+          "sideId": "attacker",
+          "operatorId": "sledge",
+          "isTraded": null,
+          "stats": {
+            "kills": 1,
+            "deaths": 1,
+            "headshots": 0,
+            "assists": 0,
+            "trades": 0,
+            "plants": 0,
+            "score": 200
+          }
+        }
+      ]
+    }
+  ],
+  "rounds": [
+    {
+      "id": 1,
+      "winnerTeamId": "blue",
+      "winCondition": "elimination",
+      "bombSiteId": "A",
+      "attackingTeamId": "blue"
+    },
+    {
+      "id": 2,
+      "winnerTeamId": "red",
+      "winCondition": "bomb_defused",
+      "bombSiteId": "B",
+      "attackingTeamId": "red"
+    }
+  ],
+  "killEvents": [
+    {
+      "roundId": 1,
+      "timestamp": 1000,
+      "attackerId": "p1",
+      "victimId": "p2"
+    },
+    {
+      "roundId": 2,
+      "timestamp": 2000,
+      "attackerId": null,
+      "victimId": "p1"
+    },
+    {
+      "roundId": 2,
+      "timestamp": 2500,
+      "attackerId": "p2",
+      "victimId": "p1"
+    }
+  ],
+  "weapons": [],
+  "reports": []
+}

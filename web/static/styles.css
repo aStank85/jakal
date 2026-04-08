@@ -1995,6 +1995,115 @@ select:focus-visible {
     cursor: pointer;
 }
 
+.workspace-insight-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.workspace-insight-card {
+    border: 1px solid #2f3a4d;
+    border-radius: 10px;
+    background: #111a28;
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.workspace-insight-card:hover {
+    border-color: #46618a;
+}
+
+.workspace-insight-head h4 {
+    margin: 0;
+    color: #ecf3ff;
+    font-size: 14px;
+}
+
+.workspace-insight-chips {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.workspace-insight-chip {
+    border: 1px solid #3b4a61;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #d8e6fd;
+}
+
+.workspace-insight-chip.sev-action {
+    border-color: rgba(74, 222, 128, 0.5);
+    color: #4ade80;
+}
+
+.workspace-insight-chip.sev-watch {
+    border-color: rgba(245, 158, 11, 0.5);
+    color: #f59e0b;
+}
+
+.workspace-insight-chip.sev-info {
+    border-color: rgba(96, 165, 250, 0.5);
+    color: #93c5fd;
+}
+
+.workspace-insight-message {
+    margin: 0;
+    color: #cbd8ef;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.workspace-insight-evidence {
+    border: 1px solid #2d3d58;
+    border-radius: 8px;
+    background: #0f1724;
+    padding: 6px 8px;
+}
+
+.workspace-insight-evidence summary {
+    color: #a9bfdc;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.workspace-insight-evidence-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: #b8c9e5;
+    border-top: 1px solid #26344a;
+    padding-top: 5px;
+    margin-top: 5px;
+}
+
+.workspace-insight-evidence-row strong {
+    color: #e4eefc;
+}
+
+.workspace-insight-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.workspace-insight-actions button {
+    border: 1px solid #3a4d69;
+    background: #172236;
+    color: #dce7f7;
+    border-radius: 8px;
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
 .map-perf-controls {
     margin-bottom: 6px;
 }

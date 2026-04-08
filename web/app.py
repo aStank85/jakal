@@ -31,6 +31,7 @@ from src.plugins.v3_enemy_operator_threat import EnemyOperatorThreatPlugin
 from src.plugins.v2_operator_stats import OperatorStatsPlugin
 from src.plugins.v2_map_stats import MapStatsPlugin
 from src.db_standardizer import DatabaseStandardizer
+from src.analytics.insights.engine import run_insight_engine, INSIGHTS_VERSION
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
@@ -174,8 +175,10 @@ workspace_cache: dict[str, tuple[float, dict]] = {}
 WORKSPACE_CACHE_TTL_SECONDS = 90
 workspace_scope_cache_mem: dict[str, tuple[float, dict]] = {}
 workspace_team_cache_mem: dict[str, tuple[float, dict]] = {}
+workspace_insights_cache_mem: dict[str, tuple[float, dict]] = {}
 WORKSPACE_SCOPE_CACHE_TTL_SECONDS = 180
 WORKSPACE_TEAM_CACHE_TTL_SECONDS = 300
+WORKSPACE_INSIGHTS_CACHE_TTL_SECONDS = 300
 
 
 def _get_db_cursor():
@@ -211,6 +214,17 @@ def _ensure_workspace_cache_tables() -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS workspace_insights_cache (
+            insights_key  TEXT PRIMARY KEY,
+            payload_json  TEXT NOT NULL,
+            created_at    REAL NOT NULL,
+            expires_at    REAL NOT NULL,
+            db_rev        TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_workspace_scope_cache_expires
         ON workspace_scope_cache (expires_at)
         """
@@ -219,6 +233,12 @@ def _ensure_workspace_cache_tables() -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_workspace_team_cache_expires
         ON workspace_team_cache (expires_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_workspace_insights_cache_expires
+        ON workspace_insights_cache (expires_at)
         """
     )
     db.conn.commit()
@@ -319,6 +339,36 @@ def _workspace_team_cache_set(team_key: str, payload: dict, db_rev: str) -> None
         team_key,
         cache_payload,
         WORKSPACE_TEAM_CACHE_TTL_SECONDS,
+        db_rev,
+    )
+
+
+def _workspace_insights_cache_get(insights_key: str, db_rev: str) -> dict | None:
+    now = time.time()
+    item = workspace_insights_cache_mem.get(insights_key)
+    if item:
+        ts, payload = item
+        if now - ts <= WORKSPACE_INSIGHTS_CACHE_TTL_SECONDS:
+            if str(payload.get("db_rev") or "") == str(db_rev or ""):
+                return payload
+        else:
+            workspace_insights_cache_mem.pop(insights_key, None)
+    payload = _workspace_sql_cache_get("workspace_insights_cache", "insights_key", insights_key, db_rev)
+    if payload is not None:
+        workspace_insights_cache_mem[insights_key] = (now, payload)
+    return payload
+
+
+def _workspace_insights_cache_set(insights_key: str, payload: dict, db_rev: str) -> None:
+    cache_payload = dict(payload or {})
+    cache_payload["db_rev"] = str(db_rev or "")
+    workspace_insights_cache_mem[insights_key] = (time.time(), cache_payload)
+    _workspace_sql_cache_set(
+        "workspace_insights_cache",
+        "insights_key",
+        insights_key,
+        cache_payload,
+        WORKSPACE_INSIGHTS_CACHE_TTL_SECONDS,
         db_rev,
     )
 
@@ -2135,6 +2185,82 @@ async def workspace_team(
         return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compute workspace team: {str(e)}")
+
+
+@app.get("/api/workspace/insights/{username}")
+async def workspace_insights(
+    username: str,
+    ws_days: int = 90,
+    ws_queue: str = "all",
+    ws_playlist: str = "",
+    ws_map_name: str = "",
+    ws_map: str = "",
+    ws_stack_only: bool = False,
+    ws_stack_id: int | None = None,
+    ws_search: str = "",
+    mode: str = "",
+    force_refresh: bool = False,
+) -> dict:
+    try:
+        map_filter = ws_map_name or ws_map
+        scope = _build_workspace_scope(
+            username=username,
+            days=ws_days,
+            queue=ws_queue,
+            playlist=ws_playlist,
+            map_name=map_filter,
+            stack_only=ws_stack_only,
+            stack_id=ws_stack_id,
+            search=ws_search,
+            legacy_mode=mode,
+        )
+        db_rev = _db_revision_token()
+        scope_key = str(scope.get("scope_key") or "")
+        insights_key = _hash_payload(
+            {
+                "scope_key": scope_key,
+                "view": INSIGHTS_VERSION,
+                "db_rev": db_rev,
+            }
+        )
+        if not force_refresh:
+            cached = _workspace_insights_cache_get(insights_key, db_rev)
+            if cached is not None:
+                payload = dict(cached)
+                payload["cache_hit"] = True
+                return payload
+
+        team_result = _compute_workspace_team_pairs(username, scope)
+        cur = _get_db_cursor()
+        result = run_insight_engine(
+            cur=cur,
+            username=username,
+            scope=scope,
+            team_pairs_overall=team_result.get("pairs", []),
+        )
+        payload = {
+            "username": username,
+            "scope_key": scope_key,
+            "cache_hit": False,
+            "meta": {
+                **(result.get("meta") or {}),
+                "scope_key": scope_key,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "baseline": result.get("baseline", {}),
+            "insights": result.get("insights", []),
+            "scope": {
+                "match_ids": int(len(scope.get("match_ids") or [])),
+                "filters_applied": scope.get("filters_applied", {}),
+                "stack_context": scope.get("stack_context", {}),
+                "scope_cache_hit": bool(scope.get("cache_hit", False)),
+                "scope_build_ms": int(scope.get("compute_ms", 0)),
+            },
+        }
+        _workspace_insights_cache_set(insights_key, payload, db_rev)
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute workspace insights: {str(e)}")
 
 
 @app.get("/api/dashboard-workspace/{username}")

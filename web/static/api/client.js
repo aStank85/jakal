@@ -86,6 +86,10 @@ export function createApiClient() {
             const qs = queryString(params);
             return this.request(`/api/workspace/team/${encodeSegment(username)}?${qs}`, options);
         },
+        getWorkspaceInsights(username, params, options = {}) {
+            const qs = queryString(params);
+            return this.request(`/api/workspace/insights/${encodeSegment(username)}?${qs}`, options);
+        },
         getRoundAnalysis(username) {
             return this.request(`/api/round-analysis/${encodeSegment(username)}`);
         },
