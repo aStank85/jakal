@@ -32,34 +32,18 @@ from src.plugins.v2_operator_stats import OperatorStatsPlugin
 from src.plugins.v2_map_stats import MapStatsPlugin
 from src.db_standardizer import DatabaseStandardizer
 from src.analytics.insights.engine import run_insight_engine, INSIGHTS_VERSION
+from src.utils import (
+    _is_unknown_operator_name,
+    _normalize_asset_key,
+    _normalize_mode_key,
+    _parse_iso_datetime,
+    _pctile_abs_bound,
+    _wilson_ci,
+)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _normalize_asset_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
-
-def _normalize_mode_key(raw_mode: object) -> str:
-    tokens = set(re.findall(r"[a-z0-9]+", str(raw_mode or "").strip().lower()))
-    if not tokens:
-        return "other"
-    if "unranked" in tokens:
-        return "unranked"
-    if "ranked" in tokens:
-        return "ranked"
-    if "standard" in tokens:
-        return "standard"
-    if "quick" in tokens or "quickmatch" in tokens:
-        return "quick"
-    if "event" in tokens:
-        return "event"
-    if "arcade" in tokens:
-        return "arcade"
-    return "other"
-
 
 def _canonical_queue_key(raw_mode: object) -> str:
     tokens = set(re.findall(r"[a-z0-9]+", str(raw_mode or "").strip().lower()))
@@ -1043,28 +1027,6 @@ async def settings_db_standardize(dry_run: bool = True, verbose: bool = False) -
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to standardize DB: {str(e)}")
 
-
-def _parse_iso_datetime(raw: object) -> datetime | None:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    text = text.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
-        try:
-            dt = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
-            return dt
-        except Exception:
-            continue
-    return None
-
-
 def _extract_match_times(card_row: dict) -> tuple[datetime | None, datetime | None]:
     summary = card_row.get("summary_json")
     payload = {}
@@ -1094,48 +1056,6 @@ def _extract_match_times(card_row: dict) -> tuple[datetime | None, datetime | No
     end_dt = next((v for v in (_parse_iso_datetime(x) for x in end_keys) if v is not None), None)
     start_dt = next((v for v in (_parse_iso_datetime(x) for x in start_keys) if v is not None), None)
     return end_dt, start_dt
-
-
-def _wilson_ci(successes: int, trials: int) -> tuple[float, float]:
-    if trials <= 0:
-        return 0.0, 0.0
-    p = successes / trials
-    z = 1.96
-    z2 = z * z
-    denom = 1.0 + (z2 / trials)
-    center = (p + (z2 / (2.0 * trials))) / denom
-    half = (z / denom) * math.sqrt((p * (1.0 - p) / trials) + (z2 / (4.0 * trials * trials)))
-    return max(0.0, center - half), min(1.0, center + half)
-
-
-def _pctile_abs_bound(values: list[float], fallback: float = 15.0) -> float:
-    vals = sorted(abs(float(v)) for v in values if isinstance(v, (float, int)) and math.isfinite(float(v)))
-    if len(vals) < 8:
-        return fallback
-    lo = vals[int(max(0, math.floor(0.05 * (len(vals) - 1))))]
-    hi = vals[int(max(0, math.floor(0.95 * (len(vals) - 1))))]
-    hi = max(hi, lo, 0.000001)
-    return hi
-
-
-def _is_unknown_operator_name(value: object) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return True
-    bad = {
-        "unknown",
-        "unk",
-        "n/a",
-        "na",
-        "none",
-        "null",
-        "-",
-        "?",
-        "operator",
-        "undefined",
-    }
-    return text in bad
-
 
 def _encode_evidence_cursor(ordering_mode: str, primary_order: float, match_id: str, round_id: int, pr_id: int) -> str:
     payload = {
